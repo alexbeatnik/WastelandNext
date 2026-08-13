@@ -73,6 +73,20 @@ real titles are in CURRENT PAGE, and you click one of them verbatim:
 {"type":"browser_steps","steps":"CLICK the 'Exact Title As Listed' link"}
 \`\`\`
 
+A step reporting success means the engine found a target and acted on it. It
+does NOT mean the page did what you wanted. Always check CURRENT PAGE
+afterwards, and describe what you actually see rather than what you expected.
+
+If the page did not end up where you wanted, do not send the same steps again —
+the result will be the same. Change route instead:
+- pick a different label from CURRENT PAGE;
+- or NAVIGATE to a URL that already encodes the outcome. Sorting and filtering
+  on shops and catalogues are usually query parameters, which is far more
+  reliable than driving a custom dropdown. Example:
+  NAVIGATE to https://example.com/search?q=mower&sort=price_asc
+- if neither works, say plainly what you could not do. Two failed attempts is
+  enough; a third identical one will be refused.
+
 {"type":"browser_close","steps":""} closes the controlled browser.`;
 
 const WEB_LOOKUP = `

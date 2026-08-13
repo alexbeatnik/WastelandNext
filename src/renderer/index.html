@@ -112,7 +112,6 @@
           <div class="section-body">
             <label class="check"><input type="checkbox" id="set-browser-enabled" /> <span>Browser control</span></label>
             <label class="check"><input type="checkbox" id="set-browser-headless" /> <span>Headless</span></label>
-            <label class="check"><input type="checkbox" id="set-skip-ads" /> <span>Skip YouTube ads</span></label>
             <label class="field">
               <span>CHROME PATH</span>
               <input id="set-chrome" type="text" placeholder="leave empty to auto-detect" />
@@ -135,17 +134,17 @@
           </div>
         </details>
 
-        <details class="section" open>
-          <summary>CHATS</summary>
-          <div class="section-body">
-            <button id="btn-new-chat" class="wide">[ NEW CHAT ]</button>
-            <div id="chat-list" class="chat-list"></div>
-          </div>
-        </details>
       </aside>
 
       <!-- ===================== CHAT ===================== -->
       <section class="panel panel-chat">
+        <div class="chat-bar">
+          <span class="caret">▤</span>
+          <select id="chat-select" title="Switch conversation"></select>
+          <button id="btn-new-chat" title="Start a new conversation">[ NEW ]</button>
+          <button id="btn-delete-chat" class="ghost danger" title="Delete this conversation">×</button>
+        </div>
+
         <div class="chat-log" id="chat-log"></div>
 
         <div class="ctx-row">

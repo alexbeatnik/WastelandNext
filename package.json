@@ -16,7 +16,6 @@
     "engine": "node scripts/build-manul-browser.mjs",
     "test": "node --test test/*.test.mjs",
     "smoke": "electron scripts/smoke.mjs",
-    "adskip:live": "node scripts/adskip-live.mjs",
     "dist": "node scripts/build-manul-browser.mjs && electron-builder --win",
     "postinstall": "node scripts/build-manul-browser.mjs --optional"
   },

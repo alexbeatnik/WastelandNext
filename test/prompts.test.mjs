@@ -92,3 +92,18 @@ test('the action fence is shown, and nothing forbids it', () => {
   // requires of it.
   assert.doesNotMatch(prompt, /no (markdown|code fences|fenced)/i);
 });
+
+test('the browser section says a resolved step is not a reached goal', () => {
+  // A model told "all steps succeeded" stops checking and repeats itself; this
+  // is what let one loop five times on a sort that never applied.
+  const prompt = buildSystemPrompt({ capabilities: { browser: true } });
+  assert.match(prompt, /does NOT mean the page did what you wanted/i);
+  assert.match(prompt, /check CURRENT PAGE/i);
+});
+
+test('the browser section offers a route out of a stuck interaction', () => {
+  const prompt = buildSystemPrompt({ capabilities: { browser: true } });
+  assert.match(prompt, /do not send the same steps again/i);
+  assert.match(prompt, /query parameters/i);
+  assert.match(prompt, /will be refused/i);
+});

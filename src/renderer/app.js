@@ -185,28 +185,33 @@ async function loadChat(id) {
   await refreshChats();
 }
 
+/**
+ * Fill the conversation picker.
+ *
+ * A chat is only created once something has been said in it, so a fresh one has
+ * no id yet — hence the placeholder entry. Without it the picker would show the
+ * previous conversation's name while the user typed into a new one.
+ */
 async function refreshChats() {
   const chats = await api.chats.list();
-  const list = $('chat-list');
-  list.replaceChildren();
+  const select = $('chat-select');
+  select.replaceChildren();
+
+  if (!state.chatId) {
+    const blank = el('option', '', '— new conversation —');
+    blank.value = '';
+    select.append(blank);
+  }
 
   for (const chat of chats) {
-    const row = el('div', `chat-item${chat.id === state.chatId ? ' active' : ''}`);
-    const title = el('span', 'title', chat.title || 'Untitled');
-    title.title = `${chat.turns} turn(s) · ${chat.updated ?? ''}`;
-    title.addEventListener('click', () => loadChat(chat.id));
-
-    const del = el('button', 'ghost danger', '×');
-    del.title = 'Delete this chat';
-    del.addEventListener('click', async () => {
-      await api.chats.remove(chat.id);
-      if (state.chatId === chat.id) await loadChat('');
-      else await refreshChats();
-    });
-
-    row.append(title, del);
-    list.append(row);
+    const option = el('option', '', chat.title || 'Untitled');
+    option.value = chat.id;
+    option.title = `${chat.turns} turn(s) · ${chat.updated ?? ''}`;
+    select.append(option);
   }
+
+  select.value = state.chatId;
+  $('btn-delete-chat').disabled = !state.chatId;
 }
 
 /* ============================ vault + hub ============================ */
@@ -605,7 +610,6 @@ function applySettings(settings) {
 
   $('set-browser-enabled').checked = settings.browserEnabled;
   $('set-browser-headless').checked = settings.browserHeadless;
-  $('set-skip-ads').checked = settings.skipYouTubeAds;
   $('set-chrome').value = settings.chromePath;
 
   $('set-allow-browser').checked = settings.allowBrowser;
@@ -887,6 +891,15 @@ function wire() {
   });
 
   $('btn-new-chat').addEventListener('click', () => loadChat(''));
+  $('chat-select').addEventListener('change', (event) => loadChat(event.target.value));
+
+  $('btn-delete-chat').addEventListener('click', async () => {
+    if (!state.chatId) return;
+    await api.chats.remove(state.chatId);
+    // Straight to a blank conversation: leaving the picker on a chat that no
+    // longer exists would show a transcript with nothing behind it.
+    await loadChat('');
+  });
 
   $('btn-compact').addEventListener('click', async () => {
     if (!state.chatId) return status('Nothing to compact.');
@@ -985,7 +998,6 @@ function wire() {
 
   bindCheck('set-browser-enabled', 'browserEnabled');
   bindCheck('set-browser-headless', 'browserHeadless');
-  bindCheck('set-skip-ads', 'skipYouTubeAds');
   bindCheck('set-allow-browser', 'allowBrowser');
   bindCheck('set-allow-lookup', 'allowWebLookup');
   bindCheck('set-allow-read', 'allowReadFile');

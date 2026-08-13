@@ -15,14 +15,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as config from '../config.mjs';
 import { describeSearch, findBindingEntry } from '../../shared/engine.mjs';
-import { SKIP_SELECTOR, isYouTubeUrl, skipLabel } from './adskip.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
 const BINARY = process.platform === 'win32' ? 'manul.exe' : 'manul';
-
-/** How often the page is checked for a skip button. */
-const AD_WATCH_MS = 2500;
 
 /**
  * Directories that may hold the staged `resources/`.
@@ -92,14 +88,9 @@ export function engineAvailable() {
  * Events: `state` ({open, mode, url}), `step` (one StepOutcome), `log`.
  */
 export class BrowserBridge extends EventEmitter {
-  /** Which pages the ad watcher acts on. Overridable so it can be tested. */
-  #isAdHost;
-
   #session = null;
   #opening = null;
   #url = '';
-  #adTimer = null;
-  #stepping = false;
 
   get open() {
     return Boolean(this.#session);
@@ -107,11 +98,6 @@ export class BrowserBridge extends EventEmitter {
 
   get status() {
     return { open: this.open, mode: this.#session?.mode ?? '', url: this.#url, engine: engineAvailable() };
-  }
-
-  constructor({ isAdHost = isYouTubeUrl } = {}) {
-    super();
-    this.#isAdHost = isAdHost;
   }
 
   /** Open the session if it isn't already. Concurrent callers share one open. */
@@ -150,7 +136,6 @@ export class BrowserBridge extends EventEmitter {
     // failure then looks like the app interfering with their session.
     this.#session = await Session.launch(options);
 
-    this.#startAdWatch();
     this.emit('state', this.status);
     return this.#session;
   }
@@ -164,33 +149,26 @@ export class BrowserBridge extends EventEmitter {
    */
   async runSteps(dslText, { signal } = {}) {
     const session = await this.ensureOpen();
-    this.#stepping = true;
     const lines = String(dslText)
       .split('\n')
       .map((l) => l.trim())
       .filter((l) => l && !l.startsWith('#'));
 
     const outcomes = [];
-    try {
-      for (const line of lines) {
-        if (signal?.aborted) break;
-        let outcome;
-        try {
-          outcome = await session.step(line);
-        } catch (err) {
-          outcome = { ok: false, step: line, action: '', value: '', url: this.#url, reason: '', error: err.message, score: 0, near: [] };
-        }
-        if (outcome.url) this.#url = outcome.url;
-        outcomes.push(outcome);
-        this.emit('step', outcome);
-        // A failed step invalidates every assumption the following ones make
-        // about where the browser is. Carrying on just piles up noise.
-        if (!outcome.ok) break;
+    for (const line of lines) {
+      if (signal?.aborted) break;
+      let outcome;
+      try {
+        outcome = await session.step(line);
+      } catch (err) {
+        outcome = { ok: false, step: line, action: '', value: '', url: this.#url, reason: '', error: err.message, score: 0, near: [] };
       }
-    } finally {
-      // In a `finally` because a listener throwing from `emit` would otherwise
-      // leave the flag set and silently disable the ad watcher for good.
-      this.#stepping = false;
+      if (outcome.url) this.#url = outcome.url;
+      outcomes.push(outcome);
+      this.emit('step', outcome);
+      // A failed step invalidates every assumption the following ones make
+      // about where the browser is. Carrying on just piles up noise.
+      if (!outcome.ok) break;
     }
 
     this.emit('state', this.status);
@@ -213,63 +191,7 @@ export class BrowserBridge extends EventEmitter {
     return session.readText(selector, { maxChars });
   }
 
-  /**
-   * Watch for YouTube's skip button and click it.
-   *
-   * Detect by selector, click by the label just read off the button: the engine
-   * targets visible text, so this needs no list of translations and never
-   * clicks something that is not there. Polling is the only option — the engine
-   * exposes no way to run a listener inside the page.
-   */
-  async #adTick() {
-    const session = this.#session;
-    // Never while a batch is running: the agent's steps assume a page state,
-    // and a click landing between them would undermine that.
-    if (!session || this.#stepping || !config.get('skipYouTubeAds')) return;
-
-    const { url } = await session.state();
-    if (!this.#isAdHost(url)) return;
-
-    // `readText` falls back to the whole body when its selector matches
-    // nothing — the engine documents this — so an absent button reads as the
-    // page's own text. Reading the body as well is what tells the two apart;
-    // without it the watcher would pick the first short line off YouTube and
-    // click it every few seconds.
-    const [scoped, whole] = await Promise.all([
-      session.readText(SKIP_SELECTOR, { maxChars: 120 }),
-      session.readText('body', { maxChars: 120 }),
-    ]);
-    if (!scoped.trim() || scoped === whole || scoped.length >= whole.length) return;
-
-    const label = skipLabel(scoped);
-    if (!label) return;
-
-    const outcome = await session.step(`CLICK the '${label}'`);
-    if (outcome?.ok) this.emit('log', `skipped a YouTube ad ('${label}')`);
-  }
-
-  #startAdWatch() {
-    if (this.#adTimer) return;
-
-    const tick = () =>
-      this.#adTick().catch(() => {
-        // A page mid-navigation, a selector that matched nothing, a target that
-        // went away. The next tick finds it again; a failed poll is not news.
-      });
-
-    this.#adTimer = setInterval(tick, AD_WATCH_MS);
-    // `unref` so a running watcher can never hold the process open at exit.
-    this.#adTimer.unref?.();
-  }
-
-  #stopAdWatch() {
-    if (!this.#adTimer) return;
-    clearInterval(this.#adTimer);
-    this.#adTimer = null;
-  }
-
   async close() {
-    this.#stopAdWatch();
     const session = this.#session;
     this.#session = null;
     this.#url = '';

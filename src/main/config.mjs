@@ -47,13 +47,6 @@ export const DEFAULTS = {
   browserEnabled: true,
   browserHeadless: false,
   chromePath: '',
-  /**
-   * Click YouTube's skip button as soon as it appears.
-   *
-   * Scoped to YouTube: a general "click anything that says skip" would
-   * eventually click something that matters somewhere nobody was considering.
-   */
-  skipYouTubeAds: true,
 
   /** Agent capabilities */
   allowBrowser: true,

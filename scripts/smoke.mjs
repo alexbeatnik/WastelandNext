@@ -150,8 +150,13 @@ async function checkChatControls(window) {
   say('');
   say('Chat controls');
 
+  // Pick the seeded conversation from the picker above the transcript.
   const before = await window.webContents.executeJavaScript(`(() => {
-    document.querySelector('.chat-item .title').click();
+    const select = document.getElementById('chat-select');
+    const seeded = [...select.options].find((o) => o.value);
+    if (!seeded) return false;
+    select.value = seeded.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
     return true;
   })()`);
   assertOk(before);
@@ -159,11 +164,14 @@ async function checkChatControls(window) {
 
   const loaded = await window.webContents.executeJavaScript(`(() => ({
     turns: document.querySelectorAll('#chat-log .turn').length,
-    active: document.querySelectorAll('.chat-item.active').length,
+    selected: document.getElementById('chat-select').value,
+    label: document.getElementById('chat-select').selectedOptions[0]?.textContent ?? '',
+    deletable: !document.getElementById('btn-delete-chat').disabled,
     ctx: document.getElementById('ctx-label').textContent,
   }))()`);
   check(`seeded chat renders — ${loaded.turns} turn(s)`, loaded.turns === 3);
-  check('the loaded chat is marked active', loaded.active === 1);
+  check(`the picker shows the open conversation — ${loaded.label}`, Boolean(loaded.selected));
+  check('an open conversation can be deleted', loaded.deletable);
 
   // Push a real context reading in first: checking that the meter reads 0%
   // after NEW CHAT proves nothing if it was never anything else.
@@ -178,12 +186,18 @@ async function checkChatControls(window) {
   const fresh = await window.webContents.executeJavaScript(`(() => ({
     turns: document.querySelectorAll('#chat-log .turn').length,
     cards: document.querySelectorAll('#chat-log .action-card').length,
-    active: document.querySelectorAll('.chat-item.active').length,
+    selected: document.getElementById('chat-select').value,
+    label: document.getElementById('chat-select').selectedOptions[0]?.textContent ?? '',
+    options: document.getElementById('chat-select').options.length,
+    deletable: !document.getElementById('btn-delete-chat').disabled,
     ctx: document.getElementById('ctx-label').textContent,
     input: document.getElementById('input').value,
   }))()`);
   check('NEW CHAT empties the transcript', fresh.turns === 0 && fresh.cards === 0, `${fresh.turns} turn(s)`);
-  check('NEW CHAT deselects the old chat', fresh.active === 0, `${fresh.active} still active`);
+  check(`NEW CHAT selects the placeholder — ${fresh.label}`, fresh.selected === '');
+  // The seeded chat is still there to go back to; only the selection moved.
+  check(`the earlier conversation is still listed — ${fresh.options} entries`, fresh.options >= 2);
+  check('there is nothing to delete on a blank conversation', !fresh.deletable);
   check('NEW CHAT clears the composer', fresh.input === '', JSON.stringify(fresh.input));
 
   // A fresh chat still costs the system prompt, so the assertion is that the
@@ -430,7 +444,7 @@ app.whenReady().then(async () => {
     // Nothing has been searched for yet, so an empty result list is correct.
     check('search results start empty', probe.results === 0, `${probe.results} entries`);
     check('vault section rendered', probe.vault > 0);
-    check('all left-panel sections present', probe.sections === 7, `${probe.sections} sections`);
+    check('all left-panel sections present', probe.sections === 6, `${probe.sections} sections`);
     check('composer present', probe.composer);
     check('model search controls present', probe.search);
     check('the open-a-file control is present', probe.openFile);

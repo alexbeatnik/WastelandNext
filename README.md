@@ -23,11 +23,6 @@ Type a request. The model answers, or emits a fenced action block and the app ca
 The browser is always one the app launches itself; there is no attach-to-your-own-Chrome mode, so a failure can never
 look like the app meddling with tabs you were using.
 
-**BROWSER → Skip YouTube ads** (on by default) watches the controlled browser and clicks the skip button as soon as it
-appears. It acts only on youtube.com and youtube-nocookie.com, detects the button by selector and then clicks it by the
-text it just read off it — so it works in any interface language without a list of translations, and never clicks
-something that is not there. It stands aside while the agent is running its own steps.
-
 Each capability has its own toggle in the left panel. A disabled capability is left out of the system prompt entirely
 rather than described and then refused, so the model does not reach for tools it cannot have.
 
@@ -128,6 +123,10 @@ inference. The build is unsigned — Windows SmartScreen will warn on first run.
    deletes. If the drive is unplugged the row stays, struck through and marked missing, rather than vanishing as though
    you had never added it.
 3. Type. `Enter` sends; `Shift+Enter` inserts a newline.
+
+Conversations live in a picker directly above the transcript, with `[ NEW ]` and a delete beside it — the list belongs
+next to the thing it selects, not at the bottom of a settings rail. A chat is created lazily on the first message, so a
+fresh one shows as `— new conversation —` until it has something to be named after.
 
 ## Context sizing
 
@@ -231,9 +230,8 @@ src/
 ## Testing
 
 ```bash
-npm test       # 239 unit tests, no Electron, no network
+npm test       # 247 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
-npm run adskip:live  # drives a real browser against a local page to test the ad watcher
 ```
 
 `npm test` covers the pure logic: action extraction and its JSON repair, `<think>` splitting, markdown parsing, chat
@@ -245,10 +243,6 @@ parsing and the context/GPU arithmetic, crash-log summarising, download resume, 
 bridge, an IPC channel renamed on one side only, a layout that breaks at one screen shape, or a chat control that stops
 resetting what it should. It clicks NEW CHAT, presses Enter, resizes the window through seven screen shapes, and checks
 that a reply containing `<img onerror=…>` is drawn as text rather than run.
-
-`npm run adskip:live` is the one test that needs a real browser: it serves a local page carrying the player's skip
-button and checks the watcher clicks it, leaves a neighbouring button alone, and does nothing at all on a page that is
-not YouTube.
 
 ## How it differs from the original
 
@@ -272,9 +266,12 @@ not YouTube.
   a wrong number would be worse than none — Windows reports 4 GB for anything larger.
 - Only Windows is packaged so far. macOS and Linux targets are a config change away but have not been built or tested.
 - Builds are unsigned; there is no auto-update feed.
-- Compaction is triggered by an estimated token count, not a real one, until the endpoint reports usage.
-- The ad watcher polls every 2.5 s, because the engine offers no way to run a listener inside the page. A skip can
-  therefore take a couple of seconds rather than being instant.
+- Compaction is triggered by an estimated token count (characters ÷ 3.6), not a real one — the endpoint only reports
+  actual usage after the fact.
+- There is no automatic ad skipping. It was built and withdrawn: the engine can find an element by CSS selector and it
+  can click one by its visible label, but it cannot click *the element the selector found*. On a page where an ad
+  overlays the player, the label resolved to the ad instead of the skip button and opened the advertiser in a new tab,
+  repeatedly. Doing this properly needs a click-by-selector primitive in the engine.
 
 ## License
 

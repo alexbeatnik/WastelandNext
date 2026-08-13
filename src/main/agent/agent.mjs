@@ -15,13 +15,34 @@ import { estimateTokens, streamChat } from '../llm/client.mjs';
 import { readForModel } from './readfile.mjs';
 import { COMPACT_PROMPT, buildSystemPrompt, pageMapContext, titlePrompt } from './prompts.mjs';
 import { extractActions, splitNarration, splitThinking, stripActionBlocks } from './actions.mjs';
+import { BatchGuard } from './batch-guard.mjs';
 
 /** How many times one user message may bounce back through the model. */
 const MAX_FOLLOW_UPS = 3;
 /** Above this share of the context window, compact before the next send. */
 const COMPACT_THRESHOLD = 0.75;
+/** Messages kept verbatim when compacting — the last two exchanges. */
+const KEEP_MESSAGES = 4;
 /** Shell commands are killed rather than left hanging the pipeline. */
 const SHELL_TIMEOUT_MS = 120_000;
+
+/**
+ * Is it time to compress the conversation?
+ *
+ * Separated out because it is a policy decision rather than plumbing, and
+ * because the interesting cases — a long single message, a conversation too
+ * short to compress, a window reported by the endpoint rather than configured
+ * — are worth testing without a model attached.
+ *
+ * A conversation with nothing older than the kept tail cannot be compacted: the
+ * summary would replace the very messages it summarised, and the prompt would
+ * not shrink.
+ */
+export function shouldCompact(usage, messageCount, { threshold = COMPACT_THRESHOLD, keep = KEEP_MESSAGES } = {}) {
+  if (!usage?.max) return false;
+  if (messageCount <= keep + 2) return false;
+  return usage.used / usage.max >= threshold;
+}
 
 export class Agent extends EventEmitter {
   #server;
@@ -30,6 +51,8 @@ export class Agent extends EventEmitter {
   #abort = null;
   #busy = false;
   #pendingShell = new Map();
+  /** Refuses a browser batch identical to one already run this turn. */
+  #batchGuard = new BatchGuard();
 
   constructor({ server, browser, lookupBrowser }) {
     super();
@@ -133,6 +156,7 @@ export class Agent extends EventEmitter {
 
     this.#busy = true;
     this.#abort = new AbortController();
+    this.#batchGuard.beginTurn();
 
     try {
       let chat = chats.read(chatId) ?? chats.create(chats.titleFromPrompt(prompt));
@@ -142,7 +166,6 @@ export class Agent extends EventEmitter {
       const isFirstTurn = chat.messages.length === 1;
       this.#say('turn:start', { chatId: chat.id, title: chat.title });
 
-      await this.#maybeCompact(chat.id);
       await this.#runTurn(chat.id, 0);
 
       if (isFirstTurn) await this.#retitle(chat.id);
@@ -157,8 +180,15 @@ export class Agent extends EventEmitter {
 
   /** One model round: stream, persist, dispatch, recurse if an action fed back. */
   async #runTurn(chatId, depth) {
-    const chat = chats.read(chatId);
     const pageContext = this.#browser.open ? pageMapContext(await this.#browser.pageMap()) : '';
+
+    // Checked here rather than only at the start of `send`, because a browsing
+    // turn grows its own history: every batch appends a page map, and three
+    // follow-ups can carry a conversation past the window without a single new
+    // message from the user.
+    await this.#maybeCompact(chatId, { pageContext });
+
+    const chat = chats.read(chatId);
     const messages = this.#buildMessages(chat, pageContext);
 
     this.#say('ctx', this.#contextUsage(messages));
@@ -236,6 +266,16 @@ export class Agent extends EventEmitter {
   }
 
   async #doBrowserSteps(steps) {
+    // A batch identical to one already run this turn cannot produce a different
+    // result, and a model that cannot tell "the click resolved" from "the page
+    // changed" will send it again — five times, in the session this guard was
+    // written for. The decision lives in `batch-guard.mjs`.
+    const refusal = this.#batchGuard.check(steps);
+    if (refusal) {
+      this.#say('action:result', { type: 'browser_steps', ok: false, summary: 'identical batch already run' });
+      return { feedback: refusal };
+    }
+
     this.#status('Browser…');
     let outcomes;
     try {
@@ -256,7 +296,12 @@ export class Agent extends EventEmitter {
     const lines = [
       failed
         ? `[BROWSER] Step failed: ${failed.step}\nReason: ${failed.error || failed.reason || 'no element matched'}`
-        : `[BROWSER] All ${outcomes.length} step(s) succeeded.`,
+        : // Deliberately not "succeeded": the engine reports that it resolved a
+          // target and acted on it, which is not the same as the page having
+          // done what was wanted. Told the stronger thing, a model stops
+          // checking and repeats itself.
+          `[BROWSER] All ${outcomes.length} step(s) resolved and were acted on. That does NOT prove the page did ` +
+          'what you intended — check CURRENT PAGE below before saying it worked.',
     ];
     if (context) {
       lines.push(
@@ -403,15 +448,19 @@ export class Agent extends EventEmitter {
    * The summary replaces the messages it covers, so the prefix stays roughly
    * constant however long the conversation runs.
    */
-  async #maybeCompact(chatId, { force = false } = {}) {
+  async #maybeCompact(chatId, { force = false, pageContext = '' } = {}) {
     const chat = chats.read(chatId);
     if (!chat) return false;
 
-    const messages = this.#buildMessages(chat, '');
+    // The page context counts. It is part of every prompt and, on a busy site,
+    // it is the largest part — estimating without it is what let a browsing
+    // turn sail past the threshold without ever triggering.
+    const messages = this.#buildMessages(chat, pageContext);
     const usage = this.#contextUsage(messages);
-    const keep = 4; // the last two exchanges
-    if (!force && (usage.percent < COMPACT_THRESHOLD * 100 || chat.messages.length <= keep + 2)) return false;
-    if (chat.messages.length <= keep + 1) return false;
+    if (!force && !shouldCompact(usage, chat.messages.length)) return false;
+    if (chat.messages.length <= KEEP_MESSAGES + 1) return false;
+
+    const keep = KEEP_MESSAGES;
 
     this.#status('Compacting…');
     const older = chat.messages.slice(0, -keep);

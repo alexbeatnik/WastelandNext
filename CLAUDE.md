@@ -87,6 +87,11 @@ reply that itself begins with `> ` cannot be mistaken for a new turn. There is a
 **`web_lookup` uses a second, headless browser.** Its entire purpose is not disturbing the tab the user is looking at, so
 it must never share the visible session.
 
+**A step reporting `ok` means the engine resolved a target and acted on it — not that the page did what was wanted.**
+The feedback says so in those words, because an earlier "All N step(s) succeeded" let a model conclude a sort had
+applied when it had not, and repeat the identical batch five times. `BatchGuard` refuses an exact repeat within a turn
+and names a way forward; a bare refusal tends to produce the same batch again, apologetically.
+
 **The follow-up loop is bounded** (`MAX_FOLLOW_UPS = 3`). A model that keeps emitting actions after every result will
 otherwise loop forever.
 
@@ -101,6 +106,11 @@ forever. `turn:end` is handled in the renderer as a second backstop.
 the chat, so a failed send leaves no orphan user turn in the history — which is also what lets the renderer hand the
 text back to the composer. The renderer keys that decision on whether `turn:start` arrived: after it, the message is
 recorded and returning it would duplicate it.
+
+**Compaction is checked before every model call, not only at the start of a turn.** A browsing turn grows its own
+history — each batch appends a page map — so three follow-ups can cross the window with no new user message; a real
+session reached 8562 of 15360 without ever triggering. The estimate includes the page context for the same reason: it
+is part of every prompt and, on a busy site, the largest part. `shouldCompact` is exported and tested on its own.
 
 **`compact()` refuses while a turn is running.** It rewrites the whole message list, and a turn appending to the same
 file at that moment loses messages.
@@ -127,6 +137,12 @@ payloads rather than materialising them.
 
 With AUTO off the slider value is passed through **exactly**, including one the model cannot honour. An explicit
 setting that is silently overridden is worse than one that fails loudly.
+
+**Detecting an element by selector and then clicking it by label is not sound, and must not be reintroduced.** The
+engine offers both, but nothing ties them together: the label is re-resolved by the scorer and may land on a different
+element. The YouTube ad skipper was built this way and withdrawn — on a page where an ad overlays the player it clicked
+the ad, opening the advertiser in a new tab every 2.5 seconds. A convenience whose failure mode is worse than the
+problem it solves does not ship. Doing it properly needs a click-by-selector command in the engine.
 
 **`readText` falls back to the whole page body when its selector matches
 nothing** — the engine documents this in `page_text_probe.js`. Presence cannot be inferred from a non-empty answer:
@@ -252,9 +268,6 @@ Three levels, and each exists because the one below it cannot see the failure:
 `npm run smoke` — boots the real window offscreen and drives it. This is what catches a renamed IPC channel, a renderer
 that throws on boot, a layout that breaks at one screen shape, or a control that stops resetting what it should. Both of
 these must pass.
-
-`npm run adskip:live` — a real Chrome against a locally served page. Kept separate because it needs a browser and takes
-half a minute; run it when touching `browser/`.
 
 When a fix is for something a user reported, the test should reproduce *their* case, not a tidy abstraction of it. The
 numbers in `gpu.test.mjs` are a 25 GB model on a 12 GB card because that is what failed; the log excerpt in

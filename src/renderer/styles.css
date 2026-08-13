@@ -770,6 +770,24 @@ input[type='checkbox']:checked {
 
 /* ============================ Context + composer ============================ */
 
+/* The conversation picker, above the transcript it belongs to. */
+.chat-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.6rem;
+  border-bottom: 1px solid var(--amber-faint);
+}
+
+.chat-bar .caret {
+  color: var(--amber-dim);
+}
+
+.chat-bar select {
+  flex: 1;
+  min-width: 0;
+}
+
 .ctx-row {
   display: flex;
   align-items: center;
