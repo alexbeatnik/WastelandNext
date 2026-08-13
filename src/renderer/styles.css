@@ -1,0 +1,823 @@
+/*
+ * Amber CRT, carried over from the original terminal.
+ *
+ * Layout note: the workspace is a grid whose column count is chosen by aspect
+ * ratio, not width alone. A 1280×1024 4:3 panel and a 2560×1080 ultrawide can
+ * report similar widths while wanting completely different shapes — the first
+ * needs vertical room and a narrow rail, the second has room for a third
+ * column. Rules keyed only on width get that backwards.
+ */
+
+:root {
+  --amber: #ffb000;
+  --amber-bright: #ffd060;
+  --amber-dim: #996a00;
+  --amber-faint: #5a3d00;
+  --bg: #050505;
+  --bg-panel: #0a0a0a;
+  --bg-deep: #000000;
+  --warn: #ff6020;
+  --ok: #66cc66;
+  --add: #aacc00;
+
+  --left-w: 21rem;
+  --gap: 0.7rem;
+  --radius: 0;
+  --font: 'DejaVu Sans Mono', 'Cascadia Mono', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+  --fs: clamp(12px, 0.92vw + 0.35vh, 16px);
+  --glow: 0 0 5px rgba(255, 176, 0, 0.45);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--amber);
+  font-family: var(--font);
+  font-size: var(--fs);
+  line-height: 1.35;
+  text-shadow: var(--glow);
+  display: flex;
+  flex-direction: column;
+}
+
+/* ============================ CRT overlay ============================ */
+
+.crt {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  pointer-events: none;
+  background:
+    linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.16) 50%),
+    linear-gradient(90deg, rgba(255, 0, 0, 0.035), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.035));
+  background-size: 100% 3px, 3px 100%;
+  box-shadow: inset 0 0 180px rgba(0, 0, 0, 0.85);
+  animation: flicker 6s infinite;
+}
+
+body.no-crt .crt {
+  display: none;
+}
+
+@keyframes flicker {
+  0%, 48%, 100% { opacity: 1; }
+  50% { opacity: 0.93; }
+  52% { opacity: 1; }
+  85% { opacity: 0.97; }
+}
+
+@keyframes blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crt { animation: none; }
+  .pulse { animation: none; }
+}
+
+/* ============================ Top bar ============================ */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1.1rem;
+  padding: 0.35rem 0.8rem;
+  border-bottom: 1px dashed var(--amber-dim);
+  color: var(--amber-dim);
+  text-transform: uppercase;
+  font-size: 0.86em;
+  flex-wrap: wrap;
+}
+
+.brand {
+  color: var(--amber);
+  letter-spacing: 0.12em;
+  font-weight: bold;
+}
+
+.brand .version {
+  color: var(--amber-faint);
+  margin-left: 0.4em;
+}
+
+.topbar .stat {
+  white-space: nowrap;
+}
+
+.topbar .stat.warn { color: var(--warn); }
+.topbar .stat.ok { color: var(--ok); }
+
+.pulse {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  background: var(--amber);
+  border-radius: 50%;
+  margin-right: 0.45em;
+  box-shadow: 0 0 6px var(--amber);
+  animation: blink 1.6s step-end infinite;
+}
+
+#toggle-panel {
+  margin-left: auto;
+}
+
+/* ============================ Workspace grid ============================ */
+
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: var(--left-w) minmax(0, 1fr);
+  gap: var(--gap);
+  padding: var(--gap);
+}
+
+.workspace.panel-hidden {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workspace.panel-hidden .panel-left {
+  display: none;
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--amber-faint);
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-left {
+  overflow-y: auto;
+  padding: 0.4rem;
+  gap: 0.35rem;
+}
+
+.panel-chat {
+  overflow: hidden;
+}
+
+/* The third column only exists where there is genuinely room for it. */
+.panel-activity {
+  display: none;
+  overflow: hidden;
+}
+
+/* Widescreen: a dedicated activity column, and the chat gets a reading width
+   so a 2560px monitor does not produce 300-character lines. */
+@media (min-aspect-ratio: 16 / 10) and (min-width: 1500px) {
+  .workspace {
+    grid-template-columns: var(--left-w) minmax(0, 1fr) 22rem;
+  }
+  .workspace.panel-hidden {
+    grid-template-columns: minmax(0, 1fr) 22rem;
+  }
+  .panel-activity {
+    display: flex;
+    flex-direction: column;
+  }
+  .chat-log > * {
+    max-width: 90ch;
+  }
+}
+
+/* 4:3 and taller: vertical space is the scarce resource, so the rail narrows,
+   padding tightens, and the composer keeps more of the height for the log. */
+@media (max-aspect-ratio: 4 / 3) {
+  :root {
+    --left-w: 17.5rem;
+    --gap: 0.45rem;
+    --fs: clamp(12px, 1.05vw, 15px);
+  }
+  .section-body {
+    gap: 0.3rem;
+    padding: 0.35rem 0.4rem 0.5rem;
+  }
+  .topbar {
+    gap: 0.7rem;
+    padding: 0.25rem 0.6rem;
+  }
+  .turn {
+    padding: 0.4rem 0.55rem;
+  }
+}
+
+/* Narrow windows: the rail becomes an overlay so the chat keeps full width. */
+@media (max-width: 900px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .panel-left {
+    position: fixed;
+    top: 2.2rem;
+    bottom: 0;
+    left: 0;
+    width: min(20rem, 88vw);
+    z-index: 120;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.9);
+  }
+  .workspace.panel-hidden .panel-left {
+    display: none;
+  }
+}
+
+/* ============================ Left panel sections ============================ */
+
+.section {
+  border: 1px solid var(--amber-faint);
+  background: var(--bg-deep);
+}
+
+.section > summary {
+  cursor: pointer;
+  padding: 0.3rem 0.5rem;
+  color: var(--amber-bright);
+  letter-spacing: 0.08em;
+  font-size: 0.88em;
+  list-style: none;
+  user-select: none;
+  background: #111;
+  border-bottom: 1px solid transparent;
+}
+
+.section[open] > summary {
+  border-bottom-color: var(--amber-faint);
+}
+
+.section > summary::marker,
+.section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.section > summary::before {
+  content: '▸ ';
+  color: var(--amber-dim);
+}
+
+.section[open] > summary::before {
+  content: '▾ ';
+}
+
+.section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem;
+}
+
+/* ============================ Controls ============================ */
+
+button {
+  font: inherit;
+  color: var(--amber);
+  background: #333;
+  border: 1px solid var(--amber-dim);
+  padding: 0.22rem 0.5rem;
+  cursor: pointer;
+  text-shadow: var(--glow);
+  white-space: nowrap;
+}
+
+button:hover:not(:disabled) {
+  background: #444;
+  border-color: var(--amber);
+}
+
+button:active:not(:disabled) {
+  background: #000;
+}
+
+button:disabled {
+  color: var(--amber-faint);
+  border-color: var(--amber-faint);
+  cursor: default;
+}
+
+button.wide {
+  width: 100%;
+}
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+button.ghost:hover {
+  border-color: var(--amber-dim);
+  background: transparent;
+}
+
+button.danger {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+button.approve {
+  color: var(--add);
+  border-color: var(--add);
+}
+
+button.active {
+  background: var(--amber);
+  color: #000;
+  text-shadow: none;
+  border-color: var(--amber);
+}
+
+.row {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.84em;
+  color: var(--amber-dim);
+  text-transform: uppercase;
+}
+
+.field b {
+  color: var(--amber);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.9em;
+  cursor: pointer;
+}
+
+input[type='text'],
+input[type='number'],
+textarea,
+select {
+  font: inherit;
+  font-size: 0.95em;
+  color: var(--amber);
+  background: var(--bg-deep);
+  border: 1px solid var(--amber-faint);
+  padding: 0.25rem 0.35rem;
+  width: 100%;
+  text-shadow: var(--glow);
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--amber);
+}
+
+textarea {
+  resize: vertical;
+}
+
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 14px;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  height: 6px;
+  background: #333;
+  border: 1px solid var(--amber-faint);
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 16px;
+  margin-top: -6px;
+  background: var(--amber);
+  border: none;
+}
+
+input[type='checkbox'] {
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border: 1px solid var(--amber-dim);
+  background: #333;
+  display: inline-block;
+  flex: none;
+  cursor: pointer;
+}
+
+input[type='checkbox']:checked {
+  background: var(--amber);
+  box-shadow: inset 0 0 0 2px #000;
+}
+
+.muted {
+  color: var(--amber-dim);
+  font-size: 0.85em;
+}
+
+/* ============================ Lists ============================ */
+
+.repo-list,
+.vault-list,
+.chat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
+.repo-item {
+  border: 1px solid transparent;
+  padding: 0.2rem 0.3rem;
+  cursor: pointer;
+}
+
+.repo-item:hover {
+  border-color: var(--amber-faint);
+}
+
+.repo-item.selected {
+  border-color: var(--amber);
+}
+
+.repo-item .repo {
+  display: block;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+/* Search results: a clickable header that reveals the repository's files. */
+.search-head {
+  cursor: pointer;
+}
+
+.search-head::before {
+  content: '▸ ';
+  color: var(--amber-dim);
+}
+
+.file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding-left: 0.9rem;
+}
+
+.file-list:not(:empty) {
+  margin-top: 0.25rem;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--amber-faint);
+  padding: 0.15rem 0.3rem;
+}
+
+.file-item .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82em;
+}
+
+.divider {
+  border-top: 1px dashed var(--amber-faint);
+  padding-top: 0.35rem;
+  margin-top: 0.15rem;
+  letter-spacing: 0.08em;
+  font-size: 0.78em;
+}
+
+#search-results {
+  max-height: 22rem;
+}
+
+.repo-item .note {
+  display: block;
+  color: var(--amber-dim);
+  font-size: 0.78em;
+}
+
+.vault-item,
+.chat-item {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--amber-faint);
+  padding: 0.2rem 0.3rem;
+}
+
+.vault-item .name,
+.chat-item .title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.86em;
+}
+
+.vault-item.loaded {
+  border-color: var(--amber);
+}
+
+/* A registered file whose drive is unplugged: still listed, plainly unusable. */
+.vault-item.missing {
+  border-style: dashed;
+}
+
+.vault-item.missing .name {
+  color: var(--amber-faint);
+  text-decoration: line-through;
+}
+
+.chat-item.active {
+  border-color: var(--amber);
+}
+
+.chat-item .title {
+  cursor: pointer;
+}
+
+.meter {
+  height: 8px;
+  border: 1px solid var(--amber-faint);
+  background: #222;
+}
+
+.meter > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--amber);
+}
+
+.meter.warn > i { background: #ff8000; }
+.meter.hot > i { background: #cc4400; }
+
+/* ============================ Chat ============================ */
+
+.chat-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.turn {
+  border: 1px solid var(--amber-faint);
+  padding: 0.45rem 0.6rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.turn.user {
+  border-color: var(--amber-dim);
+  color: var(--amber-bright);
+}
+
+.turn.user::before {
+  content: '> ';
+  color: var(--amber-dim);
+}
+
+.turn.assistant {
+  border-color: var(--amber-faint);
+}
+
+.turn.error {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.turn.think {
+  border-style: dashed;
+  border-color: var(--amber-faint);
+  color: var(--amber-dim);
+  font-size: 0.92em;
+}
+
+.turn.think::before {
+  content: '▒ thinking\A';
+  white-space: pre;
+  color: var(--amber-faint);
+  font-size: 0.85em;
+}
+
+.turn.tool {
+  border-color: var(--amber-faint);
+  color: var(--amber-dim);
+  font-size: 0.88em;
+  max-height: 8rem;
+  overflow: auto;
+}
+
+.turn .cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  background: var(--amber);
+  vertical-align: text-bottom;
+  animation: blink 1s step-end infinite;
+}
+
+.action-card {
+  border: 1px solid var(--amber);
+  padding: 0.35rem 0.5rem;
+  font-size: 0.86em;
+  background: #0d0a04;
+}
+
+.action-card.failed {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.action-card .kind {
+  color: var(--amber-bright);
+  letter-spacing: 0.08em;
+}
+
+.action-card pre {
+  margin: 0.3rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--amber-dim);
+}
+
+/* ============================ Context + composer ============================ */
+
+.ctx-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.6rem;
+  border-top: 1px solid var(--amber-faint);
+}
+
+.ctx-row .meter {
+  flex: 1;
+}
+
+.composer {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  border-top: 1px solid var(--amber-faint);
+}
+
+.composer .caret {
+  color: var(--amber-bright);
+  padding-top: 0.25rem;
+}
+
+.composer textarea {
+  flex: 1;
+  min-height: 2.6em;
+  max-height: 40vh;
+}
+
+.composer.expanded textarea {
+  min-height: 40vh;
+}
+
+.composer-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+button.send {
+  min-width: 2.6rem;
+  font-size: 1.05em;
+}
+
+button.send.stop {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.status-line {
+  padding: 0.15rem 0.6rem 0.4rem;
+  min-height: 1.3em;
+}
+
+/* ============================ Activity column ============================ */
+
+.activity-head {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--amber-faint);
+  color: var(--amber-bright);
+  font-size: 0.85em;
+  letter-spacing: 0.08em;
+}
+
+.activity-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.82em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.activity-log .line {
+  color: var(--amber-dim);
+  overflow-wrap: anywhere;
+}
+
+.activity-log .line.ok { color: var(--ok); }
+.activity-log .line.bad { color: var(--warn); }
+
+/* ============================ Modal ============================ */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+.modal-box {
+  background: var(--bg-panel);
+  border: 1px solid var(--amber);
+  padding: 1rem 1.2rem;
+  width: min(46rem, 92vw);
+  box-shadow: 0 0 40px rgba(255, 176, 0, 0.15);
+}
+
+.modal-box h2 {
+  margin: 0 0 0.3rem;
+  font-size: 1em;
+  letter-spacing: 0.1em;
+  color: var(--amber-bright);
+}
+
+.modal-box pre {
+  background: var(--bg-deep);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  padding: 0.5rem;
+  margin: 0.6rem 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow: auto;
+}
+
+/* ============================ Scrollbars ============================ */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--amber-dim);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--amber);
+}

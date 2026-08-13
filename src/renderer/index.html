@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:;" />
+    <title>Wasteland Next</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="crt" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <span class="brand">WASTELAND<span class="version">NEXT</span></span>
+      <span class="stat" id="stat-sys"><i class="pulse"></i>SYS: ONLINE</span>
+      <span class="stat" id="stat-model">MODEL: NONE</span>
+      <span class="stat" id="stat-browser">BROWSER: IDLE</span>
+      <span class="stat" id="stat-engine">ENGINE: —</span>
+      <button class="ghost" id="toggle-panel" title="Toggle the left panel">☰</button>
+    </header>
+
+    <main class="workspace" id="workspace">
+      <!-- ===================== LEFT PANEL ===================== -->
+      <aside class="panel panel-left" id="panel-left">
+        <details class="section" open>
+          <summary>FIND A MODEL</summary>
+          <div class="section-body">
+            <label class="field">
+              <span>SEARCH HUGGINGFACE</span>
+              <div class="row">
+                <input id="model-search" type="text" placeholder="qwen 7b instruct, gemma, coder…" />
+                <button id="btn-search">[ FIND ]</button>
+              </div>
+            </label>
+            <div id="search-status" class="muted"></div>
+            <div id="search-results" class="repo-list"></div>
+
+            <label class="field divider">
+              <span>OR PASTE AN ID OR URL</span>
+              <input id="custom-model" type="text" placeholder="owner/repo or https://huggingface.co/…" />
+            </label>
+            <div class="row">
+              <button id="btn-download">[ DOWNLOAD ]</button>
+              <button id="btn-cancel-download" class="danger" hidden>[ CANCEL ]</button>
+            </div>
+            <div id="download-status" class="muted"></div>
+            <div class="meter" id="download-meter" hidden><i></i></div>
+          </div>
+        </details>
+
+        <details class="section" open>
+          <summary>LOCAL VAULT</summary>
+          <div class="section-body">
+            <div id="vault-list" class="vault-list"></div>
+            <div class="row">
+              <button id="btn-add-file">[ OPEN FILE… ]</button>
+              <button id="btn-refresh-vault">[ REFRESH ]</button>
+            </div>
+            <div id="vault-status" class="muted"></div>
+          </div>
+        </details>
+
+        <details class="section">
+          <summary>INFERENCE</summary>
+          <div class="section-body">
+            <div class="field">
+              <span>LLAMA-SERVER <b id="tool-state">checking…</b></span>
+              <div class="row">
+                <button id="btn-fetch-llama">[ DOWNLOAD LLAMA-SERVER ]</button>
+              </div>
+              <div id="tool-status" class="muted"></div>
+              <div class="meter" id="tool-meter" hidden><i></i></div>
+            </div>
+            <div class="field">
+              <span>N_CTX <b id="val-nctx">8192</b></span>
+              <label class="check"><input type="checkbox" id="set-auto-ctx" /> <span>AUTO — size from the model</span></label>
+              <input id="set-nctx" type="range" min="512" max="131072" step="512" value="8192" />
+              <div id="ctx-explain" class="muted"></div>
+            </div>
+            <label class="field">
+              <span>TEMP <b id="val-temp">0.70</b></span>
+              <input id="set-temp" type="range" min="0.01" max="2" step="0.01" value="0.7" />
+            </label>
+            <label class="field">
+              <span>GPU LAYERS <b id="val-ngl">999</b></span>
+              <input id="set-ngl" type="range" min="0" max="999" step="1" value="999" />
+            </label>
+            <label class="field">
+              <span>EXTERNAL ENDPOINT</span>
+              <input id="set-endpoint" type="text" placeholder="http://127.0.0.1:11434 (overrides local)" />
+            </label>
+            <label class="field">
+              <span>LLAMA-SERVER PATH</span>
+              <input id="set-llama-path" type="text" placeholder="leave empty to use PATH" />
+            </label>
+          </div>
+        </details>
+
+        <details class="section">
+          <summary>SYSTEM PROMPT</summary>
+          <div class="section-body">
+            <textarea id="set-system-prompt" rows="5" placeholder="Extra instructions, appended to the built-in rules"></textarea>
+          </div>
+        </details>
+
+        <details class="section" open>
+          <summary>BROWSER</summary>
+          <div class="section-body">
+            <label class="check"><input type="checkbox" id="set-browser-enabled" /> <span>Browser control</span></label>
+            <label class="field">
+              <span>MODE</span>
+              <select id="set-browser-mode">
+                <option value="launch">launch — own Chrome</option>
+                <option value="attach">attach — running Chrome</option>
+              </select>
+            </label>
+            <label class="check"><input type="checkbox" id="set-browser-headless" /> <span>Headless</span></label>
+            <label class="field">
+              <span>CDP ENDPOINT</span>
+              <input id="set-cdp" type="text" placeholder="http://127.0.0.1:9222" />
+            </label>
+            <label class="field">
+              <span>CHROME PATH</span>
+              <input id="set-chrome" type="text" placeholder="leave empty to auto-detect" />
+            </label>
+            <div class="row">
+              <button id="btn-browser-open">[ OPEN ]</button>
+              <button id="btn-browser-close" class="danger">[ CLOSE ]</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="section">
+          <summary>CAPABILITIES</summary>
+          <div class="section-body">
+            <label class="check"><input type="checkbox" id="set-allow-browser" /> <span>browser_steps</span></label>
+            <label class="check"><input type="checkbox" id="set-allow-lookup" /> <span>web_lookup</span></label>
+            <label class="check"><input type="checkbox" id="set-allow-read" /> <span>read_file</span></label>
+            <label class="check"><input type="checkbox" id="set-allow-shell" /> <span>system_shell (asks first)</span></label>
+            <label class="check"><input type="checkbox" id="set-crt" /> <span>CRT effects</span></label>
+          </div>
+        </details>
+
+        <details class="section" open>
+          <summary>CHATS</summary>
+          <div class="section-body">
+            <button id="btn-new-chat" class="wide">[ NEW CHAT ]</button>
+            <div id="chat-list" class="chat-list"></div>
+          </div>
+        </details>
+      </aside>
+
+      <!-- ===================== CHAT ===================== -->
+      <section class="panel panel-chat">
+        <div class="chat-log" id="chat-log"></div>
+
+        <div class="ctx-row">
+          <span id="ctx-label" class="muted">CTX: 0 / 8192 (0%)</span>
+          <div class="meter ctx" id="ctx-meter"><i></i></div>
+          <button id="btn-compact">[ COMPACT ]</button>
+        </div>
+
+        <div class="composer" id="composer">
+          <span class="caret">&gt;</span>
+          <textarea id="input" rows="2" placeholder="Ask, or tell it what to open…  (Enter sends · Shift+Enter newline)"></textarea>
+          <div class="composer-buttons">
+            <button id="btn-expand" class="ghost" title="Expand the composer">⤡</button>
+            <button id="btn-send" class="send" title="Send">▶</button>
+          </div>
+        </div>
+        <div id="status-line" class="status-line muted">Ready</div>
+      </section>
+
+      <!-- ===================== ACTIVITY ===================== -->
+      <aside class="panel panel-activity" id="panel-activity">
+        <div class="activity-head">ACTIVITY</div>
+        <div class="activity-log" id="activity-log"></div>
+      </aside>
+    </main>
+
+    <!-- ===================== SHELL APPROVAL ===================== -->
+    <div class="modal" id="shell-modal" hidden>
+      <div class="modal-box">
+        <h2>SHELL COMMAND</h2>
+        <p class="muted">The model wants to run this. Nothing happens until you approve.</p>
+        <pre id="shell-command"></pre>
+        <div class="row">
+          <button id="btn-shell-approve" class="approve">[ APPROVE ]</button>
+          <button id="btn-shell-reject" class="danger">[ REJECT ]</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

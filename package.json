@@ -1,0 +1,26 @@
+{
+  "name": "wasteland-next",
+  "productName": "Wasteland Next",
+  "version": "0.1.0",
+  "description": "Local LLM terminal with browser control — amber CRT aesthetic, Electron, Manul browser engine.",
+  "license": "Apache-2.0",
+  "author": "Oleksii Poliakov",
+  "type": "module",
+  "main": "src/main/main.mjs",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "engine": "node scripts/build-manul-browser.mjs",
+    "test": "node --test test/*.test.mjs",
+    "smoke": "electron scripts/smoke.mjs",
+    "dist": "node scripts/build-manul-browser.mjs && electron-builder --win",
+    "postinstall": "node scripts/build-manul-browser.mjs --optional"
+  },
+  "devDependencies": {
+    "electron": "^34.0.0",
+    "electron-builder": "^26.15.3"
+  }
+}

@@ -1,0 +1,48 @@
+# Packaging.
+#
+# The app ships both halves of manul-browser from `resources/`: the Go engine
+# binary and the Node binding's compiled dist. A packaged .exe cannot reach the
+# checkout on the build machine, and `npm run engine` is what puts them there —
+# so it runs before this does (see the `dist` script).
+appId: com.alexbeatnik.wasteland-next
+productName: Wasteland Next
+copyright: Copyright 2026 Oleksii Poliakov
+
+directories:
+  output: dist
+  buildResources: assets
+
+# Only what the app actually loads at runtime. Tests, build scripts and the
+# staged resources are excluded here — the last of those is shipped through
+# extraResources instead, so it lands beside the app rather than inside it.
+files:
+  - src/**/*
+  - package.json
+  # Apache 2.0 §4(a): recipients of a redistribution get a copy of the licence.
+  - LICENSE
+  - '!**/*.map'
+
+extraResources:
+  - from: resources
+    to: .
+    filter:
+      - '**/*'
+      - '!**/*.map'
+      - '!**/*.d.ts'
+
+win:
+  icon: assets/icon.ico
+  target:
+    # A single self-contained .exe that runs with no install, and a normal
+    # installer for anyone who would rather have Start-menu entries.
+    - portable
+    - nsis
+
+portable:
+  artifactName: WastelandNext-${version}-portable.exe
+
+nsis:
+  artifactName: WastelandNext-${version}-setup.exe
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
