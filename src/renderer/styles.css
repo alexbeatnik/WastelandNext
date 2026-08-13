@@ -1106,6 +1106,66 @@ button.send.stop {
   display: none;
 }
 
+/* ============================ About ============================ */
+
+.about-box {
+  max-width: 44rem;
+  max-height: 88vh;
+  overflow-y: auto;
+}
+
+.about-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--amber-faint);
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.8rem;
+}
+
+.about-mark {
+  color: var(--amber-bright);
+  letter-spacing: 0.12em;
+  font-weight: bold;
+  font-size: 1.2em;
+}
+
+.about-box h3 {
+  margin: 1rem 0 0.4rem;
+  color: var(--amber-dim);
+  letter-spacing: 0.08em;
+  font-size: 0.85em;
+  font-weight: normal;
+}
+
+.about-steps {
+  margin: 0;
+  padding-left: 1.3rem;
+}
+
+.about-steps li {
+  margin-bottom: 0.3rem;
+}
+
+/* Links rather than buttons, as in the sibling project: they open in the real
+   browser through the window-open handler, which `target="_blank"` triggers. */
+.about-links {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 1rem 0;
+  padding: 0.6rem;
+  border: 1px solid var(--amber-faint);
+  background: var(--bg-deep);
+}
+
+.about-powered {
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+
 .modal-box {
   background: var(--bg-panel);
   border: 1px solid var(--amber);

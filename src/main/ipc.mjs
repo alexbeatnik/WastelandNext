@@ -7,6 +7,7 @@
  * surface small and means a new event type needs no changes here or there.
  */
 import { dialog, ipcMain } from 'electron';
+import { readFileSync } from 'node:fs';
 import * as chats from './chats.mjs';
 import * as config from './config.mjs';
 import * as models from './models/manager.mjs';
@@ -17,6 +18,24 @@ import { server } from './llm/server.mjs';
 import { downloadLlamaServer, llamaServerStatus } from './llm/tools.mjs';
 import { BrowserBridge, browser, engineAvailable } from './browser/manul-browser.mjs';
 import { Agent } from './agent/agent.mjs';
+
+/**
+ * The build's version, for the About box.
+ *
+ * Read from our own `package.json` rather than through `app.getVersion()`.
+ * That call answers with *Electron's* version whenever it cannot find the app's
+ * manifest — which is what `electron scripts/smoke.mjs` does — and a version
+ * field confidently displaying 34.5.8 is worse than one that fails. Resolving
+ * relative to this module works packaged too: inside `app.asar` this file sits
+ * at `src/main/ipc.mjs` and the manifest at the archive root, exactly as here.
+ */
+const VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version ?? '';
+  } catch {
+    return '';
+  }
+})();
 
 /** Lookups get their own headless browser so they never touch the visible one. */
 const lookupBrowser = new BrowserBridge();
@@ -38,6 +57,7 @@ function snapshot() {
     browser: browser.status,
     engine: engineAvailable(),
     busy: agent.busy,
+    version: VERSION,
   };
 }
 

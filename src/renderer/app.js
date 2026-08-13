@@ -6,7 +6,7 @@
  * reload of this window can never leave the two disagreeing about whether a
  * turn is running.
  */
-import { formatSize, splitThinking, stripActionBlocks } from '../shared/render.mjs';
+import { formatDuration, formatSize, splitThinking, stripActionBlocks } from '../shared/render.mjs';
 import { parseMarkdown } from '../shared/markdown.mjs';
 
 const api = window.wasteland;
@@ -1060,12 +1060,21 @@ function handleEvent(payload) {
       $('btn-cancel-download').hidden = false;
       break;
 
-    case 'download:progress':
-      $('download-status').textContent = `${payload.filename} — ${payload.percent.toFixed(1)}% (${formatSize(
-        payload.received,
-      )}${payload.total ? ` / ${formatSize(payload.total)}` : ''})`;
+    case 'download:progress': {
+      // Speed and time left are each left out until they can be stated: a rate
+      // of 0 B/s on the first chunk, or "0s left" before anything has been
+      // measured, reads as a stalled download rather than a starting one.
+      const parts = [
+        `${payload.filename} — ${payload.percent.toFixed(1)}%`,
+        `${formatSize(payload.received)}${payload.total ? ` / ${formatSize(payload.total)}` : ''}`,
+      ];
+      if (payload.bytesPerSecond) parts.push(`${formatSize(payload.bytesPerSecond)}/s`);
+      if (payload.etaSeconds) parts.push(`${formatDuration(payload.etaSeconds)} left`);
+
+      $('download-status').textContent = parts.join(' · ');
       $('download-meter').firstElementChild.style.width = `${payload.percent}%`;
       break;
+    }
 
     case 'download:done':
       $('download-status').textContent = payload.cancelled
@@ -1098,6 +1107,22 @@ function wire() {
   });
 
   $('btn-expand').addEventListener('click', () => $('composer').classList.toggle('expanded'));
+
+  // The links inside carry `target="_blank"`, which the main process turns into
+  // `shell.openExternal` — this window must never navigate away from itself.
+  const about = (open) => {
+    $('about-modal').hidden = !open;
+  };
+  $('btn-about').addEventListener('click', () => about(true));
+  $('btn-about-close').addEventListener('click', () => about(false));
+  $('about-modal').addEventListener('click', (event) => {
+    // Only the backdrop closes it; a click on the box itself must not, or
+    // selecting the version text would dismiss the dialog.
+    if (event.target === $('about-modal')) about(false);
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') about(false);
+  });
 
   $('btn-attach-file').addEventListener('click', () => attachVia(() => api.attach.pickFiles()));
   $('btn-attach-dir').addEventListener('click', () => attachVia(() => api.attach.pickFolder()));
@@ -1251,6 +1276,7 @@ async function boot() {
   wire();
 
   const snapshot = await api.snapshot();
+  $('about-version').textContent = `Version ${snapshot.version ?? '—'} · Apache 2.0`;
   // Set before `applySettings`, which paints the context row from it.
   state.autoContext = snapshot.llm.autoContext ?? null;
   state.autoGpu = snapshot.llm.autoGpu ?? null;

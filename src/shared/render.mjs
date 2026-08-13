@@ -70,6 +70,22 @@ export function stripThinking(text) {
     .trim();
 }
 
+/**
+ * A rough duration, for "time left" on a download.
+ *
+ * Coarse on purpose: the estimate behind it moves every time the connection
+ * does, and a figure reading "3m 21s" then "3m 19s" invites a precision it does
+ * not have. Seconds below a minute, minutes and seconds below an hour, hours
+ * and minutes above.
+ */
+export function formatDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes}m ${total % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
 /** Human-readable byte size for the vault list. */
 export function formatSize(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];

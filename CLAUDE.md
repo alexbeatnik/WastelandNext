@@ -61,6 +61,17 @@ like it was ignored. The path comes from `webUtils.getPathForFile`, which lives 
 since it is what stops the renderer turning an arbitrary `File` into a path on its own. It works in a sandboxed preload,
 so the sandbox stays on.
 
+**`app.getVersion()` answers with *Electron's* version when it cannot find the app manifest.** `electron
+scripts/smoke.mjs` is exactly that case, so the About box read `Version 34.5.8` and the check — which only asserted a
+version-shaped string — passed on it. `VERSION` in `ipc.mjs` parses our own `package.json` through a URL relative to
+the module, which resolves inside `app.asar` too: this file is at `src/main/ipc.mjs` and the manifest at the archive
+root, packaged or not. The smoke check compares against the manifest rather than against a shape, because a version
+field confidently displaying the wrong number is worse than one that fails.
+
+**Every link in the About box needs `target="_blank"`.** That is what routes it through `setWindowOpenHandler` into
+`shell.openExternal`. Without it the chat window itself navigates to GitHub, and there is no way back — no address bar,
+no back button. The smoke check asserts it on every anchor in the dialog, not just the first.
+
 **The `hidden` attribute loses to any author-level `display`.** `hidden` is nothing but the UA rule
 `[hidden] { display: none }`, and the weakest author declaration outranks the whole UA sheet — so `.drop-veil
 { display: flex }` left the veil sitting over the transcript from boot, attribute faithfully set the entire time. Every
@@ -261,6 +272,18 @@ Ids arrive from IPC and are interpolated into a path; without the check a `../` 
 offset from. `resumed` requires a 206 *and* bytes already on disk — a server volunteering 206 with nothing to resume
 would otherwise open the writer in append mode. A server that ignores the range answers 200, and then starting over is
 correct: appending a full body to a partial file corrupts it silently.
+
+**Download speed is measured from deltas over a trailing window, never `received / elapsed`.** That formula is wrong
+twice. On a **resumed** transfer `received` starts at whatever was already on disk, so a download resuming at 3 GB
+reports gigabytes per second in its first seconds — yesterday's bytes credited to today. And as an average it lags: a
+transfer that ran fast for a minute and then stalled goes on quoting the fast figure long after. `RateMeter` takes the
+first sample as a baseline and reads the delta across the last 5 seconds, so neither can happen; a window with nothing
+in it reports 0 rather than the speed it used to manage. `eta()` returns **null**, not a guess, when there is no total
+or no measured rate — "0s left" on the first chunk reads as a finished download, and the renderer leaves both fields
+out entirely until they can be stated.
+
+**Progress is reported four times a second, not once per chunk.** Chunks land hundreds of times a second; every one of
+them was an IPC message and a re-render, for a speed figure no one can read as it flickers.
 
 **A download with no bytes for 90s is abandoned.** Only one runs at a time, so a dead connection otherwise leaves every
 later attempt refused as busy while nothing moves — which reads as "it says it is downloading and does nothing".

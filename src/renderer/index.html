@@ -16,6 +16,7 @@
       <span class="stat" id="stat-compute" hidden>RUN: —</span>
       <span class="stat" id="stat-browser">BROWSER: IDLE</span>
       <span class="stat" id="stat-engine">ENGINE: —</span>
+      <button class="ghost" id="btn-about" title="About Wasteland Next">[ ABOUT ]</button>
       <button class="ghost" id="toggle-panel" title="Toggle the left panel">☰</button>
     </header>
 
@@ -204,6 +205,48 @@
         <div class="row">
           <button id="btn-shell-approve" class="approve">[ APPROVE ]</button>
           <button id="btn-shell-reject" class="danger">[ REJECT ]</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== ABOUT ===================== -->
+    <div class="modal" id="about-modal" hidden>
+      <div class="modal-box about-box">
+        <div class="about-head">
+          <span class="about-mark">WASTELAND<span class="version">NEXT</span></span>
+          <span class="muted" id="about-version">Version —</span>
+        </div>
+
+        <p>
+          A local LLM terminal that can drive your browser. Amber-on-black CRT interface, Electron, no cloud
+          required — the model runs on your machine and the conversation never leaves it.
+        </p>
+
+        <h3>QUICK START</h3>
+        <ol class="about-steps">
+          <li><b>FIND A MODEL</b> — search HuggingFace, pick a quantisation, <b>[ GET ]</b> it.</li>
+          <li><b>LOCAL VAULT</b> — <b>[ LOAD ]</b> it. <code>llama-server</code> is fetched automatically if you have none.</li>
+          <li>Type. <code>Enter</code> sends, <code>Shift+Enter</code> makes a newline.</li>
+          <li>Drop a file or a folder on the window — or <b>[ + FILE ]</b> / <b>[ + DIR ]</b> — to ask about your own code.</li>
+          <li>Switch on <b>Browser control</b> in <b>CAPABILITIES</b> and it can open pages for you.</li>
+        </ol>
+
+        <div class="about-links">
+          <a href="https://github.com/alexbeatnik/WastelandNext" target="_blank" rel="noreferrer">★&nbsp;&nbsp;Star this project on GitHub</a>
+          <a href="https://github.com/alexbeatnik/WastelandNext/releases" target="_blank" rel="noreferrer">↓&nbsp;&nbsp;All releases — download the latest version</a>
+          <a href="https://github.com/alexbeatnik" target="_blank" rel="noreferrer">+&nbsp;&nbsp;Follow the author on GitHub</a>
+          <a href="https://github.com/alexbeatnik/WastelandNext/blob/main/LICENSE" target="_blank" rel="noreferrer">§&nbsp;&nbsp;Apache 2.0 — free to use, modify and share</a>
+        </div>
+
+        <p class="muted about-powered">
+          Inference by <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noreferrer">llama.cpp</a> ·
+          browser control by <a href="https://github.com/alexbeatnik/manul-browser" target="_blank" rel="noreferrer">manul-browser</a> ·
+          interface carried over from <a href="https://github.com/alexbeatnik/wasteland" target="_blank" rel="noreferrer">Wasteland Terminal</a>.
+          Models are yours; nothing is uploaded anywhere.
+        </p>
+
+        <div class="row">
+          <button id="btn-about-close">[ CLOSE ]</button>
         </div>
       </div>
     </div>

@@ -38,7 +38,33 @@ as HTML, so a reply that happens to contain markup is displayed rather than exec
 
 **Thinking** is off by default and toggled beside the composer. Off, the model is asked to skip reasoning in the two
 ways that work — a hard budget and the chat template's own flag — and whatever still arrives is hidden. It is shown
-anyway when there is no answer to show instead, since an empty turn tells you nothing.
+anyway when there is no answer to show instead, since an empty turn tells you nothing. Reasoning is stored with the
+reply but never sent back on the next turn: a model re-reads its own deliberation as settled fact, and on a small
+window the deliberation dwarfs the answer.
+
+## Putting a file or a folder in front of it
+
+`[ + FILE ]` and `[ + DIR ]` sit above the composer, and anything dropped on the window is attached the same way. Chips
+show what is waiting — `DIR  GitHub/WastelandNext  148 files · 2.1 MB` — each with its own `×`, and the whole path on
+hover. The question this is for is "here is my project, what would you improve": there is no agent mode, so the model
+reads and answers in the chat rather than editing anything.
+
+A folder arrives as a listing the model can reason about. `node_modules`, `.git`, `dist`, `venv` and the rest of the
+usual build output are skipped; binaries are named with their size but never pasted, detected by a NUL byte in the
+first kilobyte rather than by extension. Symlinks are not followed.
+
+The listing is the part that is never dropped, because what shape a project has is answerable from names alone, and a
+model shown the tree can ask for a file by name. File bodies fill whatever budget is left — README and manifest first,
+then shallow before deep and small before large — and whatever did not fit is named as not having fitted, so the model
+can tell "there is no more" from "there is more I have not seen".
+
+Attachments go into the transcript **once**, as a message ahead of the words they came with, and are drawn folded there
+— a dropped project is thousands of lines, and a transcript with the reply somewhere underneath is unusable. One click
+opens it, because what was sent to the model is what you should be able to check.
+
+Unlike `read_file`, an attachment is not confined to your home directory: a model naming a path is a request to be
+vetted, but you picking one through a dialog have already decided, and a checkout on another drive is ordinary. The
+credential directories — `.ssh`, `.aws`, `.gnupg` and friends — are refused either way.
 
 ## Requirements
 
@@ -111,6 +137,13 @@ inference. The build is unsigned — Windows SmartScreen will warn on first run.
    If you already know what you want, paste a repo id or a HuggingFace URL instead and press `[ DOWNLOAD ]`: that path
    picks the best single-file quantisation on offer (Q4_K_M first) and rewrites a `/blob/main/` URL from the address bar.
 
+   Progress reads `model.gguf — 25.0% · 1.0 GB / 4.0 GB · 5.5 MB/s · 4m 0s left`. The speed is measured across a
+   trailing five-second window rather than averaged over the transfer, so it follows what the connection is doing now,
+   and a **resumed** download does not credit the bytes already on disk to this session. Neither figure is shown until
+   it can be stated: "0 B/s, 0s left" on the first chunk reads as a stalled download rather than a starting one. An
+   interrupted transfer keeps its `.part` file and resumes from it; one that goes silent for 90 seconds is abandoned,
+   because only one runs at a time and a dead connection would otherwise refuse every later attempt as busy.
+
 2. **LOCAL VAULT** — `[ LOAD ]` spawns `llama-server` against the file. The status bar turns green when it is ready.
    If no `llama-server` exists anywhere, it is downloaded first: the newest llama.cpp release for this platform
    (the Vulkan build on Windows and Linux, so the GPU is used without a CUDA toolkit), unpacked into the app's data
@@ -124,9 +157,11 @@ inference. The build is unsigned — Windows SmartScreen will warn on first run.
    you had never added it.
 3. Type. `Enter` sends; `Shift+Enter` inserts a newline.
 
-Conversations live in a picker directly above the transcript, with `[ NEW ]` and a delete beside it — the list belongs
-next to the thing it selects, not at the bottom of a settings rail. A chat is created lazily on the first message, so a
-fresh one shows as `— new conversation —` until it has something to be named after.
+Conversations live in a picker directly above the transcript — the list belongs next to the thing it selects, not at
+the bottom of a settings rail. Clicking it opens the list, and **every row carries its own delete**, so a conversation
+can be thrown away without being opened first. Deleting the one on screen clears the transcript with it; deleting any
+other leaves the view exactly where it was, and the menu stays open so several can go in one visit. A chat is created
+lazily on the first message, so a fresh one shows as `— new conversation —` until it has something to be named after.
 
 ## Context sizing
 
@@ -144,6 +179,32 @@ The panel shows what was chosen and why, e.g. `limited by model maximum · model
 
 Turning AUTO off hands the slider back and the value is passed through exactly as set — including one the model cannot
 honour. An explicit setting that gets silently overridden is worse than one that fails loudly.
+
+## Staying inside the window
+
+The window holds the prompt **and** the reply, so the prompt is budgeted against `n_ctx` less a reserve. Measuring the
+prompt against the whole window says a conversation is fine right up to the point where there is nothing left to answer
+with: a real session reached 4594 of 4608, which is 99 % full and fourteen tokens from silence — the model emitted a
+few words and stopped mid-sentence, which reads as the app cutting it off.
+
+The meter above the composer shows the estimate, and three things keep it under control:
+
+- **Compaction.** Everything older than the last two exchanges is summarised into one note. It is checked before every
+  model call, not only at the start of a turn, because a browsing turn grows its own history — each batch appends a
+  page map — and three follow-ups can cross the window with nobody having typed anything. `[ COMPACT ]` forces it.
+- **A backstop.** Compaction keeps four messages verbatim, and one pasted README in that tail can fill a small window
+  on its own — so it can run, succeed, and leave the prompt still over the line. When that happens the oldest messages
+  are dropped and, if the newest is oversized by itself, cut from the middle so a pasted document keeps both what it is
+  and the question appended underneath. The system prompt and the newest message always survive. Without this the
+  oversized prompt simply went out and llama.cpp chose what to lose.
+- **Reasoning is not resent.** It is kept in the transcript and dimmed in the view, but stripped on the way to the
+  model. On a 4608-token window a thinking model filled the context in two turns, almost entirely with deliberation it
+  had already finished with.
+
+The token count is an estimate — the endpoint only reports real usage after the fact — and it counts Latin and Cyrillic
+separately, at roughly 3.6 and 1.6 characters to the token. A single ratio for both undercounted a Ukrainian
+conversation by about half: the meter read 99 % while the prompt was already over the window and llama.cpp was quietly
+discarding the oldest part of it, which is what "it loses the thread" turned out to be.
 
 ## GPU offload
 
@@ -164,8 +225,15 @@ on every token, so full offload at a shorter context beats a long context with p
 | context traded down | 15360 | all 32 | **61.4 tok/s** |
 | context pinned at 32768 | 32768 | 23 of 32 | 18.5 tok/s |
 
-The context row says `reduced to keep every layer on the GPU` when this applies. It is only ever a reduction, never
-below 4096, and it is skipped when the weights alone cannot fit — a 25 GB model on a 12 GB card has nothing to trade.
+The context row says `reduced to keep every layer on the GPU` when this applies. It is only ever a reduction, and it is
+skipped when the weights alone cannot fit — a 25 GB model on a 12 GB card has nothing to trade.
+
+It also never goes **below 8192**. That floor was 4096, and a 12 GB card duly settled on 4608 — which this app cannot
+live in. The system prompt, a page map and one pasted document come to a few thousand tokens before the user has said
+anything, so the conversation was past the window by its second turn, and every reply after that was answered from a
+prompt llama.cpp had already truncated. Three times the tokens per second is not worth a model that forgets what it
+was asked.
+
 Pin N_CTX by turning its AUTO off if you would rather have the longer window.
 
 Only NVIDIA is probed. Windows' `AdapterRAM` reports 4 GB for anything larger, which is worse than no answer, so on other
@@ -189,6 +257,9 @@ The layout picks its shape from the window's **aspect ratio**, not its width alo
 `npm run smoke` boots the real window offscreen and asserts all of this — every shape resized, no horizontal overflow,
 the activity column present exactly where it should be.
 
+`[ ABOUT ]` in the top bar opens a box with the build's version, a five-step quick start, and links to the repository,
+the releases page, the author and the licence. The links open in your real browser rather than navigating this window.
+
 ## Project layout
 
 ```
@@ -209,14 +280,16 @@ src/
 │   │   └── port.mjs        refusing to start onto an occupied port
 │   ├── models/
 │   │   ├── manager.mjs     vault scan, HuggingFace resolve, resumable download
+│   │   ├── rate.mjs        download speed and time remaining
 │   │   ├── search.mjs      in-app model search + per-repo file listing
 │   │   └── placement.mjs   where a model would run, before it is loaded
 │   ├── browser/
-│   │   ├── manul-browser.mjs  the manul-browser bridge
-│   │   └── adskip.mjs      the YouTube skip-button watcher
+│   │   └── manul-browser.mjs  the manul-browser bridge
 │   └── agent/
-│       ├── agent.mjs       the turn pipeline
+│       ├── agent.mjs       the turn pipeline, compaction, window budgeting
+│       ├── attach.mjs      files and folders the user put in front of the model
 │       ├── actions.mjs     reading actions out of a reply
+│       ├── batch-guard.mjs refusing a browser batch identical to one already run
 │       ├── prompts.mjs     the system prompt, assembled per capability
 │       └── readfile.mjs    the read-only file path
 ├── preload/preload.cjs     the renderer's whole view of main
@@ -230,19 +303,38 @@ src/
 ## Testing
 
 ```bash
-npm test       # 247 unit tests, no Electron, no network
+npm test       # 288 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
 ```
 
-`npm test` covers the pure logic: action extraction and its JSON repair, `<think>` splitting, markdown parsing, chat
-storage and id validation, path vetting, HuggingFace URL rewriting and quantisation choice, prompt assembly, GGUF header
-parsing and the context/GPU arithmetic, crash-log summarising, download resume, checkout resolution, and where a
+`npm test` covers the pure logic: action extraction and its JSON repair, `<think>` splitting and stripping, markdown
+parsing, chat storage and id validation, path vetting, HuggingFace URL rewriting and quantisation choice, prompt
+assembly, GGUF header parsing and the context/GPU arithmetic, the compaction threshold and the window backstop, folder
+collection and its budget, download speed and resume, crash-log summarising, checkout resolution, and where a
 *packaged* app looks for the engine.
 
-`npm run smoke` covers what unit tests cannot: a renderer that throws on boot, a preload that failed to expose its
-bridge, an IPC channel renamed on one side only, a layout that breaks at one screen shape, or a chat control that stops
-resetting what it should. It clicks NEW CHAT, presses Enter, resizes the window through seven screen shapes, and checks
-that a reply containing `<img onerror=…>` is drawn as text rather than run.
+`npm run smoke` boots the real window offscreen — 83 checks — and covers what unit tests cannot: a renderer that throws
+on boot, a preload that failed to expose its bridge, an IPC channel renamed on one side only, a layout that breaks at
+one screen shape, or a control that stops resetting what it should. It clicks NEW CHAT, presses Enter, attaches a
+folder and detaches one of two, deletes a conversation from the picker without opening it, opens the About box and
+checks every link in it would leave the window, resizes through seven screen shapes, and checks that a reply containing
+`<img onerror=…>` is drawn as text rather than run.
+
+Where a fix is for something a user reported, the test reproduces *their* case rather than a tidy abstraction of it:
+the numbers in the GPU tests are a 25 GB model on a 12 GB card, the context tests use 4594 of 4608, and the crash-log
+excerpt is verbatim from the failure it explains.
+
+Two checks are worth singling out, because both passed while the thing they covered was wrong.
+
+The first read an element's `hidden` attribute, found it set, and passed — while the element sat visible on screen the
+whole time, because `hidden` is only the UA rule `[hidden] { display: none }` and any author-level `display` outranks
+it. Visibility is asserted through `getComputedStyle` now: what the attribute says and what the user sees are
+different questions.
+
+The second asserted that the About box showed a version-shaped string, and passed on `Version 34.5.8` — Electron's
+version, not this app's, because `app.getVersion()` falls back to it when it cannot find the app manifest, which is
+precisely what running the smoke script does. The version is read from `package.json` directly now, and the check
+compares against that same manifest rather than against a pattern.
 
 ## How it differs from the original
 
@@ -253,6 +345,7 @@ that a reply containing `<img onerror=…>` is drawn as text rather than run.
 | Network | seccomp kills any new socket after load | open — the browser needs it |
 | Chat store | XChaCha20-Poly1305 | plain JSON |
 | Agent | sandboxed filesystem tools | browser control, lookup, read-only file, gated shell |
+| Context | fixed window, no compaction | budgeted against the reply, compacted, with a hard backstop |
 | Layout | fixed panels | aspect-ratio responsive |
 | Replies | plain text — Nuklear drew glyphs, not documents | markdown, parsed to data and built as DOM nodes |
 | Context / offload | fixed `N_CTX`, `-ngl` as set | sized from the model header and the card |
@@ -266,8 +359,12 @@ that a reply containing `<img onerror=…>` is drawn as text rather than run.
   a wrong number would be worse than none — Windows reports 4 GB for anything larger.
 - Only Windows is packaged so far. macOS and Linux targets are a config change away but have not been built or tested.
 - Builds are unsigned; there is no auto-update feed.
-- Compaction is triggered by an estimated token count (characters ÷ 3.6), not a real one — the endpoint only reports
-  actual usage after the fact.
+- Compaction is triggered by an estimated token count, not a real one — the endpoint only reports actual usage after
+  the fact. The estimate counts Latin and Cyrillic separately (about 3.6 and 1.6 characters to the token), because one
+  ratio for both undercounted a Ukrainian conversation by roughly half.
+- An attached folder is read once, at the moment it is sent. Nothing watches it afterwards, so a file edited later is
+  the version the model first saw until you attach it again.
+- There is no agent mode. The model reads what you attach and answers in the chat; it cannot edit or write anything.
 - There is no automatic ad skipping. It was built and withdrawn: the engine can find an element by CSS selector and it
   can click one by its visible label, but it cannot click *the element the selector found*. On a page where an ad
   overlays the player, the label resolved to the ad instead of the skip button and opened the advertiser in a new tab,

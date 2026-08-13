@@ -11,6 +11,7 @@ import { Readable } from 'node:stream';
 import { basename, dirname, join, resolve } from 'node:path';
 import * as config from '../config.mjs';
 import { modelsDir } from '../paths.mjs';
+import { RateMeter } from './rate.mjs';
 
 /** Quantisations we prefer when a repo offers several, best trade-off first. */
 const QUANT_PREFERENCE = ['q4_k_m', 'q4_k_s', 'q4_0', 'q5_k_m', 'q8_0'];
@@ -216,6 +217,9 @@ export async function remove(name) {
 /** A transfer with no bytes for this long is treated as dead. */
 const STALL_MS = 90_000;
 
+/** How often progress is reported, however fast the bytes arrive. */
+const PROGRESS_MS = 250;
+
 /** Interrupted downloads, still on disk and resumable. */
 export async function listPartials() {
   const dir = modelsDir();
@@ -281,16 +285,34 @@ export async function download({ url, filename, signal, onProgress }) {
   let received = already;
   let lastByteAt = Date.now();
 
+  const meter = new RateMeter();
+  // The baseline goes in before a single new byte, so bytes resumed from disk
+  // are never credited to this session's speed.
+  meter.sample(received, lastByteAt);
+  let lastEmit = 0;
+
   const source = Readable.fromWeb(res.body);
   source.on('data', (chunk) => {
     received += chunk.length;
-    lastByteAt = Date.now();
+    const now = Date.now();
+    lastByteAt = now;
+    meter.sample(received, now);
+
+    // Chunks land hundreds of times a second. Reporting every one of them puts
+    // that many IPC messages and that many re-renders through for a number no
+    // one can read as it flickers; four times a second is smooth to watch and
+    // long enough for the rate to mean something.
+    if (now - lastEmit < PROGRESS_MS) return;
+    lastEmit = now;
+
     onProgress?.({
       filename,
       received,
       total,
       resumed,
       percent: total ? Math.min(100, (received / total) * 100) : 0,
+      bytesPerSecond: meter.rate(now),
+      etaSeconds: meter.eta(received, total, now),
     });
   });
 

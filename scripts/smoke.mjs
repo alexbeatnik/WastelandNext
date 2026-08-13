@@ -10,7 +10,7 @@
 import { app, BrowserWindow } from 'electron';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { setDataRoot } from '../src/main/paths.mjs';
 import { registerIpc } from '../src/main/ipc.mjs';
@@ -589,6 +589,87 @@ app.whenReady().then(async () => {
       probe.externalRow?.drop === '⊘' && /left alone/.test(probe.externalRow?.dropTitle ?? ''),
       JSON.stringify(probe.externalRow),
     );
+
+    // The About box. Visibility through the computed style, never the `hidden`
+    // attribute — see the note in the Testing section of the README.
+    const about = await window.webContents.executeJavaScript(`(() => {
+      const box = document.getElementById('about-modal');
+      const shut = getComputedStyle(box).display;
+      document.getElementById('btn-about').click();
+      return {
+        shut,
+        open: getComputedStyle(box).display,
+        version: document.getElementById('about-version').textContent,
+        links: [...box.querySelectorAll('a')].map((a) => ({ href: a.href, target: a.target })),
+      };
+    })()`);
+    check('the About box starts closed', about.shut === 'none', JSON.stringify(about.shut));
+    check('[ ABOUT ] opens it', about.open !== 'none', JSON.stringify(about.open));
+    // Compared against the manifest, not merely against a version-shaped
+    // string: the first version of this check passed while the box displayed
+    // Electron's 34.5.8, because `app.getVersion()` falls back to it when it
+    // cannot find the app manifest — which is exactly what this runner does.
+    const expected = JSON.parse(readFileSync(resolve(here, '../package.json'), 'utf8')).version;
+    check(
+      `it names this build — ${about.version}`,
+      about.version.includes(expected),
+      `expected ${expected} in "${about.version}"`,
+    );
+    // Every link must go out through the window-open handler. One without
+    // `target` navigates this window to GitHub and there is no way back.
+    check(
+      `all ${about.links.length} links open externally`,
+      about.links.length >= 4 && about.links.every((a) => a.target === '_blank' && /^https:/.test(a.href)),
+      JSON.stringify(about.links.filter((a) => a.target !== '_blank')),
+    );
+
+    const closed = await window.webContents.executeJavaScript(`(() => {
+      document.getElementById('btn-about-close').click();
+      return getComputedStyle(document.getElementById('about-modal')).display;
+    })()`);
+    check('[ CLOSE ] shuts it again', closed === 'none', closed);
+
+    // Download progress, driven by synthetic events rather than a real
+    // transfer: the arithmetic is unit-tested, and what cannot be tested there
+    // is that the renderer puts the numbers on screen at all.
+    window.webContents.send('event', { event: 'download:start', filename: 'model.gguf' });
+    window.webContents.send('event', {
+      event: 'download:progress',
+      filename: 'model.gguf',
+      received: 1024 * 1024 * 1024,
+      total: 4 * 1024 * 1024 * 1024,
+      percent: 25,
+      // Under 10, so `formatSize` keeps a decimal — the reading a slow link
+      // needs. Above 10 it rounds, and "13 MB/s" is as much as anyone wants.
+      bytesPerSecond: 5.5 * 1024 * 1024,
+      etaSeconds: 240,
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    const progress = await window.webContents.executeJavaScript(
+      `document.getElementById('download-status').textContent`,
+    );
+    check(`download progress shows the speed — ${progress}`, /5\.5 MB\/s/.test(progress));
+    check('download progress shows the time left', /4m 0s left/.test(progress), progress);
+
+    // A transfer that has not been measured yet must not claim 0 B/s or "0s
+    // left": both read as a stall when the download is merely starting.
+    window.webContents.send('event', {
+      event: 'download:progress',
+      filename: 'model.gguf',
+      received: 1024,
+      total: 4 * 1024 * 1024 * 1024,
+      percent: 0,
+      bytesPerSecond: 0,
+      etaSeconds: null,
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    const starting = await window.webContents.executeJavaScript(
+      `document.getElementById('download-status').textContent`,
+    );
+    check('an unmeasured download claims no speed at all', !/\/s/.test(starting), starting);
+    check('and no time left', !/left/.test(starting), starting);
+    window.webContents.send('event', { event: 'download:done', name: 'model.gguf' });
+    await new Promise((r) => setTimeout(r, 200));
 
     // Deliberately offline: an empty query must not reach the network, so this
     // exercises the wiring without making the smoke run need a connection.
