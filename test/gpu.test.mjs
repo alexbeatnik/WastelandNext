@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { recommendGpuLayers } from '../src/main/llm/gpu.mjs';
+import { contextForFullOffload, recommendGpuLayers } from '../src/main/llm/gpu.mjs';
 
 const GB = 1024 ** 3;
 
@@ -102,4 +102,57 @@ test('the answer never exceeds the layers the model actually has', () => {
     });
     assert.ok(layers === 999 || (layers >= 0 && layers <= BIG.blockCount), `${layers} out of range`);
   }
+});
+
+/* ============================ trading context for offload ============================ */
+
+/** The real case: Qwen3.5-9B UD-Q6_K_XL on a 12 GB card. */
+const QWEN9B = { fileSize: 8.16 * GB, kvBytesPerToken: 128 * 1024, vramBytes: 11.94 * GB };
+
+test('finds the largest context that keeps every layer on the card', () => {
+  const context = contextForFullOffload({ ...QWEN9B, maxContext: 32768 });
+  assert.ok(context > 0, 'expected a workable context');
+  assert.equal(context % 512, 0);
+
+  // The point of it: at this context the whole model fits, one step up it does not.
+  const meta = { blockCount: 32, embeddingLength: 4096, headCount: 16, headCountKv: 4 };
+  const fits = recommendGpuLayers({ meta, ...QWEN9B, contextTokens: context });
+  const overshoots = recommendGpuLayers({ meta, ...QWEN9B, contextTokens: context + 512 });
+  assert.equal(fits.layers, 999, `expected full offload at ${context}`);
+  assert.notEqual(overshoots.layers, 999, `${context + 512} should no longer fit`);
+});
+
+test('never raises the context above the ceiling it was given', () => {
+  const context = contextForFullOffload({ ...QWEN9B, maxContext: 4096 });
+  assert.ok(context <= 4096, `${context} exceeded the ceiling`);
+});
+
+test('declines when the weights alone do not fit', () => {
+  // The 30B: no context, however small, puts every layer on a 12 GB card.
+  assert.equal(contextForFullOffload({ fileSize: 24 * GB, kvBytesPerToken: 84 * 1024, vramBytes: 12 * GB, maxContext: 32768 }), 0);
+});
+
+test('declines rather than proposing a uselessly short context', () => {
+  // Room for only ~2k tokens is not a trade worth making.
+  const context = contextForFullOffload({
+    fileSize: 10.2 * GB,
+    kvBytesPerToken: 128 * 1024,
+    vramBytes: 11.94 * GB,
+    maxContext: 32768,
+    floor: 4096,
+  });
+  assert.equal(context, 0);
+});
+
+test('declines when anything it needs is unknown', () => {
+  assert.equal(contextForFullOffload({ ...QWEN9B, maxContext: 0 }), 0);
+  assert.equal(contextForFullOffload({ ...QWEN9B, vramBytes: 0, maxContext: 32768 }), 0);
+  assert.equal(contextForFullOffload({ ...QWEN9B, kvBytesPerToken: 0, maxContext: 32768 }), 0);
+  assert.equal(contextForFullOffload({}), 0);
+});
+
+test('a bigger card buys a longer context', () => {
+  const small = contextForFullOffload({ ...QWEN9B, vramBytes: 12 * GB, maxContext: 131072 });
+  const large = contextForFullOffload({ ...QWEN9B, vramBytes: 24 * GB, maxContext: 131072 });
+  assert.ok(large > small, `${large} should exceed ${small}`);
 });

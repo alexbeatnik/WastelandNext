@@ -14,7 +14,7 @@ import { EventEmitter } from 'node:events';
 import { totalmem } from 'node:os';
 import { join } from 'node:path';
 import { kvBytesPerToken, readGgufMetadata, recommendContext } from './gguf.mjs';
-import { detectVram, recommendGpuLayers } from './gpu.mjs';
+import { contextForFullOffload, detectVram, recommendGpuLayers } from './gpu.mjs';
 import { summariseFailure } from './failure.mjs';
 import { portInUse } from './port.mjs';
 import * as config from '../config.mjs';
@@ -295,6 +295,35 @@ export class LlamaServer extends EventEmitter {
 
     if (settings.autoGpuLayers) {
       const vramBytes = detectVram();
+
+      // With both AUTOs on, the context is traded down to whatever keeps every
+      // layer on the card. A layer left on the CPU is paid on every token, so
+      // full offload at a shorter context is usually much faster than a long
+      // context with a third of the model on the processor. Only ever a
+      // reduction: `maxContext` is the ceiling already decided above.
+      if (settings.autoContext && vramBytes) {
+        const kv = kvBytesPerToken(meta) ?? 0;
+        const fitted = contextForFullOffload({
+          fileSize,
+          kvBytesPerToken: kv,
+          vramBytes,
+          maxContext: plan.context,
+        });
+        if (fitted && fitted < plan.context) {
+          this.emit(
+            'log',
+            `context ${plan.context} → ${fitted} so the whole model stays on the GPU ` +
+              `(KV ${(kv / 1024).toFixed(1)} KB/token)`,
+          );
+          plan.context = fitted;
+          this.#autoContext = {
+            ...this.#autoContext,
+            context: fitted,
+            reason: 'reduced to keep every layer on the GPU',
+          };
+        }
+      }
+
       const choice = recommendGpuLayers({
         meta,
         fileSize,

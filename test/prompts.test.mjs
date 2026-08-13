@@ -61,3 +61,34 @@ test('pageMapContext is empty when there is nothing to describe', () => {
   assert.equal(pageMapContext(null), '');
   assert.equal(pageMapContext({ url: 'https://a.test', groups: [] }), '');
 });
+
+test('markdown is permitted, and formatting is not up for debate', () => {
+  // The rule used to forbid markdown — inherited from the C build, which drew
+  // glyphs and could not render it — while the next paragraph demanded a fenced
+  // action block. A model spent an entire budget deliberating over that
+  // contradiction instead of answering. The view renders markdown now, so the
+  // rule allows it and says explicitly not to agonise.
+  const prompt = buildSystemPrompt({ capabilities: { browser: true } });
+  assert.match(prompt, /Markdown is rendered/i);
+  assert.match(prompt, /Never deliberate about formatting/i);
+  assert.doesNotMatch(prompt, /no markdown headings/i);
+});
+
+test('the browser section shows the two-turn search flow', () => {
+  // "Never use positional targets" with no recipe for an unknown title left the
+  // model stuck between guessing and refusing.
+  const prompt = buildSystemPrompt({ capabilities: { browser: true } });
+  assert.match(prompt, /TWO turns/);
+  assert.match(prompt, /search_query=/);
+  assert.match(prompt, /CLICK the 'Exact Title As Listed'/);
+});
+
+test('the action fence is shown, and nothing forbids it', () => {
+  const prompt = buildSystemPrompt({
+    capabilities: { browser: true, webLookup: true, readFile: true, shell: true },
+  });
+  assert.ok((prompt.match(/```action/g) ?? []).length >= 1, 'expected the protocol to show a fence');
+  // No rule anywhere may tell the model not to produce the thing the protocol
+  // requires of it.
+  assert.doesNotMatch(prompt, /no (markdown|code fences|fenced)/i);
+});

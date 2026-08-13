@@ -60,6 +60,20 @@ like `C:\Users\O'Connor` closes the string early and the unpack fails on the use
 
 ## Invariants
 
+**The system prompt must not contradict itself.** It once said "no markdown" one paragraph before requiring a fenced
+action block, and a model spent its whole budget deliberating over that instead of answering — the reasoning dump was
+"Does the code block count as markdown?" fifty times over. Markdown is rendered now, so the rule permits it and adds
+"never deliberate about formatting". `prompts.test.mjs` asserts no rule forbids what the protocol demands.
+
+**Model output is parsed to data and built into DOM nodes, never assigned to `innerHTML`.** `shared/markdown.mjs`
+returns plain objects; the renderer turns them into elements. A reply containing `<img onerror=…>` is therefore
+displayed rather than run, and the smoke test checks exactly that. Emphasis requires its delimiters to hug the text,
+or `2 * 3 * 4 = 24` comes out italicised.
+
+**There is no attach-to-an-existing-browser mode.** The app always launches its own Chrome. Driving tabs the user is
+working in, and leaving that browser open afterwards, makes every failure look like the app interfering with their
+session.
+
 **A disabled capability is absent from the system prompt, not forbidden in it.** A model told about a tool reaches for
 it, and the resulting refusal reads to the user as a bug. `buildSystemPrompt` assembles from parts; `prompts.test.mjs`
 guards this.
@@ -114,6 +128,19 @@ payloads rather than materialising them.
 With AUTO off the slider value is passed through **exactly**, including one the model cannot honour. An explicit
 setting that is silently overridden is worse than one that fails loudly.
 
+**`readText` falls back to the whole page body when its selector matches
+nothing** — the engine documents this in `page_text_probe.js`. Presence cannot be inferred from a non-empty answer:
+the ad watcher reads `body` as well and treats an identical answer as "not found". Without that it picked the first
+short line off YouTube and clicked it every few seconds. `scripts/adskip-live.mjs` has a bystander button that proves
+it does not.
+
+**The engine has no top-level JS evaluation.** `page.eval` and `page.url` exist only inside a handler callback, so an
+injected page-side watcher is not possible; detection has to go through `readText`/`read`/`state` and a DSL step. The
+binding exposes `session.pageEval`, which the engine answers with `unknown cmd`.
+
+**manul reuses one Chrome per profile.** Two `BrowserBridge` instances open at once look at the same page — which made
+a live check "fail" with nothing wrong in the code under test. Close one before opening another.
+
 **A chat id becomes a filename, so it is validated first.** `isSafeId` in `chats.mjs` admits only `[A-Za-z0-9_-]`.
 Ids arrive from IPC and are interpolated into a path; without the check a `../` in one would reach outside `chats/`.
 
@@ -124,6 +151,12 @@ correct: appending a full body to a partial file corrupts it silently.
 
 **A download with no bytes for 90s is abandoned.** Only one runs at a time, so a dead connection otherwise leaves every
 later attempt refused as busy while nothing moves — which reads as "it says it is downloading and does nothing".
+
+**Context is traded down for full GPU offload, never the other way round.** `contextForFullOffload` solves
+`share·VRAM − overhead − context·KV ≥ weights` directly — no search — and returns 0 when the weights alone do not fit or
+when only a uselessly short context would. It shares `GPU_SHARE` and `GPU_OVERHEAD_BYTES` with `recommendGpuLayers`
+precisely so the two cannot disagree about what fits. Measured on a 12 GB card with Qwen3.5-9B: 61.4 tok/s at 15360 with
+every layer resident, against 18.5 tok/s at 32768 with 23 of 32 — the trade is worth roughly 3×.
 
 **The size-only placement estimate reserves a third of the card.** The KV cache is not a rounding error: on a 9B at 32k
 it is several gigabytes, and an earlier "size + 25%" margin labelled models GPU-resident that in fact ran two thirds of
@@ -212,5 +245,21 @@ these means updating `SHAPES` in `scripts/smoke.mjs`.
 
 ## Testing
 
-`npm test` — pure logic, no Electron, no network. `npm run smoke` — boots the real window offscreen. Both must pass.
-The smoke test is what catches a renamed IPC channel or a renderer that throws on boot; unit tests cannot see either.
+Three levels, and each exists because the one below it cannot see the failure:
+
+`npm test` — pure logic, no Electron, no network. Fast enough to run on every change.
+
+`npm run smoke` — boots the real window offscreen and drives it. This is what catches a renamed IPC channel, a renderer
+that throws on boot, a layout that breaks at one screen shape, or a control that stops resetting what it should. Both of
+these must pass.
+
+`npm run adskip:live` — a real Chrome against a locally served page. Kept separate because it needs a browser and takes
+half a minute; run it when touching `browser/`.
+
+When a fix is for something a user reported, the test should reproduce *their* case, not a tidy abstraction of it. The
+numbers in `gpu.test.mjs` are a 25 GB model on a 12 GB card because that is what failed; the log excerpt in
+`failure.test.mjs` is verbatim from the crash it explains.
+
+**Probes that spawn a model or a browser must clean up on the way out.** One killed by a `timeout` left an orphaned
+llama-server holding port 8080, and the app then reported a model as loaded while talking to it — a wrong answer that
+looked exactly like a right one. Trap the signals, or use a different port.

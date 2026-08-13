@@ -287,6 +287,62 @@ async function checkContextControls(window) {
   await new Promise((r) => setTimeout(r, 300));
 }
 
+/**
+ * Markdown in an assistant reply is drawn as structure, not printed literally.
+ *
+ * The reply is pushed through the real `reply:end` event, so this exercises the
+ * same path a model's answer takes.
+ */
+async function checkMarkdown(window) {
+  say('');
+  say('Markdown rendering');
+
+  const reply = [
+    '## Heading',
+    '',
+    'Some **bold** and `inline code` and a [link](https://example.com).',
+    '',
+    '- first item',
+    '- second item',
+    '',
+    '```js',
+    'const a = 1;',
+    '```',
+    '',
+    'And markup that must not run: <img src=x onerror=alert(1)>',
+  ].join('\n');
+
+  window.webContents.send('event', { event: 'reply:end', text: reply, rendered: reply, aborted: false });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const drawn = await window.webContents.executeJavaScript(`(() => {
+    const turn = document.querySelector('#chat-log .turn.assistant.md');
+    if (!turn) return null;
+    return {
+      heading: turn.querySelectorAll('h3, h4').length,
+      bold: turn.querySelectorAll('strong').length,
+      code: turn.querySelectorAll('code').length,
+      pre: turn.querySelectorAll('pre.code-block').length,
+      listItems: turn.querySelectorAll('li').length,
+      links: [...turn.querySelectorAll('a')].map((a) => a.getAttribute('href')),
+      images: turn.querySelectorAll('img').length,
+      text: turn.textContent,
+    };
+  })()`);
+
+  check('an assistant reply is drawn as markdown', Boolean(drawn), 'no markdown turn found');
+  if (!drawn) return;
+
+  check(`a heading became an element — ${drawn.heading}`, drawn.heading === 1);
+  check('emphasis became <strong>', drawn.bold === 1);
+  check(`code spans and blocks rendered — ${drawn.code} code, ${drawn.pre} block`, drawn.code >= 2 && drawn.pre === 1);
+  check(`the list became items — ${drawn.listItems}`, drawn.listItems === 2);
+  check(`the link points where it said — ${drawn.links.join(',')}`, drawn.links[0] === 'https://example.com');
+  // The point of building nodes instead of assigning innerHTML.
+  check('markup in the reply is shown, not executed', drawn.images === 0 && drawn.text.includes('<img src=x'));
+  check('the raw asterisks are gone', !drawn.text.includes('**bold**'), drawn.text.slice(0, 60));
+}
+
 function assertOk(value) {
   if (!value) throw new Error('interaction setup failed');
 }
@@ -413,6 +469,7 @@ app.whenReady().then(async () => {
     check('both columns have width', probe.leftWidth > 100 && probe.chatWidth > 300, `${probe.leftWidth}/${probe.chatWidth}`);
     check('no renderer errors', errors.length === 0, errors.join(' | '));
 
+      await checkMarkdown(window);
     await checkChatControls(window);
     await checkContextControls(window);
     await checkLayouts(window);

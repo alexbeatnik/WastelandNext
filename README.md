@@ -20,11 +20,30 @@ Type a request. The model answers, or emits a fenced action block and the app ca
 | `read_file` | Reads one file, read-only, inside your home directory |
 | `system_shell` | Runs a shell command — but only after you approve it in a dialog |
 
+The browser is always one the app launches itself; there is no attach-to-your-own-Chrome mode, so a failure can never
+look like the app meddling with tabs you were using.
+
+**BROWSER → Skip YouTube ads** (on by default) watches the controlled browser and clicks the skip button as soon as it
+appears. It acts only on youtube.com and youtube-nocookie.com, detects the button by selector and then clicks it by the
+text it just read off it — so it works in any interface language without a list of translations, and never clicks
+something that is not there. It stands aside while the agent is running its own steps.
+
 Each capability has its own toggle in the left panel. A disabled capability is left out of the system prompt entirely
 rather than described and then refused, so the model does not reach for tools it cannot have.
 
 After a browser batch the page is scanned and its real labels are fed back, so the next step targets text that is
-actually on screen instead of a guess.
+actually on screen instead of a guess. A title that is not on screen yet takes two turns by design: search on the
+first, click an exact result on the second. The model is told that in so many words, with the search-and-stop shape
+written out, because "never use positional targets" on its own leaves it choosing between guessing and refusing.
+
+Replies are rendered as markdown — headings, lists, links, emphasis, inline code and code blocks. The original forbade
+it because Nuklear drew glyphs rather than documents, so `**bold**` reached the user as four asterisks; this view can
+draw it, so the model is allowed to use it. The text is parsed into plain data and built into DOM nodes, never assigned
+as HTML, so a reply that happens to contain markup is displayed rather than executed.
+
+**Thinking** is off by default and toggled beside the composer. Off, the model is asked to skip reasoning in the two
+ways that work — a hard budget and the chat template's own flag — and whatever still arrives is hidden. It is shown
+anyway when there is no answer to show instead, since an empty turn tells you nothing.
 
 ## Requirements
 
@@ -137,6 +156,19 @@ The card's memory is measured (`nvidia-smi`), the KV cache for the chosen contex
 by the per-layer size. A 25 GB model on a 12 GB card becomes `15 of 52 layers fit in VRAM; the rest run on the CPU` —
 slower than full offload, but it runs, where before it did not.
 
+**With both AUTOs on, the context is traded down to keep the whole model on the card.** A layer left on the CPU is paid
+on every token, so full offload at a shorter context beats a long context with part of the model on the processor. On a
+12 GB card, Qwen3.5-9B (8.2 GB weights, an unusually expensive 128 KB/token of KV) is loaded at 15360 rather than 32768:
+
+| | context | layers on GPU | measured |
+|---|---|---|---|
+| context traded down | 15360 | all 32 | **61.4 tok/s** |
+| context pinned at 32768 | 32768 | 23 of 32 | 18.5 tok/s |
+
+The context row says `reduced to keep every layer on the GPU` when this applies. It is only ever a reduction, never
+below 4096, and it is skipped when the weights alone cannot fit — a 25 GB model on a 12 GB card has nothing to trade.
+Pin N_CTX by turning its AUTO off if you would rather have the longer window.
+
 Only NVIDIA is probed. Windows' `AdapterRAM` reports 4 GB for anything larger, which is worse than no answer, so on other
 cards the offload is left as configured. Turning AUTO off hands the slider back.
 
@@ -172,11 +204,17 @@ src/
 │   │   ├── server.mjs      llama-server child process
 │   │   ├── client.mjs      OpenAI-compatible streaming, endpoint-agnostic
 │   │   ├── tools.mjs       fetching llama-server when there is none
-│   │   └── gguf.mjs        model header parsing + context sizing
+│   │   ├── gguf.mjs        model header parsing + context sizing
+│   │   ├── gpu.mjs         VRAM detection, layer fitting, context trade
+│   │   ├── failure.mjs     turning a crash log into a sentence
+│   │   └── port.mjs        refusing to start onto an occupied port
 │   ├── models/
-│   │   ├── manager.mjs     vault scan, HuggingFace resolve + download
-│   │   └── search.mjs      in-app model search + per-repo file listing
-│   ├── browser/manul-browser.mjs   the manul-browser bridge
+│   │   ├── manager.mjs     vault scan, HuggingFace resolve, resumable download
+│   │   ├── search.mjs      in-app model search + per-repo file listing
+│   │   └── placement.mjs   where a model would run, before it is loaded
+│   ├── browser/
+│   │   ├── manul-browser.mjs  the manul-browser bridge
+│   │   └── adskip.mjs      the YouTube skip-button watcher
 │   └── agent/
 │       ├── agent.mjs       the turn pipeline
 │       ├── actions.mjs     reading actions out of a reply
@@ -186,22 +224,31 @@ src/
 ├── renderer/               index.html · styles.css · app.js
 └── shared/
     ├── render.mjs          text shaping both processes need
+    ├── markdown.mjs        markdown → data the renderer builds nodes from
     └── engine.mjs          finding the manul-browser checkout
 ```
 
 ## Testing
 
 ```bash
-npm test       # 198 unit tests, no Electron, no network
+npm test       # 239 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
+npm run adskip:live  # drives a real browser against a local page to test the ad watcher
 ```
 
-`npm test` covers the pure logic — action extraction and JSON repair, `<think>` splitting, chat storage, path vetting,
-HuggingFace URL rewriting, quantisation choice, prompt assembly, checkout resolution, and where a *packaged* app looks
-for the engine, and which release asset to fetch. `npm run smoke` covers what unit tests cannot: a renderer that throws
-on boot, a preload that failed to expose its bridge, an IPC channel renamed on one side only, a layout that breaks on a
-particular screen shape, or a chat control that stops resetting what it should — it clicks NEW CHAT and presses Enter
-for real.
+`npm test` covers the pure logic: action extraction and its JSON repair, `<think>` splitting, markdown parsing, chat
+storage and id validation, path vetting, HuggingFace URL rewriting and quantisation choice, prompt assembly, GGUF header
+parsing and the context/GPU arithmetic, crash-log summarising, download resume, checkout resolution, and where a
+*packaged* app looks for the engine.
+
+`npm run smoke` covers what unit tests cannot: a renderer that throws on boot, a preload that failed to expose its
+bridge, an IPC channel renamed on one side only, a layout that breaks at one screen shape, or a chat control that stops
+resetting what it should. It clicks NEW CHAT, presses Enter, resizes the window through seven screen shapes, and checks
+that a reply containing `<img onerror=…>` is drawn as text rather than run.
+
+`npm run adskip:live` is the one test that needs a real browser: it serves a local page carrying the player's skip
+button and checks the watcher clicks it, leaves a neighbouring button alone, and does nothing at all on a page that is
+not YouTube.
 
 ## How it differs from the original
 
@@ -213,15 +260,21 @@ for real.
 | Chat store | XChaCha20-Poly1305 | plain JSON |
 | Agent | sandboxed filesystem tools | browser control, lookup, read-only file, gated shell |
 | Layout | fixed panels | aspect-ratio responsive |
+| Replies | plain text — Nuklear drew glyphs, not documents | markdown, parsed to data and built as DOM nodes |
+| Context / offload | fixed `N_CTX`, `-ngl` as set | sized from the model header and the card |
 
 ## Known gaps
 
 - The engine and binding come from a sibling checkout rather than from npm — `manul-browser` has no published platform
   packages yet, so there is nowhere else for either to come from.
 - `web_lookup` reads DuckDuckGo result text. It has no AI-overview extraction and no CAPTCHA handling.
+- VRAM is detected through `nvidia-smi` only. On an AMD or Intel card the offload is left exactly as configured, because
+  a wrong number would be worse than none — Windows reports 4 GB for anything larger.
 - Only Windows is packaged so far. macOS and Linux targets are a config change away but have not been built or tested.
 - Builds are unsigned; there is no auto-update feed.
 - Compaction is triggered by an estimated token count, not a real one, until the endpoint reports usage.
+- The ad watcher polls every 2.5 s, because the engine offers no way to run a listener inside the page. A skip can
+  therefore take a couple of seconds rather than being instant.
 
 ## License
 

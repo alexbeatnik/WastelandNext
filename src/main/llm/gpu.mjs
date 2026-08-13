@@ -63,6 +63,48 @@ export function placementForSize(fileSize, vramBytes, { weightsShare = 0.65 } = 
 }
 
 /**
+ * Share of the card available to weights and KV cache, and what the rest is for.
+ *
+ * Exported so the context-fitting calculation below cannot drift from the layer
+ * calculation it has to agree with.
+ */
+export const GPU_SHARE = 0.9;
+export const GPU_OVERHEAD_BYTES = 700 * 1024 * 1024;
+
+/**
+ * The largest context at which the *whole* model still fits on the card.
+ *
+ * Sizing the context first and then fitting layers into what is left is the
+ * wrong trade for a GPU: every layer left on the CPU is paid on every token, so
+ * full offload at a smaller context is usually far faster than a long context
+ * with a third of the model on the processor.
+ *
+ * Full offload needs `share·VRAM − overhead − context·KV ≥ weights`, which
+ * solves directly for the context — no search required.
+ *
+ * Returns 0 when even the floor cannot be afforded, meaning the caller should
+ * keep its own context and accept a partial offload.
+ */
+export function contextForFullOffload({
+  fileSize = 0,
+  kvBytesPerToken = 0,
+  vramBytes = 0,
+  maxContext = 0,
+  floor = 4096,
+  share = GPU_SHARE,
+  overheadBytes = GPU_OVERHEAD_BYTES,
+} = {}) {
+  if (!vramBytes || !fileSize || !kvBytesPerToken || !maxContext) return 0;
+
+  const spare = vramBytes * share - overheadBytes - fileSize;
+  if (spare <= 0) return 0; // the weights alone do not fit; nothing to trade
+
+  const affordable = Math.floor(spare / kvBytesPerToken / 512) * 512;
+  const context = Math.min(affordable, maxContext);
+  return context >= floor ? context : 0;
+}
+
+/**
  * How many layers to offload.
  *
  * The per-layer cost is approximated as `fileSize / blockCount`. That is
@@ -77,8 +119,8 @@ export function recommendGpuLayers({
   contextTokens = 0,
   kvBytesPerToken = 0,
   vramBytes = 0,
-  share = 0.9,
-  overheadBytes = 700 * 1024 * 1024,
+  share = GPU_SHARE,
+  overheadBytes = GPU_OVERHEAD_BYTES,
   full = 999,
 } = {}) {
   const layers = Number(meta?.blockCount) || 0;

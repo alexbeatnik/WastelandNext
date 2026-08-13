@@ -7,6 +7,7 @@
  * turn is running.
  */
 import { formatSize, splitThinking, stripActionBlocks } from '../shared/render.mjs';
+import { parseMarkdown } from '../shared/markdown.mjs';
 
 const api = window.wasteland;
 const $ = (id) => document.getElementById(id);
@@ -79,6 +80,62 @@ function addTurn(kind, text) {
   return node;
 }
 
+/** One inline span as a DOM node. */
+function inlineNode(span) {
+  if (span.type === 'code') return el('code', '', span.text);
+  if (span.type === 'bold') return el('strong', '', span.text);
+  if (span.type === 'italic') return el('em', '', span.text);
+  if (span.type === 'link') {
+    const link = el('a', '', span.text);
+    link.href = span.href;
+    // `target` sends it through the window-open handler, which hands it to the
+    // real browser. Without it the chat window itself would navigate away.
+    link.target = '_blank';
+    link.rel = 'noreferrer noopener';
+    return link;
+  }
+  return document.createTextNode(span.text);
+}
+
+/**
+ * Draw a reply as markdown.
+ *
+ * Built node by node rather than through `innerHTML`: the text comes from a
+ * model, and a reply that happens to contain markup must be shown, not run.
+ */
+function addMarkdownTurn(kind, text) {
+  const node = el('div', `turn ${kind} md`);
+
+  for (const block of parseMarkdown(text)) {
+    if (block.type === 'code') {
+      const pre = el('pre', 'code-block');
+      pre.append(el('code', '', block.text));
+      node.append(pre);
+      continue;
+    }
+
+    if (block.type === 'list') {
+      const list = el(block.ordered ? 'ol' : 'ul');
+      for (const item of block.items) {
+        const li = el('li');
+        for (const span of item) li.append(inlineNode(span));
+        list.append(li);
+      }
+      node.append(list);
+      continue;
+    }
+
+    const tag =
+      block.type === 'heading' ? `h${Math.min(4, block.level + 2)}` : block.type === 'quote' ? 'blockquote' : 'p';
+    const element = el(tag);
+    for (const span of block.inline) element.append(inlineNode(span));
+    node.append(element);
+  }
+
+  $('chat-log').append(node);
+  return node;
+}
+
 /** Draw one stored message, splitting reasoning out and hiding action fences. */
 function renderMessage(message) {
   if (message.role === 'user') return void addTurn('user', message.content);
@@ -97,7 +154,7 @@ function renderMessage(message) {
       if (!hideThinking) addTurn('think', segment.content);
     } else {
       const prose = stripActionBlocks(segment.content);
-      if (prose) addTurn('assistant', prose);
+      if (prose) addMarkdownTurn('assistant', prose);
     }
   }
 }
@@ -547,9 +604,8 @@ function applySettings(settings) {
   $('set-system-prompt').value = settings.systemPrompt;
 
   $('set-browser-enabled').checked = settings.browserEnabled;
-  $('set-browser-mode').value = settings.browserMode;
   $('set-browser-headless').checked = settings.browserHeadless;
-  $('set-cdp').value = settings.cdpEndpoint;
+  $('set-skip-ads').checked = settings.skipYouTubeAds;
   $('set-chrome').value = settings.chromePath;
 
   $('set-allow-browser').checked = settings.allowBrowser;
@@ -925,11 +981,11 @@ function wire() {
   bindText('set-endpoint', 'externalEndpoint');
   bindText('set-llama-path', 'llamaServerPath');
   bindText('set-system-prompt', 'systemPrompt');
-  bindText('set-cdp', 'cdpEndpoint');
   bindText('set-chrome', 'chromePath');
 
   bindCheck('set-browser-enabled', 'browserEnabled');
   bindCheck('set-browser-headless', 'browserHeadless');
+  bindCheck('set-skip-ads', 'skipYouTubeAds');
   bindCheck('set-allow-browser', 'allowBrowser');
   bindCheck('set-allow-lookup', 'allowWebLookup');
   bindCheck('set-allow-read', 'allowReadFile');
@@ -937,7 +993,6 @@ function wire() {
   bindCheck('set-crt', 'crtEffects');
 
   $('set-crt').addEventListener('change', (event) => document.body.classList.toggle('no-crt', !event.target.checked));
-  $('set-browser-mode').addEventListener('change', (event) => saveSetting({ browserMode: event.target.value }));
 }
 
 async function answerShell(approved) {

@@ -45,10 +45,15 @@ export const DEFAULTS = {
 
   /** Browser */
   browserEnabled: true,
-  browserMode: 'launch', // 'launch' | 'attach'
   browserHeadless: false,
-  cdpEndpoint: 'http://127.0.0.1:9222',
   chromePath: '',
+  /**
+   * Click YouTube's skip button as soon as it appears.
+   *
+   * Scoped to YouTube: a general "click anything that says skip" would
+   * eventually click something that matters somewhere nobody was considering.
+   */
+  skipYouTubeAds: true,
 
   /** Agent capabilities */
   allowBrowser: true,
