@@ -212,32 +212,69 @@ async function loadChat(id) {
   await refreshChats();
 }
 
+function setChatMenu(open) {
+  $('chat-menu').hidden = !open;
+  $('chat-current').setAttribute('aria-expanded', String(open));
+}
+
+/**
+ * Draw the picker: the open conversation on the button, all of them in the menu.
+ *
+ * Each row carries its own delete, so a conversation can be thrown away without
+ * being opened first. That matters more than it sounds: the only other way to
+ * delete one was to switch to it, which means loading a transcript, recomputing
+ * the meter and making it the current chat — all to get rid of it.
+ */
+function paintChatPicker(chats) {
+  const open = chats.find((chat) => chat.id === state.chatId);
+  $('chat-current-label').textContent = open ? open.title || 'Untitled' : '— new conversation —';
+
+  const menu = $('chat-menu');
+  menu.replaceChildren();
+
+  if (chats.length === 0) {
+    menu.append(el('div', 'chat-empty muted', 'No conversations yet.'));
+    return;
+  }
+
+  for (const chat of chats) {
+    const row = el('div', `chat-row${chat.id === state.chatId ? ' current' : ''}`);
+
+    const pick = el('button', 'chat-pick');
+    pick.title = `${chat.turns} turn(s) · ${chat.updated ?? ''}`;
+    pick.append(el('span', 'chat-title', chat.title || 'Untitled'));
+    pick.append(el('span', 'muted', `${chat.turns}`));
+    pick.addEventListener('click', async () => {
+      setChatMenu(false);
+      await loadChat(chat.id);
+    });
+
+    const drop = el('button', 'chat-drop danger', '×');
+    drop.title = `Delete "${chat.title || 'Untitled'}"`;
+    drop.addEventListener('click', async () => {
+      await api.chats.remove(chat.id);
+      // Deleting the conversation on screen has to clear the transcript with
+      // it; deleting any other must leave the view exactly where it was. The
+      // menu stays open either way, so several can go in one visit.
+      if (chat.id === state.chatId) await loadChat('');
+      else await refreshChats();
+      setChatMenu(true);
+    });
+
+    row.append(pick, drop);
+    menu.append(row);
+  }
+}
+
 /**
  * Fill the conversation picker.
  *
  * A chat is only created once something has been said in it, so a fresh one has
- * no id yet — hence the placeholder entry. Without it the picker would show the
+ * no id yet — hence the placeholder label. Without it the picker would show the
  * previous conversation's name while the user typed into a new one.
  */
 async function refreshChats() {
-  const chats = await api.chats.list();
-  const select = $('chat-select');
-  select.replaceChildren();
-
-  if (!state.chatId) {
-    const blank = el('option', '', '— new conversation —');
-    blank.value = '';
-    select.append(blank);
-  }
-
-  for (const chat of chats) {
-    const option = el('option', '', chat.title || 'Untitled');
-    option.value = chat.id;
-    option.title = `${chat.turns} turn(s) · ${chat.updated ?? ''}`;
-    select.append(option);
-  }
-
-  select.value = state.chatId;
+  paintChatPicker(await api.chats.list());
   $('btn-delete-chat').disabled = !state.chatId;
 }
 
@@ -559,6 +596,19 @@ function paintCtx({ used = 0, max = 0, percent = 0 } = {}) {
 
 /* ============================ attachments ============================ */
 
+/**
+ * The last two segments of a path.
+ *
+ * A bare basename is not an answer to "what did I attach": half the folders
+ * worth attaching are called `src`, `test` or `docs`, and two of them side by
+ * side would be one label written twice. The parent is what tells them apart,
+ * and it is short enough to sit in a chip.
+ */
+function shortPath(path) {
+  const parts = String(path).split(/[/\\]/).filter(Boolean);
+  return parts.slice(-2).join('/');
+}
+
 /** The chips above the composer: what will go with the next message. */
 function paintAttachments(items = []) {
   const chips = $('attach-chips');
@@ -566,19 +616,25 @@ function paintAttachments(items = []) {
 
   for (const item of items) {
     const chip = el('div', 'chip');
+    // The whole path stays on hover. The chip says which one, the tooltip says
+    // exactly where — a chip wide enough for the second would fit one item.
     chip.title = `${item.path}\n${item.files} file(s), ${formatSize(item.bytes)}`;
-    chip.append(el('span', '', item.kind === 'dir' ? '▸' : '▪'));
-    chip.append(el('span', 'chip-name', item.name));
-    chip.append(el('span', 'muted', item.kind === 'dir' ? `${item.files}f` : formatSize(item.bytes)));
+
+    chip.append(el('span', 'chip-kind', item.kind === 'dir' ? 'DIR' : 'FILE'));
+    chip.append(el('span', 'chip-name', shortPath(item.path)));
+    chip.append(
+      el('span', 'muted', item.kind === 'dir' ? `${item.files} files · ${formatSize(item.bytes)}` : formatSize(item.bytes)),
+    );
 
     const detach = el('button', '', '×');
-    detach.title = 'Detach';
+    detach.title = `Detach ${item.path}`;
     detach.addEventListener('click', async () => paintAttachments(await api.attach.remove(item.id)));
     chip.append(detach);
     chips.append(chip);
   }
 
   $('btn-attach-clear').hidden = items.length === 0;
+  $('btn-attach-clear').title = `Detach all ${items.length}`;
 }
 
 /**
@@ -1055,7 +1111,19 @@ function wire() {
   });
 
   $('btn-new-chat').addEventListener('click', () => loadChat(''));
-  $('chat-select').addEventListener('change', (event) => loadChat(event.target.value));
+  $('chat-current').addEventListener('click', (event) => {
+    // Or the document handler below would close it again in the same click.
+    event.stopPropagation();
+    setChatMenu($('chat-menu').hidden);
+  });
+
+  // Clicks inside the menu are the menu's own business — picking closes it, and
+  // deleting deliberately does not, so several can go in one visit.
+  $('chat-menu').addEventListener('click', (event) => event.stopPropagation());
+  document.addEventListener('click', () => setChatMenu(false));
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') setChatMenu(false);
+  });
 
   $('btn-delete-chat').addEventListener('click', async () => {
     if (!state.chatId) return;

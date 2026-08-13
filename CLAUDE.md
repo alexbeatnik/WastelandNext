@@ -174,6 +174,18 @@ some layers run on the CPU — a model that forgets what it was asked is not wor
 **`compact()` refuses while a turn is running.** It rewrites the whole message list, and a turn appending to the same
 file at that moment loses messages.
 
+**The conversation picker is not a `<select>`, and cannot become one again.** Every row carries its own delete, which a
+native option cannot hold. Deleting from the list must not open the conversation first: the only way to delete one used
+to be to switch to it, which loads a transcript and recomputes the meter for something about to be thrown away.
+Deleting the chat that is *on screen* clears the transcript with it; deleting any other leaves the view untouched, and
+the menu stays open either way so several can go in one visit. `smoke.mjs` drives `.chat-row`, not `.options` — a
+picker rewritten back into a `<select>` would fail there first.
+
+**An attachment chip is labelled `parent/name`, not by basename.** Half the folders worth attaching are called `src`,
+`test` or `docs`; two of them side by side would be one label written twice, and the delete button next to it would be
+a guess. The full path is the tooltip — a chip wide enough to show it would fit one item. The chips row wraps rather
+than scrolling sideways, because an attachment scrolled out of view is one the user cannot see to remove.
+
 **An attachment is folded into the transcript once, not re-sent every turn.** `Attachments` is a pending list that
 `send()` empties into one `tool` message ahead of the user's words. Held outside the transcript and prepended to every
 prompt instead, the same folder would go over the wire five times in five turns — and would sit outside compaction,

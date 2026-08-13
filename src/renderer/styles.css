@@ -820,9 +820,101 @@ input[type='checkbox']:checked {
   color: var(--amber-dim);
 }
 
-.chat-bar select {
+/* The conversation picker: a button that opens a list, because each row needs a
+   delete of its own and a native <select> cannot hold one. */
+.chat-picker {
+  position: relative;
   flex: 1;
   min-width: 0;
+}
+
+.chat-current {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  background: var(--bg-deep);
+}
+
+#chat-current-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-caret {
+  color: var(--amber-dim);
+}
+
+.chat-menu {
+  position: absolute;
+  top: calc(100% + 0.2rem);
+  left: 0;
+  right: 0;
+  /* Above the transcript and above the drop veil, which sits at 5. */
+  z-index: 20;
+  max-height: 18rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-deep);
+  border: 1px solid var(--amber-dim);
+  box-shadow: 0 0 24px rgba(0, 0, 0, 0.9);
+}
+
+/* Required, not decorative: `hidden` is only the UA rule
+   `[hidden] { display: none }`, and the `display: flex` above outranks it. The
+   drop veil shipped visible from boot for exactly this reason. */
+.chat-menu[hidden] {
+  display: none;
+}
+
+.chat-row {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--amber-faint);
+}
+
+.chat-row:last-child {
+  border-bottom: 0;
+}
+
+.chat-row.current {
+  background: #1a1200;
+}
+
+.chat-pick {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+}
+
+.chat-pick .chat-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-drop {
+  border: 0;
+  background: none;
+  color: var(--amber-faint);
+}
+
+.chat-drop:hover:not(:disabled) {
+  color: var(--warn);
+  background: none;
+}
+
+.chat-empty {
+  padding: 0.4rem 0.5rem;
 }
 
 .ctx-row {
@@ -851,9 +943,13 @@ input[type='checkbox']:checked {
   flex: 1;
   min-width: 0;
   gap: 0.3rem;
-  overflow-x: auto;
-  /* One row that scrolls, not a stack that grows: a dropped folder must not be
-     able to push the composer off the bottom of a short window. */
+  /* Wraps rather than scrolling sideways: an attachment that has scrolled out
+     of view is one the user cannot see to remove, which is the whole job of
+     this row. Capped in height so a dropped handful still cannot push the
+     composer off the bottom of a short window. */
+  flex-wrap: wrap;
+  max-height: 4.6rem;
+  overflow-y: auto;
   scrollbar-width: thin;
 }
 
@@ -862,7 +958,7 @@ input[type='checkbox']:checked {
   align-items: center;
   gap: 0.3rem;
   flex: 0 0 auto;
-  max-width: 16rem;
+  max-width: 22rem;
   padding: 0.1rem 0.4rem;
   border: 1px solid var(--amber-faint);
   color: var(--amber-dim);
@@ -873,6 +969,15 @@ input[type='checkbox']:checked {
 .chip .chip-name {
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--amber);
+}
+
+/* DIR or FILE, so the two are told apart by a word rather than by a glyph the
+   user has to have learned. */
+.chip .chip-kind {
+  color: var(--amber-faint);
+  font-size: 0.85em;
+  letter-spacing: 0.06em;
 }
 
 .chip button {

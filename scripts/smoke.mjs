@@ -152,11 +152,9 @@ async function checkChatControls(window) {
 
   // Pick the seeded conversation from the picker above the transcript.
   const before = await window.webContents.executeJavaScript(`(() => {
-    const select = document.getElementById('chat-select');
-    const seeded = [...select.options].find((o) => o.value);
-    if (!seeded) return false;
-    select.value = seeded.value;
-    select.dispatchEvent(new Event('change', { bubbles: true }));
+    const pick = document.querySelector('#chat-menu .chat-row .chat-pick');
+    if (!pick) return false;
+    pick.click();
     return true;
   })()`);
   assertOk(before);
@@ -164,13 +162,13 @@ async function checkChatControls(window) {
 
   const loaded = await window.webContents.executeJavaScript(`(() => ({
     turns: document.querySelectorAll('#chat-log .turn').length,
-    selected: document.getElementById('chat-select').value,
-    label: document.getElementById('chat-select').selectedOptions[0]?.textContent ?? '',
+    current: document.querySelector('#chat-menu .chat-row.current') !== null,
+    label: document.getElementById('chat-current-label').textContent,
     deletable: !document.getElementById('btn-delete-chat').disabled,
     ctx: document.getElementById('ctx-label').textContent,
   }))()`);
   check(`seeded chat renders — ${loaded.turns} turn(s)`, loaded.turns === 3);
-  check(`the picker shows the open conversation — ${loaded.label}`, Boolean(loaded.selected));
+  check(`the picker shows the open conversation — ${loaded.label}`, loaded.current, JSON.stringify(loaded));
   check('an open conversation can be deleted', loaded.deletable);
 
   // Push a real context reading in first: checking that the meter reads 0%
@@ -186,17 +184,17 @@ async function checkChatControls(window) {
   const fresh = await window.webContents.executeJavaScript(`(() => ({
     turns: document.querySelectorAll('#chat-log .turn').length,
     cards: document.querySelectorAll('#chat-log .action-card').length,
-    selected: document.getElementById('chat-select').value,
-    label: document.getElementById('chat-select').selectedOptions[0]?.textContent ?? '',
-    options: document.getElementById('chat-select').options.length,
+    label: document.getElementById('chat-current-label').textContent,
+    current: document.querySelector('#chat-menu .chat-row.current') !== null,
+    rows: document.querySelectorAll('#chat-menu .chat-row').length,
     deletable: !document.getElementById('btn-delete-chat').disabled,
     ctx: document.getElementById('ctx-label').textContent,
     input: document.getElementById('input').value,
   }))()`);
   check('NEW CHAT empties the transcript', fresh.turns === 0 && fresh.cards === 0, `${fresh.turns} turn(s)`);
-  check(`NEW CHAT selects the placeholder — ${fresh.label}`, fresh.selected === '');
+  check(`NEW CHAT selects the placeholder — ${fresh.label}`, /new conversation/.test(fresh.label) && !fresh.current);
   // The seeded chat is still there to go back to; only the selection moved.
-  check(`the earlier conversation is still listed — ${fresh.options} entries`, fresh.options >= 2);
+  check(`the earlier conversation is still listed — ${fresh.rows} entries`, fresh.rows >= 1);
   check('there is nothing to delete on a blank conversation', !fresh.deletable);
   check('NEW CHAT clears the composer', fresh.input === '', JSON.stringify(fresh.input));
 
@@ -204,6 +202,49 @@ async function checkChatControls(window) {
   // number was recomputed and is small — not that it is literally zero.
   const used = Number(/CTX: (\d+)/.exec(fresh.ctx)?.[1] ?? -1);
   check(`NEW CHAT recomputes the context meter — ${fresh.ctx}`, used >= 0 && used < 2000);
+
+  // The menu itself. `hidden` is checked through the computed style, because
+  // any author-level `display` outranks the attribute and the two can disagree
+  // — which is exactly how the drop veil shipped visible from boot.
+  const menu = await window.webContents.executeJavaScript(`(() => {
+    const node = document.getElementById('chat-menu');
+    const shut = getComputedStyle(node).display;
+    document.getElementById('chat-current').click();
+    return { shut, open: getComputedStyle(node).display };
+  })()`);
+  check('the chat menu starts closed', menu.shut === 'none', JSON.stringify(menu));
+  check('clicking the picker opens it', menu.open !== 'none', JSON.stringify(menu));
+
+  // Deleting from the list, without opening the conversation first — the thing
+  // a native <select> could not offer. The transcript is blank here (NEW CHAT
+  // above), so it must still be blank afterwards: deleting some other chat must
+  // not disturb the one on screen.
+  const dropped = await window.webContents.executeJavaScript(`(async () => {
+    const rows = document.querySelectorAll('#chat-menu .chat-row');
+    const before = rows.length;
+    const name = rows[0].querySelector('.chat-title').textContent;
+    rows[0].querySelector('.chat-drop').click();
+    await new Promise((r) => setTimeout(r, 400));
+    return {
+      before,
+      after: document.querySelectorAll('#chat-menu .chat-row').length,
+      name,
+      names: [...document.querySelectorAll('#chat-menu .chat-title')].map((n) => n.textContent),
+      turns: document.querySelectorAll('#chat-log .turn').length,
+      stillOpen: getComputedStyle(document.getElementById('chat-menu')).display !== 'none',
+    };
+  })()`);
+  check(`a conversation is deleted from the list — ${dropped.name}`, dropped.after === dropped.before - 1, JSON.stringify(dropped));
+  check('the deleted one is gone from the list', !dropped.names.includes(dropped.name), JSON.stringify(dropped.names));
+  check('deleting another conversation leaves the open one alone', dropped.turns === 0, `${dropped.turns} turn(s)`);
+  check('the menu stays open, so several can go in one visit', dropped.stillOpen);
+
+  await window.webContents.executeJavaScript(`document.body.click()`);
+  await new Promise((r) => setTimeout(r, 150));
+  const shut = await window.webContents.executeJavaScript(
+    `getComputedStyle(document.getElementById('chat-menu')).display`,
+  );
+  check('clicking away closes the menu', shut === 'none', shut);
 
   await checkComposerKeys(window);
 }
@@ -287,11 +328,33 @@ async function checkAttachments(window) {
   const chips = await window.webContents.executeJavaScript(`(() => ({
     count: document.querySelectorAll('#attach-chips .chip').length,
     name: document.querySelector('#attach-chips .chip-name')?.textContent ?? '',
+    kind: document.querySelector('#attach-chips .chip-kind')?.textContent ?? '',
+    title: document.querySelector('#attach-chips .chip')?.title ?? '',
     clearShown: !document.getElementById('btn-attach-clear').hidden,
   }))()`);
   check('the chip reaches the composer row', chips.count === 1, JSON.stringify(chips));
-  check(`the chip is named after the folder — ${chips.name}`, chips.name.length > 0);
+  // Named by parent/name, not by basename: half the folders worth attaching are
+  // called `src`, and two of those would be one label written twice.
+  check(`the chip names the folder and its parent — ${chips.name}`, chips.name.includes('/'), chips.name);
+  check(`a folder is labelled as one — ${chips.kind}`, chips.kind === 'DIR');
+  check('the full path is on hover', chips.title.includes(process.cwd().split('\\').pop()), chips.title);
   check('CLEAR appears once something is attached', chips.clearShown === true);
+
+  // Removing one must remove exactly one. A detach button wired to the wrong id
+  // — or to the clear-all — is invisible until the moment it costs somebody the
+  // attachment they meant to keep.
+  const detached = await window.webContents.executeJavaScript(`(async () => {
+    await window.wasteland.attach.add([${JSON.stringify(join(process.cwd(), 'package.json'))}]);
+    await new Promise((r) => setTimeout(r, 150));
+    const before = document.querySelectorAll('#attach-chips .chip').length;
+    document.querySelector('#attach-chips .chip button').click();
+    await new Promise((r) => setTimeout(r, 250));
+    const chip = document.querySelector('#attach-chips .chip .chip-name');
+    return { before, after: document.querySelectorAll('#attach-chips .chip').length, left: chip?.textContent ?? '' };
+  })()`);
+  check('two attachments coexist', detached.before === 2, JSON.stringify(detached));
+  check('detaching one leaves the other', detached.after === 1, JSON.stringify(detached));
+  check(`the one left is the one not detached — ${detached.left}`, detached.left.includes('package.json'));
 
   const skipped = await window.webContents.executeJavaScript(
     `window.wasteland.attach.add(['${'/definitely/not/here'}']).then((r) => r.errors.length)`,

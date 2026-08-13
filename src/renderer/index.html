@@ -140,7 +140,16 @@
       <section class="panel panel-chat">
         <div class="chat-bar">
           <span class="caret">▤</span>
-          <select id="chat-select" title="Switch conversation"></select>
+          <!-- A native <select> cannot carry a button per row, and deleting a
+               conversation from the list is the whole point of this one. -->
+          <div class="chat-picker">
+            <button id="chat-current" class="chat-current" aria-haspopup="listbox" aria-expanded="false"
+                    title="Switch or delete a conversation">
+              <span id="chat-current-label">— new conversation —</span>
+              <span class="chat-caret">▾</span>
+            </button>
+            <div class="chat-menu" id="chat-menu" role="listbox" hidden></div>
+          </div>
           <button id="btn-new-chat" title="Start a new conversation">[ NEW ]</button>
           <button id="btn-delete-chat" class="ghost danger" title="Delete this conversation">×</button>
         </div>
