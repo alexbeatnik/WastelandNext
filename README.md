@@ -124,6 +124,33 @@ Stages manul-browser, then runs electron-builder. Two artifacts land in `dist/`:
 
 `dist/win-unpacked/` holds the same app as a plain directory, which is the quickest thing to debug against.
 
+## Releases and self-update
+
+Pushing a **changed `version` in `package.json`** to `main` publishes a release. `.github/workflows/release.yml` reads
+the version, does nothing if a `v<version>` tag already exists, and otherwise builds on a Windows runner and creates
+the release with `gh`. It uploads four files: the installer, its `.blockmap`, the portable exe and `latest.yml`.
+
+`latest.yml` is the one that matters — it is what the in-app updater reads to discover a new build, and a release
+without it looks to every installed copy like no release at all. The workflow refuses to publish if it is missing, and
+also refuses if the installer name recorded inside it does not match the asset being uploaded, because the updater
+resolves the download through that name and would otherwise 404 on every machine. The `.blockmap` is not required, but
+without it an update re-downloads all 75 MB instead of the parts that changed.
+
+The runner builds the engine from source, so it checks out `manul-browser` alongside, installs Go, compiles the Node
+binding, and **fails the release if `resources/bin/manul.exe` is not there afterwards** — a release that quietly ships
+without browser control is worse than one that does not ship.
+
+The installed build checks for updates a few seconds after launch, downloads in the background and installs on
+restart, so nothing interrupts a turn. `[ ABOUT ]` shows what it is doing and offers `[ CHECK ]`, or `[ RESTART ]` once
+a build is waiting. Before the installer runs, llama-server and the controlled Chrome are shut down: `quitAndInstall`
+starts the installer and *then* asks the app to quit, and an orphaned llama-server holding port 8080 would make the
+next run report a model as loaded while talking to something else.
+
+The **portable** exe does not self-update — there is no installed copy to replace — and says so rather than offering a
+button that could only fail. Downloading a new portable exe is the whole update.
+
+Nothing is signed, so SmartScreen warns on first run and after each update.
+
 The packaged app carries the engine and the binding in its own `resources/`, so it needs neither the checkout nor Go on
 the machine that runs it. It still needs Chrome for browser control and `llama-server` (or a remote endpoint) for
 inference. The build is unsigned — Windows SmartScreen will warn on first run.

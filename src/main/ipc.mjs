@@ -18,6 +18,7 @@ import { server } from './llm/server.mjs';
 import { downloadLlamaServer, llamaServerStatus } from './llm/tools.mjs';
 import { BrowserBridge, browser, engineAvailable } from './browser/manul-browser.mjs';
 import { Agent } from './agent/agent.mjs';
+import { Updater } from './updater.mjs';
 
 /**
  * The build's version, for the About box.
@@ -43,6 +44,8 @@ const agent = new Agent({ server, browser, lookupBrowser });
 
 let getWindow = () => null;
 let download = null;
+/** Created in `registerIpc`, because it reports through the window it needs. */
+let updater = null;
 
 function send(event, payload = {}) {
   const window = getWindow();
@@ -58,6 +61,7 @@ function snapshot() {
     engine: engineAvailable(),
     busy: agent.busy,
     version: VERSION,
+    update: updater?.status ?? { state: 'idle' },
   };
 }
 
@@ -210,6 +214,27 @@ export function registerIpc(windowGetter) {
   handle('agent:compact', (chatId) => agent.compact(chatId));
   handle('agent:context', (chatId) => agent.contextFor(chatId));
   handle('shell:respond', (id, approved) => agent.answerShell(id, approved));
+
+  /* ---------- updates ---------- */
+
+  updater = new Updater({
+    onStatus: (status) => send('update:status', status),
+    // The installer replaces this build the moment `quitAndInstall` returns, so
+    // everything this process owns has to be gone first — an orphaned
+    // llama-server keeps port 8080 and makes the *next* run report a model as
+    // loaded while talking to a stranger. Bounded, because an update must not
+    // be held hostage by a Chrome that will not close.
+    teardown: () =>
+      Promise.race([
+        Promise.allSettled([shutdown(), server.unload()]),
+        new Promise((resolve) => setTimeout(resolve, 8000)),
+      ]).then(() => {}),
+  });
+  updater.start();
+
+  handle('update:status', () => updater.status);
+  handle('update:check', () => updater.check());
+  handle('update:install', () => updater.install());
 
   /* ---------- attachments ---------- */
 

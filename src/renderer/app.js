@@ -7,6 +7,7 @@
  * turn is running.
  */
 import { formatDuration, formatSize, splitThinking, stripActionBlocks } from '../shared/render.mjs';
+import { describeUpdate, isBusy, isReady } from '../shared/updates.mjs';
 import { parseMarkdown } from '../shared/markdown.mjs';
 
 const api = window.wasteland;
@@ -23,6 +24,7 @@ const state = {
   autoContext: null,
   autoGpu: null,
   llmReady: false,
+  update: { state: 'idle' },
 };
 
 /* ============================ small helpers ============================ */
@@ -594,6 +596,23 @@ function paintCtx({ used = 0, max = 0, percent = 0 } = {}) {
   meter.firstElementChild.style.width = `${Math.min(100, Math.max(0, safePercent))}%`;
 }
 
+/* ============================ updates ============================ */
+
+/** The update line in the About box. Wording lives in `shared/updates.mjs`. */
+function paintUpdate(status = { state: 'idle' }) {
+  $('update-status').textContent = describeUpdate(status);
+  $('about-update').className = `about-update${isReady(status) ? ' ready' : ''}${
+    status.state === 'error' ? ' bad' : ''
+  }`;
+
+  const button = $('btn-update');
+  // Hidden while something is in flight, and for a build that cannot update
+  // itself at all — a button whose only outcome is a failure is worse than none.
+  button.hidden = isBusy(status) || status.state === 'unsupported';
+  button.textContent = isReady(status) ? '[ RESTART ]' : '[ CHECK ]';
+  button.title = isReady(status) ? 'Restart and install the update' : 'Check for a newer version';
+}
+
 /* ============================ attachments ============================ */
 
 /**
@@ -886,6 +905,13 @@ function handleEvent(payload) {
       activity(payload.text);
       break;
 
+    // Kept in `state` as well as painted: the button has to know whether it is
+    // offering a check or a restart, and the box may be shut when this lands.
+    case 'update:status':
+      state.update = payload;
+      paintUpdate(payload);
+      break;
+
     case 'attach:changed':
       paintAttachments(payload.items ?? []);
       break;
@@ -1114,6 +1140,17 @@ function wire() {
     $('about-modal').hidden = !open;
   };
   $('btn-about').addEventListener('click', () => about(true));
+
+  $('btn-update').addEventListener('click', async () => {
+    try {
+      // One button, two jobs, because they are never both offered: RESTART only
+      // appears once a build is downloaded and waiting.
+      if (state.update?.state === 'ready') await api.updates.install();
+      else paintUpdate(await api.updates.check());
+    } catch (err) {
+      paintUpdate({ state: 'error', message: err.message });
+    }
+  });
   $('btn-about-close').addEventListener('click', () => about(false));
   $('about-modal').addEventListener('click', (event) => {
     // Only the backdrop closes it; a click on the box itself must not, or
@@ -1277,6 +1314,8 @@ async function boot() {
 
   const snapshot = await api.snapshot();
   $('about-version').textContent = `Version ${snapshot.version ?? '—'} · Apache 2.0`;
+  state.update = snapshot.update ?? { state: 'idle' };
+  paintUpdate(state.update);
   // Set before `applySettings`, which paints the context row from it.
   state.autoContext = snapshot.llm.autoContext ?? null;
   state.autoGpu = snapshot.llm.autoGpu ?? null;

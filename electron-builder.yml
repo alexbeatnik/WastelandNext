@@ -12,6 +12,14 @@ directories:
   output: dist
   buildResources: assets
 
+# Where the in-app updater looks for a newer build. electron-builder also writes
+# `latest.yml` from this, which is the file the updater actually reads — the
+# release workflow must upload it beside the installer or nothing self-updates.
+publish:
+  - provider: github
+    owner: alexbeatnik
+    repo: WastelandNext
+
 # Only what the app actually loads at runtime. Tests, build scripts and the
 # staged resources are excluded here — the last of those is shipped through
 # extraResources instead, so it lands beside the app rather than inside it.
@@ -20,6 +28,12 @@ files:
   - package.json
   # Apache 2.0 §4(a): recipients of a redistribution get a copy of the licence.
   - LICENSE
+  # Naming any include at all replaces the default `**/*`, which is what used to
+  # pull node_modules in. Without this line the packaged app starts and then
+  # dies on `Cannot find module 'electron-updater'` — and only when packaged,
+  # since a development run resolves it from the checkout. electron-builder
+  # prunes devDependencies itself, so this ships the updater and nothing else.
+  - node_modules/**/*
   - '!**/*.map'
 
 extraResources:

@@ -61,6 +61,24 @@ like it was ignored. The path comes from `webUtils.getPathForFile`, which lives 
 since it is what stops the renderer turning an arbitrary `File` into a path on its own. It works in a sandboxed preload,
 so the sandbox stays on.
 
+**Naming any `files` entry in `electron-builder.yml` replaces the default `**/*`, and `node_modules` goes with it.** The
+config lists `src/**/*`, `package.json` and `LICENSE`, so the first runtime dependency — `electron-updater` — was
+simply absent from the package. It fails only when packaged, since a development run resolves it from the checkout, and
+it fails at import time with `Cannot find module`. `node_modules/**/*` is listed explicitly now; electron-builder prunes
+devDependencies itself, so that ships the updater and little else.
+
+**`quitAndInstall` spawns the installer and only then asks the app to quit.** Everything this process owns must already
+be gone: an orphaned llama-server keeps port 8080, and the *next* run then reports a model as loaded while talking to a
+stranger — a wrong answer that looks exactly like a right one. The updater's `teardown` runs `shutdown()` and
+`server.unload()` first, bounded at 8 s so a Chrome that will not close cannot hold an update hostage. Install is
+silent (`quitAndInstall(true, true)`): the full NSIS wizard opens by asking the user to close an app the updater has
+just closed for them.
+
+**A repository with no releases is not an update failure.** electron-updater throws "No published versions" and
+reporting that as an error sends the user hunting for a firewall that was never in the way. `classifyError` in
+`shared/updates.mjs` maps it to `current`; it lives in `shared/` rather than beside the updater because `updater.mjs`
+imports `electron` and therefore cannot be unit-tested at all.
+
 **`app.getVersion()` answers with *Electron's* version when it cannot find the app manifest.** `electron
 scripts/smoke.mjs` is exactly that case, so the About box read `Version 34.5.8` and the check — which only asserted a
 version-shaped string — passed on it. `VERSION` in `ipc.mjs` parses our own `package.json` through a URL relative to

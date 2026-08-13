@@ -67,6 +67,12 @@ contextBridge.exposeInMainWorld('wasteland', {
     close: () => call('browser:close'),
   },
 
+  updates: {
+    status: () => call('update:status'),
+    check: () => call('update:check'),
+    install: () => call('update:install'),
+  },
+
   attach: {
     list: () => call('attach:list'),
     add: (paths) => call('attach:add', paths),

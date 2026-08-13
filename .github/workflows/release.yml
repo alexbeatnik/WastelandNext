@@ -1,0 +1,180 @@
+name: Release
+
+# Builds the Windows installer and the portable exe and publishes both as a
+# GitHub Release whenever the version in package.json changes on main. Safe to
+# run on every push: it no-ops if a release for the current version already
+# exists. Can also be triggered by hand to (re)build the current version.
+#
+# The version check is a separate job so the Windows build — which compiles a Go
+# engine and a TypeScript binding before it even starts — never starts for a
+# version that is already out.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'assets/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'electron-builder.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from package.json
+        id: version
+        run: |
+          ver=$(node -p "require('./package.json').version")
+          if [ -z "$ver" ]; then
+            echo "Could not read version from package.json" >&2
+            exit 1
+          fi
+          echo "Version: $ver"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if this version was already released
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Release ${{ steps.version.outputs.tag }} already exists, skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release yet for ${{ steps.version.outputs.tag }} - will create one."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    name: Windows build and publish
+    needs: check
+    if: needs.check.outputs.skip == 'false'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: WastelandNext
+
+      # Both halves of the browser engine are built from source and staged into
+      # resources/ — a packaged .exe cannot reach a checkout, so if this is not
+      # here the release ships without browser control and nothing says so.
+      - name: Checkout manul-browser
+        uses: actions/checkout@v4
+        with:
+          repository: alexbeatnik/manul-browser
+          path: manul-browser
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: WastelandNext/package-lock.json
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: manul-browser/core/go.sum
+
+      # The binding ships as compiled JavaScript; `npm run build` is what turns
+      # its TypeScript into the dist that gets staged.
+      - name: Build the manul-browser Node binding
+        working-directory: manul-browser/bindings/node
+        run: |
+          npm ci
+          npm run build
+
+      # MANUL_SOURCE is set for every step that stages the engine, because the
+      # search only looks for sibling directories by name and the checkout paths
+      # here are whatever this workflow chose. postinstall stages it once; the
+      # explicit run below is what fails loudly if the engine did not build.
+      - name: Install dependencies
+        working-directory: WastelandNext
+        env:
+          MANUL_SOURCE: ${{ github.workspace }}/manul-browser
+        run: npm ci
+
+      - name: Stage the engine
+        working-directory: WastelandNext
+        env:
+          MANUL_SOURCE: ${{ github.workspace }}/manul-browser
+        run: node scripts/build-manul-browser.mjs
+
+      - name: Fail if the engine is missing
+        shell: pwsh
+        working-directory: WastelandNext
+        run: |
+          foreach ($f in @('resources/bin/manul.exe', 'resources/manul-browser')) {
+            if (-not (Test-Path $f)) {
+              Write-Error "Engine not staged: $f - the release would ship without browser control."
+              exit 1
+            }
+          }
+
+      # Unit tests only. `npm run smoke` boots a real window and drives the
+      # renderer, which is worth running before a release but needs a desktop
+      # session it does not reliably get here.
+      - name: Test
+        working-directory: WastelandNext
+        run: npm test
+
+      # --publish never: the release is created by gh below, so electron-builder
+      # only has to produce the files. Left to itself it would upload them to a
+      # draft release, which never becomes visible.
+      #
+      # latest.yml is still written — it comes from `publish` in
+      # electron-builder.yml, not from this flag — and MUST be uploaded with the
+      # installer. It is the file the in-app updater reads to find a new build.
+      - name: Package
+        working-directory: WastelandNext
+        env:
+          MANUL_SOURCE: ${{ github.workspace }}/manul-browser
+        run: npx electron-builder --win nsis portable --publish never
+
+      - name: Create tag and GitHub Release
+        shell: pwsh
+        working-directory: WastelandNext
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ needs.check.outputs.version }}"
+          $setup = "dist/WastelandNext-$version-setup.exe"
+          $portable = "dist/WastelandNext-$version-portable.exe"
+          $latest = "dist/latest.yml"
+          # The updater asks for "<installer>.blockmap" on both the installed
+          # build and the new one so it can download only the parts that
+          # changed. A release without it still updates - it just pulls all
+          # 75 MB again every time, for a build that usually differs by little.
+          $blockmap = "$setup.blockmap"
+          foreach ($f in @($setup, $blockmap, $portable, $latest)) {
+            if (-not (Test-Path $f)) {
+              Write-Error "Expected artifact not found: $f"
+              exit 1
+            }
+          }
+          # The updater resolves the installer through the name recorded in
+          # latest.yml, so the uploaded asset name has to match it exactly.
+          $expected = (Select-String -Path $latest -Pattern '^path:\s*(.+)$').Matches[0].Groups[1].Value.Trim()
+          if ($expected -ne (Split-Path $setup -Leaf)) {
+            Write-Error "latest.yml points at '$expected' but the installer is '$(Split-Path $setup -Leaf)' - the updater would 404."
+            exit 1
+          }
+          gh release create "${{ needs.check.outputs.tag }}" $setup $blockmap $portable $latest `
+            --title "${{ needs.check.outputs.tag }}" `
+            --generate-notes

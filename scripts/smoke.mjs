@@ -623,6 +623,37 @@ app.whenReady().then(async () => {
       JSON.stringify(about.links.filter((a) => a.target !== '_blank')),
     );
 
+    // Updates. This runner is not a packaged build, so the honest state is
+    // "unsupported" — and the button must be gone rather than offering a check
+    // whose only possible outcome is a failure.
+    const dev = await window.webContents.executeJavaScript(`(() => ({
+      text: document.getElementById('update-status').textContent,
+      button: document.getElementById('btn-update').hidden,
+    }))()`);
+    check(`an unpackaged build says so — ${dev.text}`, /by hand/.test(dev.text), dev.text);
+    check('and offers no update button', dev.button === true);
+
+    // The status arrives on the app's single `event` channel like everything
+    // else; a second channel for one feature is what that design avoids.
+    window.webContents.send('event', { event: 'update:status', state: 'downloading', version: '9.9.9', percent: 42 });
+    await new Promise((r) => setTimeout(r, 150));
+    const busy = await window.webContents.executeJavaScript(`(() => ({
+      text: document.getElementById('update-status').textContent,
+      button: document.getElementById('btn-update').hidden,
+    }))()`);
+    check(`a download in flight is shown — ${busy.text}`, /9\.9\.9/.test(busy.text) && /42%/.test(busy.text), busy.text);
+    check('with the button out of the way while it runs', busy.button === true);
+
+    window.webContents.send('event', { event: 'update:status', state: 'ready', version: '9.9.9' });
+    await new Promise((r) => setTimeout(r, 150));
+    const ready = await window.webContents.executeJavaScript(`(() => ({
+      text: document.getElementById('update-status').textContent,
+      label: document.getElementById('btn-update').textContent,
+      hidden: document.getElementById('btn-update').hidden,
+    }))()`);
+    check(`a downloaded build offers a restart — ${ready.label}`, ready.label.includes('RESTART') && !ready.hidden, JSON.stringify(ready));
+    check('and says which version is waiting', /9\.9\.9/.test(ready.text), ready.text);
+
     const closed = await window.webContents.executeJavaScript(`(() => {
       document.getElementById('btn-about-close').click();
       return getComputedStyle(document.getElementById('about-modal')).display;

@@ -285,6 +285,19 @@ body.no-crt .crt {
 
 /* ============================ Controls ============================ */
 
+/* Any anchor, anywhere. Only `.turn.md a` was ever styled, so the first link
+   outside the transcript — in the About box — fell through to the browser's
+   default #0000EE, which on an amber CRT is the one colour that cannot belong. */
+a {
+  color: var(--amber);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+a:hover {
+  color: var(--amber-bright);
+}
+
 button {
   font: inherit;
   color: var(--amber);
@@ -1132,6 +1145,25 @@ button.send.stop {
   font-size: 1.2em;
 }
 
+.about-update {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-top: 0.8rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--amber-faint);
+  background: var(--bg-deep);
+}
+
+.about-update.ready #update-status {
+  color: var(--ok);
+}
+
+.about-update.bad #update-status {
+  color: var(--warn);
+}
+
 .about-box h3 {
   margin: 1rem 0 0.4rem;
   color: var(--amber-dim);
@@ -1159,6 +1191,17 @@ button.send.stop {
   padding: 0.6rem;
   border: 1px solid var(--amber-faint);
   background: var(--bg-deep);
+}
+
+/* These read as a menu rather than as prose, so the underline only appears
+   under the pointer — four permanently underlined rows is a lot of noise for
+   what is really a list of four buttons. */
+.about-links a {
+  text-decoration: none;
+}
+
+.about-links a:hover {
+  text-decoration: underline;
 }
 
 .about-powered {
