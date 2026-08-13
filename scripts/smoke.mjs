@@ -253,12 +253,19 @@ async function checkContextControls(window) {
       disabled: document.getElementById('set-nctx').disabled,
       shown: document.getElementById('val-nctx').textContent,
       explain: document.getElementById('ctx-explain').textContent,
+      gpuAuto: document.getElementById('set-auto-gpu').checked,
+      gpuDisabled: document.getElementById('set-ngl').disabled,
+      gpuShown: document.getElementById('val-ngl').textContent,
     }))()`);
 
   const on = await read();
   check(`AUTO is on by default — shows "${on.shown}"`, on.auto === true);
   check('the slider is inert while AUTO decides', on.disabled === true);
   check(`AUTO explains itself — "${on.explain}"`, on.explain.length > 0);
+  check(
+    `GPU layers are AUTO too — shows "${on.gpuShown}"`,
+    on.gpuAuto === true && on.gpuDisabled === true && on.gpuShown === 'auto',
+  );
 
   await window.webContents.executeJavaScript(`(() => {
     const box = document.getElementById('set-auto-ctx');
@@ -342,6 +349,10 @@ app.whenReady().then(async () => {
       composer: Boolean(document.getElementById('input')),
       search: Boolean(document.getElementById('model-search') && document.getElementById('btn-search')),
       openFile: Boolean(document.getElementById('btn-add-file')),
+      clearSearch: Boolean(document.getElementById('btn-clear-search')),
+      // The thinking toggle belongs beside the composer, not buried in a panel.
+      thinkingByComposer: Boolean(document.querySelector('.ctx-row #set-thinking')),
+      computeHidden: document.getElementById('stat-compute').hidden,
       externalRow: (() => {
         const row = [...document.querySelectorAll('#vault-list .vault-item')].find((r) =>
           r.querySelector('.name')?.textContent.includes('elsewhere-Q4_K_M.gguf'),
@@ -367,6 +378,9 @@ app.whenReady().then(async () => {
     check('composer present', probe.composer);
     check('model search controls present', probe.search);
     check('the open-a-file control is present', probe.openFile);
+    check('search results can be cleared', probe.clearSearch);
+    check('the thinking toggle sits beside the composer', probe.thinkingByComposer);
+    check('the run-location badge is hidden until a model loads', probe.computeHidden === true);
     check(
       `an external model is listed — ${probe.externalRow?.label ?? 'not listed'}`,
       Boolean(probe.externalRow) && probe.externalRow.label.includes('↗'),

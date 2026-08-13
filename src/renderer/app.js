@@ -20,6 +20,8 @@ const state = {
   pendingShell: null,
   turnStarted: false,
   autoContext: null,
+  autoGpu: null,
+  llmReady: false,
 };
 
 /* ============================ small helpers ============================ */
@@ -82,9 +84,18 @@ function renderMessage(message) {
   if (message.role === 'user') return void addTurn('user', message.content);
   if (message.role === 'tool') return void addTurn('tool', message.content);
 
-  for (const segment of splitThinking(message.content)) {
-    if (segment.kind === 'think') addTurn('think', segment.content);
-    else {
+  const segments = splitThinking(message.content);
+  // With thinking switched off, the reasoning is hidden — but only when there
+  // is an answer to show instead. A model that ignores the setting and thinks
+  // without concluding would otherwise leave a blank turn, which tells the user
+  // nothing and looks like a failure.
+  const hasAnswer = segments.some((s) => s.kind === 'text' && stripActionBlocks(s.content));
+  const hideThinking = !state.settings.thinking && hasAnswer;
+
+  for (const segment of segments) {
+    if (segment.kind === 'think') {
+      if (!hideThinking) addTurn('think', segment.content);
+    } else {
       const prose = stripActionBlocks(segment.content);
       if (prose) addTurn('assistant', prose);
     }
@@ -143,10 +154,65 @@ async function refreshChats() {
 
 /* ============================ vault + hub ============================ */
 
+/**
+ * Interrupted downloads, offered back rather than left as litter.
+ *
+ * A half-finished `.part` is kept on purpose: it is what makes resuming
+ * possible. Without this list it would be invisible, and the only way out of a
+ * failed transfer would be to start it again from zero.
+ */
+async function refreshPartials() {
+  const list = $('partial-list');
+  list.replaceChildren();
+
+  const partials = await api.models.partials().catch(() => []);
+  for (const partial of partials) {
+    const row = el('div', 'vault-item missing');
+    row.append(el('span', 'name', `${partial.name} · ${formatSize(partial.received)} so far`));
+
+    const resume = el('button', '', '[ RESUME ]');
+    resume.addEventListener('click', async () => {
+      const input = $('custom-model').value.trim();
+      if (!input) {
+        $('download-status').textContent = 'Paste the model id or URL above, then resume.';
+        return;
+      }
+      resume.disabled = true;
+      try {
+        await api.models.download(input);
+      } catch (err) {
+        $('download-status').textContent = err.message;
+      } finally {
+        resume.disabled = false;
+        await Promise.all([refreshVault(), refreshPartials()]);
+      }
+    });
+
+    const discard = el('button', 'ghost danger', '×');
+    discard.title = 'Discard this partial download';
+    discard.addEventListener('click', async () => {
+      await api.models.discardPartial(partial.name);
+      await refreshPartials();
+    });
+
+    row.append(resume, discard);
+    list.append(row);
+  }
+}
+
+/** `GPU`, `GPU 15/52` or `CPU`, from the plan the launcher would use. */
+function placementLabel(plan) {
+  if (!plan || plan.where === 'unknown') return '';
+  if (plan.where === 'gpu') return 'GPU';
+  if (plan.where === 'cpu') return 'CPU';
+  return `GPU ${plan.layers}/${plan.blocks}`;
+}
+
 async function refreshVault() {
   const [models, llm] = await Promise.all([api.models.list(), api.llm.status()]);
   const list = $('vault-list');
   list.replaceChildren();
+  refreshPartials();
 
   if (models.length === 0) {
     list.append(el('div', 'muted', 'No models yet — search above, or [ OPEN FILE… ] to use one you already have.'));
@@ -159,11 +225,18 @@ async function refreshVault() {
     const loaded = llm.model === key && llm.state === 'ready';
 
     const row = el('div', `vault-item${loaded ? ' loaded' : ''}${model.missing ? ' missing' : ''}`);
+    const where = placementLabel(model.plan);
     const label = model.missing
       ? `${model.name} · missing`
-      : `${model.name} · ${formatSize(model.size)}${model.external ? ' · ↗' : ''}`;
+      : [model.name, formatSize(model.size), where, model.external ? '↗' : null].filter(Boolean).join(' · ');
     const name = el('span', 'name', label);
-    name.title = model.external ? `${model.path}\n(outside the vault)` : model.path;
+    name.title = [
+      model.external ? `${model.path}\n(outside the vault)` : model.path,
+      model.plan ? `\n${model.plan.reason}` : null,
+      model.plan ? `context ${model.plan.context}${model.plan.modelMax ? ` of ${model.plan.modelMax}` : ''}` : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
 
     const load = el('button', '', loaded ? '[ UNLOAD ]' : '[ LOAD ]');
     load.disabled = model.missing;
@@ -269,9 +342,12 @@ async function showRepoFiles(repoId, host) {
   }
 
   for (const file of usable) {
-    const row = el('div', 'file-item');
-    const label = el('span', 'name', `${file.quant || file.name} · ${formatSize(file.size)}`);
-    label.title = file.name;
+    const row = el('div', `file-item${file.placement === 'cpu' ? ' wont-fit' : ''}`);
+    // Estimated from size — the header that would give an exact answer is
+    // inside the file we have not downloaded yet.
+    const fit = { gpu: '~GPU', partial: '~part GPU', cpu: '~CPU' }[file.placement] ?? '';
+    const label = el('span', 'name', [file.quant || file.name, formatSize(file.size), fit].filter(Boolean).join(' · '));
+    label.title = `${file.name}${fit ? `\n${fit} — estimated from file size against your VRAM` : ''}`;
 
     const get = el('button', '', '[ GET ]');
     get.addEventListener('click', async () => {
@@ -350,6 +426,30 @@ function paintLlm(llm) {
   label.className = `stat ${llm.state === 'ready' ? 'ok' : llm.state === 'error' ? 'warn' : ''}`;
 }
 
+/** Where the loaded model is actually running — the question a size cannot answer. */
+function paintCompute(llm) {
+  state.llmReady = llm?.state === 'ready';
+  const label = $('stat-compute');
+  const auto = llm?.autoGpu;
+
+  if (llm?.state !== 'ready' || !auto) {
+    label.hidden = true;
+    return;
+  }
+
+  const text =
+    auto.layers === 0
+      ? 'RUN: CPU'
+      : auto.layers === 999
+        ? 'RUN: GPU'
+        : `RUN: GPU ${auto.layers} LAYERS + CPU`;
+
+  label.hidden = false;
+  label.textContent = text;
+  label.title = auto.reason + (auto.vramBytes ? ` · ${(auto.vramBytes / 1024 ** 3).toFixed(1)} GB VRAM` : '');
+  label.className = `stat ${auto.layers === 0 ? 'warn' : 'ok'}`;
+}
+
 function paintBrowser(browser) {
   const label = $('stat-browser');
   label.textContent = browser.open ? `BROWSER: ${(browser.mode || 'open').toUpperCase()}` : 'BROWSER: IDLE';
@@ -377,41 +477,70 @@ function paintCtx({ used, max, percent }) {
  * lie, and so would showing the stored value while the model runs another.
  */
 function paintContextControls(auto) {
+  const reload = state.llmReady ? ' · reload the model to apply a change' : '';
   const on = Boolean(state.settings.autoContext);
   $('set-auto-ctx').checked = on;
   $('set-nctx').disabled = on;
 
   if (!on) {
     $('val-nctx').textContent = state.settings.nCtx;
-    $('ctx-explain').textContent = 'Fixed — the model must support this size.';
+    $('ctx-explain').textContent = `Fixed — the model must support this size.${reload}`;
     return;
   }
 
   if (!auto) {
     $('val-nctx').textContent = 'auto';
-    $('ctx-explain').textContent = 'Chosen from the model header when one is loaded.';
+    $('ctx-explain').textContent = `Chosen from the model header when one is loaded.${reload}`;
     return;
   }
 
   $('val-nctx').textContent = auto.context;
-  $('ctx-explain').textContent = [
-    auto.reason,
-    auto.modelMax ? `model max ${auto.modelMax}` : null,
-    auto.kvPerToken ? `KV ${(auto.kvPerToken / 1024).toFixed(1)} KB/token` : null,
-  ]
-    .filter(Boolean)
-    .join(' · ');
+  $('ctx-explain').textContent =
+    [
+      auto.reason,
+      auto.modelMax ? `model max ${auto.modelMax}` : null,
+      auto.kvPerToken ? `KV ${(auto.kvPerToken / 1024).toFixed(1)} KB/token` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ') + reload;
+}
+
+/** The GPU-layers row, the same idea as the context one. */
+function paintGpuControls(auto) {
+  const reload = state.llmReady ? ' · reload the model to apply a change' : '';
+  const on = Boolean(state.settings.autoGpuLayers);
+  $('set-auto-gpu').checked = on;
+  $('set-ngl').disabled = on;
+  $('set-ngl').value = state.settings.ngl;
+
+  if (!on) {
+    $('val-ngl').textContent = state.settings.ngl;
+    $('gpu-explain').textContent = `Fixed — 999 means every layer, which fails if they do not fit.${reload}`;
+    return;
+  }
+  if (!auto) {
+    $('val-ngl').textContent = 'auto';
+    $('gpu-explain').textContent = `Fitted to the card when a model is loaded.${reload}`;
+    return;
+  }
+
+  $('val-ngl').textContent = auto.layers === 999 ? 'all' : auto.layers;
+  $('gpu-explain').textContent =
+    auto.reason + (auto.vramBytes ? ` · ${(auto.vramBytes / 1024 ** 3).toFixed(1)} GB VRAM` : '') + reload;
 }
 
 function applySettings(settings) {
   state.settings = settings;
 
+  // These two own their whole row — slider position, label and explanation —
+  // so nothing may write `val-nctx` or `val-ngl` after them. An earlier version
+  // did, and the label read `999` while AUTO was deciding.
   $('set-nctx').value = settings.nCtx;
   paintContextControls(state.autoContext);
+  paintGpuControls(state.autoGpu);
+
   $('set-temp').value = settings.temperature;
   $('val-temp').textContent = Number(settings.temperature).toFixed(2);
-  $('set-ngl').value = settings.ngl;
-  $('val-ngl').textContent = settings.ngl;
 
   $('set-endpoint').value = settings.externalEndpoint;
   $('set-llama-path').value = settings.llamaServerPath;
@@ -426,6 +555,7 @@ function applySettings(settings) {
   $('set-allow-browser').checked = settings.allowBrowser;
   $('set-allow-lookup').checked = settings.allowWebLookup;
   $('set-allow-read').checked = settings.allowReadFile;
+  $('set-thinking').checked = settings.thinking;
   $('set-allow-shell').checked = settings.allowShell;
   $('set-crt').checked = settings.crtEffects;
 
@@ -576,10 +706,13 @@ function handleEvent(payload) {
 
     case 'llm:state':
       paintLlm(payload);
+      paintCompute(payload);
       // Only overwrite on an actual decision: an unload reports null, and
       // blanking the last explanation on unload loses useful information.
       if (payload.autoContext) state.autoContext = payload.autoContext;
+      if (payload.autoGpu) state.autoGpu = payload.autoGpu;
       paintContextControls(state.autoContext);
+      paintGpuControls(state.autoGpu);
       refreshVault();
       break;
 
@@ -728,6 +861,11 @@ function wire() {
   });
 
   $('btn-search').addEventListener('click', runSearch);
+  $('btn-clear-search').addEventListener('click', () => {
+    $('model-search').value = '';
+    $('search-results').replaceChildren();
+    $('search-status').textContent = '';
+  });
   $('model-search').addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.isComposing) {
       event.preventDefault();
@@ -779,6 +917,8 @@ function wire() {
 
   bindRange('set-nctx', 'nCtx', 'val-nctx');
   bindCheck('set-auto-ctx', 'autoContext');
+  bindCheck('set-auto-gpu', 'autoGpuLayers');
+  bindCheck('set-thinking', 'thinking');
   bindRange('set-temp', 'temperature', 'val-temp', (v) => Number(v).toFixed(2));
   bindRange('set-ngl', 'ngl', 'val-ngl');
 
@@ -814,8 +954,10 @@ async function boot() {
   const snapshot = await api.snapshot();
   // Set before `applySettings`, which paints the context row from it.
   state.autoContext = snapshot.llm.autoContext ?? null;
+  state.autoGpu = snapshot.llm.autoGpu ?? null;
   applySettings(snapshot.settings);
   paintLlm(snapshot.llm);
+  paintCompute(snapshot.llm);
   paintBrowser({ ...snapshot.browser, engine: snapshot.engine });
   paintCtx({ used: 0, max: snapshot.settings.nCtx, percent: 0 });
 

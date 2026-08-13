@@ -122,3 +122,38 @@ test('an error status is reported with its body', async () => {
     globalThis.fetch = original;
   }
 });
+
+test('thinking reported in its own field is not lost', async () => {
+  // Some endpoints put the model's reasoning in `reasoning_content`; a client
+  // reading only `content` shows an empty reply despite tokens being generated.
+  const reason = (t) => `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: t } }] })}\n`;
+  const restore = fakeEndpoint([reason('weighing it up'), delta('Red, blue, green.')]);
+  try {
+    const result = await streamChat({ baseUrl: 'http://x', messages: [] });
+    assert.match(result.text, /<think>\nweighing it up\n<\/think>/);
+    assert.match(result.text, /Red, blue, green\./);
+  } finally {
+    restore();
+  }
+});
+
+test('a reply with no separate thinking is left exactly as it came', async () => {
+  const restore = fakeEndpoint([delta('Just the answer.')]);
+  try {
+    const result = await streamChat({ baseUrl: 'http://x', messages: [] });
+    assert.equal(result.text, 'Just the answer.');
+  } finally {
+    restore();
+  }
+});
+
+test('thinking with no answer still yields something to render', async () => {
+  const reason = (t) => `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: t } }] })}\n`;
+  const restore = fakeEndpoint([reason('thought but never spoke')]);
+  try {
+    const result = await streamChat({ baseUrl: 'http://x', messages: [] });
+    assert.match(result.text, /thought but never spoke/);
+  } finally {
+    restore();
+  }
+});

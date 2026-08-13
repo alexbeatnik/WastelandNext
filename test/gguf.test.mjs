@@ -8,7 +8,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { kvBytesPerToken, parseGgufHeader, readGgufMetadata, recommendContext } from '../src/main/llm/gguf.mjs';
@@ -273,13 +273,15 @@ test('every recommendation is a usable, round number', () => {
 /* ============================ the real thing ============================ */
 
 test('parses a real model file when one is on this machine', async (t) => {
-  const model = join(
-    process.env['APPDATA'] ?? homedir(),
-    'Wasteland Next',
-    'models',
-    'gemma-3-1b-it-Q4_K_M.gguf',
-  );
-  if (!existsSync(model)) return t.skip('no local model to read');
+  // Whatever happens to be in the vault, rather than one hardcoded filename:
+  // models come and go, and a test that silently skips forever is no test.
+  const dir = join(process.env['APPDATA'] ?? homedir(), 'Wasteland Next', 'models');
+  const model = existsSync(dir)
+    ? readdirSync(dir)
+        .filter((name) => name.toLowerCase().endsWith('.gguf'))
+        .map((name) => join(dir, name))[0]
+    : null;
+  if (!model) return t.skip('no local model to read');
 
   const meta = await readGgufMetadata(model);
   assert.ok(meta, 'expected the header to parse');

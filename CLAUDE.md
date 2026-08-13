@@ -114,6 +114,44 @@ payloads rather than materialising them.
 With AUTO off the slider value is passed through **exactly**, including one the model cannot honour. An explicit
 setting that is silently overridden is worse than one that fails loudly.
 
+**A chat id becomes a filename, so it is validated first.** `isSafeId` in `chats.mjs` admits only `[A-Za-z0-9_-]`.
+Ids arrive from IPC and are interpolated into a path; without the check a `../` in one would reach outside `chats/`.
+
+**A `.part` file surviving a failed download is the feature, not litter.** It is what `Range`-based resuming reads the
+offset from. `resumed` requires a 206 *and* bytes already on disk — a server volunteering 206 with nothing to resume
+would otherwise open the writer in append mode. A server that ignores the range answers 200, and then starting over is
+correct: appending a full body to a partial file corrupts it silently.
+
+**A download with no bytes for 90s is abandoned.** Only one runs at a time, so a dead connection otherwise leaves every
+later attempt refused as busy while nothing moves — which reads as "it says it is downloading and does nothing".
+
+**The size-only placement estimate reserves a third of the card.** The KV cache is not a rounding error: on a 9B at 32k
+it is several gigabytes, and an earlier "size + 25%" margin labelled models GPU-resident that in fact ran two thirds of
+their layers on the CPU. Exact placement comes from the header via `models/placement.mjs`; the estimate is only for
+search results, where the header is inside a file we have not downloaded.
+
+**An exit code is not a diagnosis.** `llama-server exited (1)` named no cause and suggested no fix. The last 60 lines of
+its output are kept and `summariseFailure` turns them into a sentence, naming the remedy for the failures that have one
+(VRAM exhaustion, a port clash, an unknown flag). Classification runs on the **raw** lines: llama.cpp's severity marker
+is a bare `E` field, and an earlier version stripped it for readability *before* looking for it, so every unrecognised
+failure reported the cleanup message that follows the real error.
+
+**A model's reply can arrive in `reasoning_content`, not `content`.** llama.cpp parses each family's thinking syntax —
+`<think>` tags, harmony channel markers — into that field by default. A client reading only `content` shows an empty
+reply for a model that thinks first, which is what a 30B did here. `streamChat` reads both and folds the thinking into a
+`<think>` block, which the chat view already renders dimmed. Do not "fix" this with `--reasoning-format none`: that
+leaves the syntax unparsed and a harmony model prints `to=self<|message|>` at the user.
+
+**A spawn failure reports once.** Node emits `error` then `exit`; the first carries the real reason ("not found") and
+the second would replace it with a line derived from an empty log. The `exit` handler bails out if the state is already
+`error`.
+
+**`unload()` does not wait for a process that has already gone.** `proc.once('exit')` never fires for one that exited,
+so the 3-second fallback was paid in full on every unload after a crash — including on the way out of the app.
+
+**`paintContextControls` and `paintGpuControls` own their whole row.** Nothing may write `val-nctx` or `val-ngl` after
+them; `applySettings` used to, and the label read `999` while AUTO was deciding.
+
 **The llama.cpp release is resolved from the GitHub API, not pinned.** A pin goes stale two ways: the tag 404s, or it
 predates a flag we pass and the server exits with "invalid argument". `PINNED_TAG` is only a fallback for when the API
 is unreachable. When changing the flags in `server.mjs`, check them against a current build's `--help`.

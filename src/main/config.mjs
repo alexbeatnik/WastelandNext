@@ -23,7 +23,17 @@ export const DEFAULTS = {
   autoContext: true,
   nCtx: 8192,
   temperature: 0.7,
+  /** Fit the offload to the card instead of demanding all of it. */
+  autoGpuLayers: true,
   ngl: 999,
+  /**
+   * Let the model think before answering.
+   *
+   * Off by default: for a chat assistant a silent chain-of-thought before every
+   * reply is mostly latency. Not every model obeys being told to skip it, so
+   * the chat view also hides whatever still arrives — see `showThinking`.
+   */
+  thinking: false,
   systemPrompt: '',
 
   /** llama-server */

@@ -99,3 +99,31 @@ test('remove deletes the chat', () => {
   assert.equal(chats.remove(chat.id), true);
   assert.equal(chats.read(chat.id), null);
 });
+
+test('a chat id that would escape the chats directory is refused', () => {
+  // These arrive from IPC and are interpolated into a path, so a traversal
+  // attempt must not read or delete anything outside chats/.
+  const traversals = [
+    '../../etc/passwd',
+    '..\\..\\config', // Windows separators, escaped for the source
+    'a/b',
+    'a\\b',
+    '.',
+    '..',
+    '',
+    'has space',
+    'quote"',
+  ];
+  for (const id of traversals) {
+    assert.equal(chats.isSafeId(id), false, `${JSON.stringify(id)} should be rejected`);
+    assert.equal(chats.read(id), null);
+    assert.equal(chats.remove(id), false);
+    assert.equal(chats.rename(id, 'nope'), null);
+  }
+});
+
+test('generated ids are accepted by the same rule', () => {
+  const chat = chats.create('naming');
+  assert.equal(chats.isSafeId(chat.id), true, `${chat.id} should be allowed`);
+  assert.ok(chats.read(chat.id));
+});

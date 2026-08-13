@@ -127,8 +127,18 @@ The panel shows what was chosen and why, e.g. `limited by model maximum · model
 Turning AUTO off hands the slider back and the value is passed through exactly as set — including one the model cannot
 honour. An explicit setting that gets silently overridden is worse than one that fails loudly.
 
-> The budget is computed from system RAM. With full GPU offload (`GPU LAYERS` at 999) the real limit is VRAM, which is
-> not detected — on a small card, a model that auto-sizes to a large context may still need the context lowered by hand.
+## GPU offload
+
+**INFERENCE → GPU LAYERS** is **AUTO** as well. Asking for every layer (`-ngl 999`) is right whenever the model fits and
+fatal when it does not: llama.cpp allocates until the driver refuses and then exits, which arrives as a load that simply
+failed. Partial offload is well supported, so the useful question is how many layers fit, not whether all of them do.
+
+The card's memory is measured (`nvidia-smi`), the KV cache for the chosen context is subtracted, and the rest is divided
+by the per-layer size. A 25 GB model on a 12 GB card becomes `15 of 52 layers fit in VRAM; the rest run on the CPU` —
+slower than full offload, but it runs, where before it did not.
+
+Only NVIDIA is probed. Windows' `AdapterRAM` reports 4 GB for anything larger, which is worse than no answer, so on other
+cards the offload is left as configured. Turning AUTO off hands the slider back.
 
 To use something already running instead — Ollama, LM Studio, a remote endpoint — put its base URL in
 **INFERENCE → EXTERNAL ENDPOINT**. It takes precedence over anything local, and the context meter uses the window that
@@ -182,7 +192,7 @@ src/
 ## Testing
 
 ```bash
-npm test       # 154 unit tests, no Electron, no network
+npm test       # 198 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
 ```
 

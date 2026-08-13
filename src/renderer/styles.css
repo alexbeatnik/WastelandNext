@@ -505,6 +505,22 @@ input[type='checkbox']:checked {
   font-size: 0.82em;
 }
 
+/* A search hit too big for the card: still offered, visibly a CPU proposition. */
+.file-item.wont-fit .name {
+  color: var(--amber-dim);
+}
+
+#thinking-toggle {
+  white-space: nowrap;
+  font-size: 0.8em;
+  letter-spacing: 0.06em;
+  color: var(--amber-dim);
+}
+
+#thinking-toggle:has(input:checked) {
+  color: var(--amber);
+}
+
 .divider {
   border-top: 1px dashed var(--amber-faint);
   padding-top: 0.35rem;

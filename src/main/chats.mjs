@@ -48,7 +48,22 @@ function newId() {
   return `${stamp}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Ids we are willing to turn into a filename.
+ *
+ * `read`, `remove` and `rename` all take an id straight from an IPC call, and
+ * an id is interpolated into a path. Without this a `../` in one would reach
+ * outside the chats directory. The generated form is `<timestamp>-<random>`,
+ * which this admits.
+ */
+const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function isSafeId(id) {
+  return SAFE_ID.test(String(id ?? ''));
+}
+
 function fileFor(id) {
+  if (!isSafeId(id)) throw new Error(`unsafe chat id: ${id}`);
   return join(chatsDir(), `${id}.json`);
 }
 

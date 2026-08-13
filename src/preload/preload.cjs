@@ -34,6 +34,8 @@ contextBridge.exposeInMainWorld('wasteland', {
     remove: (name) => call('models:delete', name),
     addFile: () => call('models:addFile'),
     forget: (path) => call('models:forget', path),
+    partials: () => call('models:partials'),
+    discardPartial: (name) => call('models:discardPartial', name),
   },
 
   llm: {

@@ -1,11 +1,22 @@
-node_modules/
-dist/
-out/
+# Build and runtime artefacts, anchored to the repository root.
+#
+# The leading slash matters: an unanchored `models/` also matched
+# `src/main/models/`, which silently kept three source files out of the first
+# commit and left that revision unable to start.
+/dist/
+/out/
+
 # Staged from the manul-browser checkout by `npm run engine` — build output,
 # not source.
-resources/bin/
-resources/manul-browser/
-models/
+/resources/bin/
+/resources/manul-browser/
+
+# Downloaded weights. Only the vault at the root, never the source directory.
+/models/
+
+# Nested copies are real, so this one stays unanchored.
+node_modules/
+
 *.log
 .DS_Store
 Thumbs.db

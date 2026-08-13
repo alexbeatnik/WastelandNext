@@ -11,6 +11,8 @@ import * as chats from './chats.mjs';
 import * as config from './config.mjs';
 import * as models from './models/manager.mjs';
 import { listGgufFiles, searchModels } from './models/search.mjs';
+import { planFor } from './models/placement.mjs';
+import { detectVram, placementForSize } from './llm/gpu.mjs';
 import { server } from './llm/server.mjs';
 import { downloadLlamaServer, llamaServerStatus } from './llm/tools.mjs';
 import { BrowserBridge, browser, engineAvailable } from './browser/manul-browser.mjs';
@@ -70,8 +72,29 @@ export function registerIpc(windowGetter) {
 
   /* ---------- models ---------- */
   handle('models:search', (query) => searchModels({ query }));
-  handle('models:files', (repoId) => listGgufFiles(repoId));
-  handle('models:list', () => models.listLocal());
+  handle('models:files', async (repoId) => {
+    const files = await listGgufFiles(repoId);
+    // Judged from size alone — the header is inside the file we have not
+    // downloaded yet — so the UI labels it as an estimate.
+    const vram = detectVram() ?? 0;
+    return files.map((file) => ({ ...file, placement: placementForSize(file.size, vram) }));
+  });
+  handle('models:partials', () => models.listPartials());
+  handle('models:discardPartial', async (name) => {
+    await models.discardPartial(name);
+    return models.listPartials();
+  });
+  handle('models:list', async () => {
+    const local = await models.listLocal();
+    // The plan is what turns "4.4 GB" into "will it run on my card" — the
+    // question a size alone cannot answer.
+    return Promise.all(
+      local.map(async (model) => ({
+        ...model,
+        plan: model.missing ? null : await planFor(model.path).catch(() => null),
+      })),
+    );
+  });
   handle('models:resolve', (input) => models.resolveTarget(input));
   handle('models:delete', async (name) => {
     await models.remove(name);

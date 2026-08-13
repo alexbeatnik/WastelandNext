@@ -13,6 +13,7 @@
       <span class="brand">WASTELAND<span class="version">NEXT</span></span>
       <span class="stat" id="stat-sys"><i class="pulse"></i>SYS: ONLINE</span>
       <span class="stat" id="stat-model">MODEL: NONE</span>
+      <span class="stat" id="stat-compute" hidden>RUN: —</span>
       <span class="stat" id="stat-browser">BROWSER: IDLE</span>
       <span class="stat" id="stat-engine">ENGINE: —</span>
       <button class="ghost" id="toggle-panel" title="Toggle the left panel">☰</button>
@@ -29,6 +30,7 @@
               <div class="row">
                 <input id="model-search" type="text" placeholder="qwen 7b instruct, gemma, coder…" />
                 <button id="btn-search">[ FIND ]</button>
+                <button id="btn-clear-search" class="ghost" title="Clear the results">[ CLEAR ]</button>
               </div>
             </label>
             <div id="search-status" class="muted"></div>
@@ -44,6 +46,7 @@
             </div>
             <div id="download-status" class="muted"></div>
             <div class="meter" id="download-meter" hidden><i></i></div>
+            <div id="partial-list" class="vault-list"></div>
           </div>
         </details>
 
@@ -80,10 +83,12 @@
               <span>TEMP <b id="val-temp">0.70</b></span>
               <input id="set-temp" type="range" min="0.01" max="2" step="0.01" value="0.7" />
             </label>
-            <label class="field">
+            <div class="field">
               <span>GPU LAYERS <b id="val-ngl">999</b></span>
+              <label class="check"><input type="checkbox" id="set-auto-gpu" /> <span>AUTO — fit to the card</span></label>
               <input id="set-ngl" type="range" min="0" max="999" step="1" value="999" />
-            </label>
+              <div id="gpu-explain" class="muted"></div>
+            </div>
             <label class="field">
               <span>EXTERNAL ENDPOINT</span>
               <input id="set-endpoint" type="text" placeholder="http://127.0.0.1:11434 (overrides local)" />
@@ -156,6 +161,9 @@
         <div class="ctx-row">
           <span id="ctx-label" class="muted">CTX: 0 / 8192 (0%)</span>
           <div class="meter ctx" id="ctx-meter"><i></i></div>
+          <label class="check" id="thinking-toggle" title="Let the model reason before answering. Applies fully on the next model load.">
+            <input type="checkbox" id="set-thinking" /> <span>THINK</span>
+          </label>
           <button id="btn-compact">[ COMPACT ]</button>
         </div>
 

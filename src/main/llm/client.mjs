@@ -40,6 +40,7 @@ export async function streamChat({
   model = 'local',
   signal,
   onToken,
+  streamReasoning = true,
 }) {
   if (!baseUrl) throw new Error('no inference endpoint — load a model or set one in SETTINGS');
 
@@ -71,15 +72,28 @@ export async function streamChat({
   let usage = null;
   let aborted = false;
 
+  let reasoning = '';
+
   /** Handle one complete SSE line. */
   const consume = (line) => {
     const event = parseEvent(line);
     if (!event) return;
     if (event.usage) usage = event.usage;
-    const delta = event.choices?.[0]?.delta?.content;
-    if (delta) {
-      text += delta;
-      onToken?.(delta);
+
+    const delta = event.choices?.[0]?.delta ?? {};
+    if (delta.content) {
+      text += delta.content;
+      onToken?.(delta.content);
+    }
+    // Some endpoints split thinking into its own field, which an OpenAI client
+    // reading only `content` would drop — the reply then arrives empty even
+    // though tokens were generated. Kept, and folded back in below.
+    if (delta.reasoning_content) {
+      reasoning += delta.reasoning_content;
+      // Still collected when not streamed: it is the fallback for a model that
+      // thinks and never gets round to an answer, where showing nothing would
+      // be worse. It simply does not scroll past the user first.
+      if (streamReasoning) onToken?.(delta.reasoning_content);
     }
   };
 
@@ -100,7 +114,11 @@ export async function streamChat({
     else throw err;
   }
 
-  return { text, usage, aborted: aborted || Boolean(signal?.aborted) };
+  // Separately-reported thinking is folded back in as a <think> block, which is
+  // the form the rest of the app already understands and renders dimmed.
+  const full = reasoning.trim() ? `<think>\n${reasoning.trim()}\n</think>\n${text}` : text;
+
+  return { text: full, usage, aborted: aborted || Boolean(signal?.aborted) };
 }
 
 /**

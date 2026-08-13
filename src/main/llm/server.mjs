@@ -13,7 +13,10 @@ import { stat } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { totalmem } from 'node:os';
 import { join } from 'node:path';
-import { readGgufMetadata, recommendContext } from './gguf.mjs';
+import { kvBytesPerToken, readGgufMetadata, recommendContext } from './gguf.mjs';
+import { detectVram, recommendGpuLayers } from './gpu.mjs';
+import { summariseFailure } from './failure.mjs';
+import { portInUse } from './port.mjs';
 import * as config from '../config.mjs';
 import { contextSize } from './client.mjs';
 import { downloadLlamaServer, installedServerPath } from './tools.mjs';
@@ -22,6 +25,8 @@ import { modelsDir, toolsDir } from '../paths.mjs';
 /** How long a model load may take before we give up waiting for /health. */
 const READY_TIMEOUT_MS = 180_000;
 const POLL_MS = 400;
+/** Lines of output kept so a crash can be explained after the fact. */
+const LOG_TAIL = 60;
 
 const EXE = process.platform === 'win32' ? 'llama-server.exe' : 'llama-server';
 
@@ -56,6 +61,8 @@ export class LlamaServer extends EventEmitter {
   #stopping = false;
   #contextSize = 0;
   #autoContext = null;
+  #autoGpu = null;
+  #logTail = [];
 
   get state() {
     return this.#state;
@@ -69,6 +76,7 @@ export class LlamaServer extends EventEmitter {
       baseUrl: this.baseUrl,
       contextSize: this.#contextSize,
       autoContext: this.#autoContext,
+      autoGpu: this.#autoGpu,
     };
   }
 
@@ -115,18 +123,36 @@ export class LlamaServer extends EventEmitter {
     const bin = await this.#ensureBinary(settings);
     const host = settings.llamaHost || '127.0.0.1';
     const port = Number(settings.llamaPort) || 8080;
-    const nCtx = await this.#chooseContext(path, settings);
+    // Before anything is spawned: a server already on this port would answer
+    // our readiness poll, and we would report a model as loaded while actually
+    // talking to whatever that other process is serving.
+    if (await portInUse(host, port)) {
+      const detail = `port ${port} is already in use — stop the other llama-server, or change the port in SETTINGS`;
+      this.#setState('error', detail);
+      throw new Error(detail);
+    }
+
+    const plan = await this.#plan(path, settings);
     const args = [
       '-m', path,
       '--host', host,
       '--port', String(port),
-      '-c', String(nCtx),
-      '-ngl', String(settings.ngl),
+      '-c', String(plan.context),
+      '-ngl', String(plan.gpuLayers),
       '--no-webui',
-      // Gemma/Qwen turn chain-of-thought on whenever a system prompt is present,
-      // and we always send one. A silent <think> block before every answer is
-      // pure latency here.
-      '--reasoning-budget', '0',
+      // Thinking is asked for, or asked against, in two ways because neither
+      // works everywhere: the budget is a hard stop llama.cpp applies itself,
+      // while `enable_thinking` is what Qwen-style chat templates read. Models
+      // that honour neither still think, which is why the view can hide it.
+      '--reasoning-budget', settings.thinking ? '-1' : '0',
+      ...(settings.thinking ? [] : ['--chat-template-kwargs', '{"enable_thinking":false}']),
+      // The default reasoning format is kept on purpose. llama.cpp knows each
+      // family's thinking syntax — <think> tags, harmony channel markers — and
+      // parses it into `reasoning_content`, which the client folds back into a
+      // <think> block for display. Asking for `none` instead leaves that syntax
+      // unparsed, and a harmony model then prints `to=self<|message|>` at the
+      // user. The field must be read, though: an OpenAI client that looks only
+      // at `content` shows an empty reply for a model that thinks first.
     ];
 
     this.#model = modelFile;
@@ -155,9 +181,16 @@ export class LlamaServer extends EventEmitter {
     this.#proc.on('exit', (code, signal) => {
       this.#proc = null;
       if (this.#stopping) return;
-      this.#setState('error', `llama-server exited (${signal ?? code})`);
+      // A spawn failure emits `error` first and `exit` straight after. The
+      // first carries the real reason ("llama-server.exe not found"); this one
+      // would replace it with a generic line derived from an empty log.
+      if (this.#state === 'error') return;
+      // Otherwise the exit code alone names no cause, and the reason is in the
+      // last lines it printed.
+      this.#setState('error', summariseFailure(this.#logTail, { code, signal }));
     });
 
+    this.#logTail = [];
     const relay = (stream) => {
       let buffer = '';
       stream.setEncoding('utf8');
@@ -165,7 +198,12 @@ export class LlamaServer extends EventEmitter {
         buffer += chunk;
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
-        for (const line of lines) if (line.trim()) this.emit('log', line.trim());
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          this.emit('log', line.trim());
+          this.#logTail.push(line.trim());
+          if (this.#logTail.length > LOG_TAIL) this.#logTail.shift();
+        }
       });
     };
     relay(this.#proc.stdout);
@@ -213,37 +251,67 @@ export class LlamaServer extends EventEmitter {
   }
 
   /**
-   * The context window to start with.
+   * Decide context size and GPU offload for this model.
    *
-   * With AUTO on, the model's own header decides: its trained maximum is a hard
-   * cap, and the KV-cache cost per token — which varies tenfold between models
-   * of the same file size — sets what memory allows. With AUTO off the slider
-   * is obeyed exactly, including a value the model cannot honour, because an
-   * explicit setting that gets quietly overridden is worse than one that fails
+   * Both read the same GGUF header, and the GPU decision depends on the context
+   * one — the KV cache shares the card with the weights — so they are settled
+   * together rather than in two places that each re-read the file.
+   *
+   * With AUTO off, the slider is obeyed exactly, including a value that cannot
+   * work: an explicit setting quietly overridden is worse than one that fails
    * loudly.
    */
-  async #chooseContext(path, settings) {
-    const requested = Number(settings.nCtx) || 8192;
-    if (!settings.autoContext) return requested;
+  async #plan(path, settings) {
+    const context = Number(settings.nCtx) || 8192;
+    const gpuLayers = Number(settings.ngl) || 0;
+    const plan = { context, gpuLayers };
 
+    if (!settings.autoContext && !settings.autoGpuLayers) return plan;
+
+    let meta = null;
+    let fileSize = 0;
     try {
-      const [meta, info] = await Promise.all([readGgufMetadata(path), stat(path)]);
-      const choice = recommendContext({ meta, fileSize: info.size, totalMemory: totalmem() });
-      this.#autoContext = choice;
-
-      const detail = [
-        `auto context: ${choice.context} tokens (${choice.reason})`,
-        choice.modelMax ? `model max ${choice.modelMax}` : null,
-        choice.kvPerToken ? `KV ${(choice.kvPerToken / 1024).toFixed(1)} KB/token` : null,
-      ]
-        .filter(Boolean)
-        .join(' · ');
-      this.emit('log', detail);
-      return choice.context;
+      [meta, { size: fileSize }] = await Promise.all([readGgufMetadata(path), stat(path)]);
     } catch (err) {
-      this.emit('log', `auto context failed (${err.message}); using ${requested}`);
-      return requested;
+      this.emit('log', `could not read the model header (${err.message}); using the configured settings`);
+      return plan;
     }
+
+    if (settings.autoContext) {
+      const choice = recommendContext({ meta, fileSize, totalMemory: totalmem() });
+      this.#autoContext = choice;
+      plan.context = choice.context;
+      this.emit(
+        'log',
+        [
+          `auto context: ${choice.context} tokens (${choice.reason})`,
+          choice.modelMax ? `model max ${choice.modelMax}` : null,
+          choice.kvPerToken ? `KV ${(choice.kvPerToken / 1024).toFixed(1)} KB/token` : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      );
+    }
+
+    if (settings.autoGpuLayers) {
+      const vramBytes = detectVram();
+      const choice = recommendGpuLayers({
+        meta,
+        fileSize,
+        contextTokens: plan.context,
+        kvBytesPerToken: kvBytesPerToken(meta) ?? 0,
+        vramBytes: vramBytes ?? 0,
+      });
+      this.#autoGpu = { ...choice, vramBytes };
+      plan.gpuLayers = choice.layers;
+      this.emit(
+        'log',
+        `auto GPU layers: ${choice.layers === 999 ? 'all' : choice.layers} (${choice.reason})` +
+          (vramBytes ? ` · ${(vramBytes / 1024 ** 3).toFixed(1)} GB VRAM` : ''),
+      );
+    }
+
+    return plan;
   }
 
   async #waitForReady() {
@@ -268,22 +336,29 @@ export class LlamaServer extends EventEmitter {
     this.#baseUrl = '';
     this.#contextSize = 0;
     this.#autoContext = null;
+    this.#autoGpu = null;
     if (!proc) {
       this.#setState('idle');
       return;
     }
     this.#stopping = true;
-    proc.kill();
-    await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        proc.kill('SIGKILL');
-        resolve();
-      }, 3000);
-      proc.once('exit', () => {
-        clearTimeout(timer);
-        resolve();
+    // An already-dead process emits no further `exit`, so waiting for one costs
+    // the full timeout on every unload after a crash — including the one on the
+    // way out of the app, where it is three seconds of a window that will not
+    // close.
+    if (proc.exitCode === null && proc.signalCode === null && !proc.killed) {
+      proc.kill();
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          proc.kill('SIGKILL');
+          resolve();
+        }, 3000);
+        proc.once('exit', () => {
+          clearTimeout(timer);
+          resolve();
+        });
       });
-    });
+    }
     this.#proc = null;
     this.#stopping = false;
     this.#setState('idle');

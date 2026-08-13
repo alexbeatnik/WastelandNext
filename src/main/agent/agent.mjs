@@ -14,7 +14,7 @@ import * as config from '../config.mjs';
 import { estimateTokens, streamChat } from '../llm/client.mjs';
 import { readForModel } from './readfile.mjs';
 import { COMPACT_PROMPT, buildSystemPrompt, pageMapContext, titlePrompt } from './prompts.mjs';
-import { extractActions, splitNarration, stripActionBlocks } from './actions.mjs';
+import { extractActions, splitNarration, splitThinking, stripActionBlocks } from './actions.mjs';
 
 /** How many times one user message may bounce back through the model. */
 const MAX_FOLLOW_UPS = 3;
@@ -110,6 +110,9 @@ export class Agent extends EventEmitter {
       temperature: Number(settings.temperature),
       signal: this.#abort?.signal,
       onToken: silent ? undefined : (delta) => this.#say('token', { delta }),
+      // With thinking off, reasoning is not streamed: watching it scroll past
+      // and then vanish when the reply is rendered reads as a glitch.
+      streamReasoning: Boolean(settings.thinking),
     });
     return { text, aborted };
   }
@@ -356,19 +359,38 @@ export class Agent extends EventEmitter {
     return true;
   }
 
-  /** Ask the model to name a chat once it has something to name it from. */
+  /**
+   * Ask the model to name a chat once it has something to name it from.
+   *
+   * The exchange is handed over as one user message rather than replayed as a
+   * conversation. Replaying it invited the model to *continue* the chat instead
+   * of naming it, and mapping the assistant's reply to `user` produced two
+   * consecutive user turns, which some templates render as a single run-on.
+   */
   async #retitle(chatId) {
     const chat = chats.read(chatId);
     if (!chat || chat.messages.length < 2) return;
+
+    const transcript = chat.messages
+      .slice(0, 2)
+      .map((m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${stripActionBlocks(m.content).slice(0, 600)}`)
+      .join('\n\n');
+
     try {
       const { text } = await this.#complete(
         [
           { role: 'system', content: titlePrompt() },
-          ...chat.messages.slice(0, 2).map((m) => ({ role: 'user', content: m.content })),
+          { role: 'user', content: `${transcript}\n\nTitle:` },
         ],
         { silent: true },
       );
-      const updated = chats.rename(chatId, text);
+      // A thinking model answers with its reasoning attached; the title is the
+      // prose, not the deliberation.
+      const prose = splitThinking(text)
+        .filter((segment) => segment.kind === 'text')
+        .map((segment) => segment.content)
+        .join(' ');
+      const updated = chats.rename(chatId, prose || text);
       if (updated) this.#say('chat:renamed', { chatId, title: updated.title });
     } catch {
       /* the prompt-derived title is already good enough */
