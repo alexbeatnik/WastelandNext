@@ -14,7 +14,7 @@ import * as config from '../config.mjs';
 import { estimateTokens, streamChat } from '../llm/client.mjs';
 import { readForModel } from './readfile.mjs';
 import { COMPACT_PROMPT, buildSystemPrompt, pageMapContext, titlePrompt } from './prompts.mjs';
-import { extractActions, splitNarration, splitThinking, stripActionBlocks } from './actions.mjs';
+import { extractActions, splitNarration, splitThinking, stripActionBlocks, stripThinking } from './actions.mjs';
 import { BatchGuard } from './batch-guard.mjs';
 
 /** How many times one user message may bounce back through the model. */
@@ -23,8 +23,29 @@ const MAX_FOLLOW_UPS = 3;
 const COMPACT_THRESHOLD = 0.75;
 /** Messages kept verbatim when compacting — the last two exchanges. */
 const KEEP_MESSAGES = 4;
+/**
+ * Tokens held back for the answer.
+ *
+ * The window is prompt *and* reply; measuring only the prompt against it says a
+ * conversation is fine right up to the point where there is no room left to say
+ * anything. A prompt at 4594 of 4608 leaves fourteen tokens for the reply, and
+ * the model duly emitted a few words and stopped mid-sentence — which reads as
+ * the app cutting it off. A quarter of a small window, capped, is enough for a
+ * couple of paragraphs plus an action block.
+ */
+const REPLY_RESERVE = 1536;
 /** Shell commands are killed rather than left hanging the pipeline. */
 const SHELL_TIMEOUT_MS = 120_000;
+/** Marks where `fitToWindow` cut a message that could not be dropped whole. */
+const TRIM_NOTE = '\n\n[… trimmed to fit the context window …]\n\n';
+
+/** How much of the window the prompt may occupy, leaving room to answer. */
+export function promptBudget(max, reserve = REPLY_RESERVE) {
+  if (!(max > 0)) return 0;
+  // A window smaller than the reserve is not worth failing over; half of it is
+  // a poor prompt budget but a working one.
+  return max > reserve * 2 ? max - reserve : Math.floor(max / 2);
+}
 
 /**
  * Is it time to compress the conversation?
@@ -34,14 +55,80 @@ const SHELL_TIMEOUT_MS = 120_000;
  * short to compress, a window reported by the endpoint rather than configured
  * — are worth testing without a model attached.
  *
+ * Measured against the prompt budget, not the whole window: the share that
+ * matters is of the room the prompt is actually allowed, and the difference is
+ * the whole bug on a small context.
+ *
  * A conversation with nothing older than the kept tail cannot be compacted: the
  * summary would replace the very messages it summarised, and the prompt would
  * not shrink.
  */
-export function shouldCompact(usage, messageCount, { threshold = COMPACT_THRESHOLD, keep = KEEP_MESSAGES } = {}) {
+export function shouldCompact(
+  usage,
+  messageCount,
+  { threshold = COMPACT_THRESHOLD, keep = KEEP_MESSAGES, reserve = REPLY_RESERVE } = {},
+) {
   if (!usage?.max) return false;
   if (messageCount <= keep + 2) return false;
-  return usage.used / usage.max >= threshold;
+  return usage.used / promptBudget(usage.max, reserve) >= threshold;
+}
+
+/** Keep the head and tail of an oversized message, losing the middle. */
+function shrinkToFit(content, budget) {
+  const source = String(content ?? '');
+  let keep = source.length;
+  let out = source;
+  // Shrunk geometrically rather than converted from tokens back to characters:
+  // the estimate is script-dependent, so there is no single ratio to invert.
+  while (keep > 400 && estimateTokens(out) > budget) {
+    keep = Math.floor(keep * 0.7);
+    const half = Math.floor(keep / 2);
+    out = `${source.slice(0, half)}${TRIM_NOTE}${source.slice(source.length - half)}`;
+  }
+  return out;
+}
+
+/**
+ * The last line of defence: a prompt that cannot exceed the window.
+ *
+ * Compaction is the graceful answer and usually the only one needed, but it
+ * cannot always succeed — it keeps the last `KEEP_MESSAGES` verbatim, and a
+ * single pasted README in that tail can fill a small window on its own. When it
+ * does, nothing downstream noticed: the turn was sent anyway, llama.cpp dropped
+ * whatever did not fit, and the model answered a conversation whose beginning
+ * had silently vanished.
+ *
+ * The system prompt and the newest message always survive — the first is the
+ * protocol the reply has to obey, the second is the thing being answered.
+ * Anything else goes oldest-first, and a newest message too big even alone is
+ * cut from the middle, keeping its opening and its closing question.
+ */
+export function fitToWindow(messages, budget) {
+  const list = Array.isArray(messages) ? messages : [];
+  if (!(budget > 0) || list.length === 0) return { messages: list, dropped: 0, trimmed: false };
+
+  const system = list[0]?.role === 'system' ? list[0] : null;
+  const rest = system ? list.slice(1) : list.slice();
+  const cost = (message) => estimateTokens(message?.content);
+  let total = (system ? cost(system) : 0) + rest.reduce((sum, message) => sum + cost(message), 0);
+
+  let dropped = 0;
+  while (total > budget && rest.length > 1) {
+    total -= cost(rest.shift());
+    dropped += 1;
+  }
+
+  let trimmed = false;
+  if (total > budget && rest.length === 1) {
+    const room = budget - (system ? cost(system) : 0);
+    const shrunk = shrinkToFit(rest[0].content, room);
+    if (shrunk !== rest[0].content) {
+      rest[0] = { ...rest[0], content: shrunk };
+      trimmed = true;
+    }
+  }
+
+  return { messages: system ? [system, ...rest] : rest, dropped, trimmed };
 }
 
 export class Agent extends EventEmitter {
@@ -106,8 +193,14 @@ export class Agent extends EventEmitter {
 
     const messages = [{ role: 'system', content: system }];
     for (const message of chat.messages) {
-      if (message.role === 'assistant') messages.push({ role: 'assistant', content: message.content });
-      else if (message.role === 'tool') messages.push({ role: 'user', content: message.content });
+      if (message.role === 'assistant') {
+        // Stored raw, sent without the reasoning — see `stripThinking`. A reply
+        // that was *only* thinking would otherwise leave an empty assistant
+        // turn, and two user messages running together is exactly the shape
+        // `#retitle` already avoids.
+        const prose = stripThinking(message.content);
+        messages.push({ role: 'assistant', content: prose || '(that reply was cut off before an answer)' });
+      } else if (message.role === 'tool') messages.push({ role: 'user', content: message.content });
       else messages.push({ role: 'user', content: message.content });
     }
     return messages;
@@ -189,8 +282,22 @@ export class Agent extends EventEmitter {
     await this.#maybeCompact(chatId, { pageContext });
 
     const chat = chats.read(chatId);
-    const messages = this.#buildMessages(chat, pageContext);
+    const built = this.#buildMessages(chat, pageContext);
 
+    // Compaction is the graceful shrink and normally the only one that runs.
+    // This is what happens when it could not shrink enough — without it the
+    // oversized prompt went out anyway and llama.cpp decided what to lose.
+    const window = this.#contextUsage(built).max;
+    const { messages, dropped, trimmed } = fitToWindow(built, promptBudget(window));
+    if (dropped || trimmed) {
+      const what = [dropped ? `dropped ${dropped} older message(s)` : '', trimmed ? 'trimmed the newest' : '']
+        .filter(Boolean)
+        .join(' and ');
+      this.#say('log', { text: `context full — ${what} to leave room for a reply` });
+    }
+
+    // Reported from what is actually being sent, so a full meter means a full
+    // prompt rather than one that was quietly cut on the way out.
     this.#say('ctx', this.#contextUsage(messages));
     this.#status('Thinking…');
     this.#say('reply:start', {});
@@ -467,17 +574,23 @@ export class Agent extends EventEmitter {
     const tail = chat.messages.slice(-keep);
 
     try {
-      const { text } = await this.#complete(
+      // The thing being summarised is, by definition, most of a full window —
+      // so the summarisation prompt is the one most likely to overflow, and a
+      // summary made from a prompt llama.cpp truncated is worse than none: it
+      // is confidently wrong about what the conversation was.
+      const { messages: ask } = fitToWindow(
         [
           { role: 'system', content: COMPACT_PROMPT },
-          { role: 'user', content: older.map((m) => `${m.role}: ${m.content}`).join('\n\n') },
+          { role: 'user', content: older.map((m) => `${m.role}: ${stripThinking(m.content) || m.content}`).join('\n\n') },
         ],
-        { silent: true },
+        promptBudget(usage.max),
       );
+      const { text } = await this.#complete(ask, { silent: true });
       const summary = text.trim();
       if (!summary) return false;
 
       const compacted = chats.read(chatId);
+      if (!compacted) return false;
       compacted.messages = [
         { role: 'tool', content: `[SUMMARY OF EARLIER CONVERSATION]\n${summary}`, ts: new Date().toISOString() },
         ...tail,
@@ -514,6 +627,11 @@ export class Agent extends EventEmitter {
    */
   async compact(chatId) {
     if (this.#busy) throw new Error('a turn is running — stop it first');
-    return this.#maybeCompact(chatId, { force: true });
+    this.#busy = true;
+    try {
+      return await this.#maybeCompact(chatId, { force: true });
+    } finally {
+      this.#busy = false;
+    }
   }
 }

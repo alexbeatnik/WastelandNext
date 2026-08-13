@@ -115,7 +115,8 @@ export class LlamaServer extends EventEmitter {
   async load(modelFile) {
     const path = modelFile.includes('/') || modelFile.includes('\\') ? modelFile : join(modelsDir(), modelFile);
     if (!existsSync(path)) throw new Error(`model not found: ${path}`);
-    if (this.#state === 'ready' && this.#model === modelFile) return this.status;
+    if ((this.#state === 'ready' || this.#state === 'starting') && this.#model === modelFile) return this.status;
+    if (this.#state === 'starting') throw new Error('a model is already loading — please wait');
 
     await this.unload();
 

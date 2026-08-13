@@ -9,7 +9,7 @@
 
 import { ACTION_RE } from '../../shared/render.mjs';
 
-export { splitThinking, stripActionBlocks } from '../../shared/render.mjs';
+export { splitThinking, stripActionBlocks, stripThinking } from '../../shared/render.mjs';
 
 /**
  * Slice out the first balanced `{...}`, respecting strings and escapes.

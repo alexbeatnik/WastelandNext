@@ -98,7 +98,7 @@ export function list() {
       updated,
       turns: messages.filter((m) => m.role === 'user').length,
     }))
-    .sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
+    .sort((a, b) => String(b.updated ?? '').localeCompare(String(a.updated ?? '')));
 }
 
 export function read(id) {

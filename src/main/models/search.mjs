@@ -35,7 +35,9 @@ export function parseQuant(filename) {
   // Longest match wins so `Q4_K_M` is not reported as `Q4_K` — the list is
   // walked from the most specific end.
   const byLength = [...QUANT_ORDER].sort((a, b) => b.length - a.length);
-  const hit = byLength.find((quant) => new RegExp(`(^|[-_.])${quant}([-_.]|$)`, 'i').test(name));
+  const hit = byLength.find((quant) =>
+    new RegExp(`(^|[-_.])${quant.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([-_.]|$)`, 'i').test(name),
+  );
   return hit ?? '';
 }
 

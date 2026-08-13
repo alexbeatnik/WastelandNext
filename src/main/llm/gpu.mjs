@@ -72,6 +72,19 @@ export const GPU_SHARE = 0.9;
 export const GPU_OVERHEAD_BYTES = 700 * 1024 * 1024;
 
 /**
+ * The shortest context worth buying full offload with.
+ *
+ * Was 4096, and a 12 GB card duly settled on 4608 — which the app cannot live
+ * in. The system prompt, a page map and one pasted document are a few thousand
+ * tokens before the user has said anything, so the conversation was over the
+ * window by its second turn and every turn after that was answered from a
+ * prompt llama.cpp had already truncated. Speed is not worth a model that
+ * forgets what it was asked: below 8192 the trade is refused, the configured
+ * context stands, and some layers run on the CPU.
+ */
+export const MIN_TRADED_CONTEXT = 8192;
+
+/**
  * The largest context at which the *whole* model still fits on the card.
  *
  * Sizing the context first and then fitting layers into what is left is the
@@ -90,7 +103,7 @@ export function contextForFullOffload({
   kvBytesPerToken = 0,
   vramBytes = 0,
   maxContext = 0,
-  floor = 4096,
+  floor = MIN_TRADED_CONTEXT,
   share = GPU_SHARE,
   overheadBytes = GPU_OVERHEAD_BYTES,
 } = {}) {

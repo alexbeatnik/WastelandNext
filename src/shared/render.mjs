@@ -49,6 +49,27 @@ export function splitThinking(text) {
   return segments;
 }
 
+/**
+ * The reply with its reasoning removed — what goes back to the model next turn.
+ *
+ * Thinking is persisted (it is part of the raw reply, and the view dims it), but
+ * it must not be *resent*: a model re-reads its own deliberation as established
+ * fact, and on a small window the deliberation is far larger than the answer. A
+ * 4608-token session here was full after two turns, almost entirely of thinking
+ * the model had already finished with. Every other provider drops prior
+ * reasoning for the same reason.
+ *
+ * Action fences deliberately survive this — the model does need to see what it
+ * did. Only `<think>` goes.
+ */
+export function stripThinking(text) {
+  return splitThinking(text)
+    .filter((segment) => segment.kind === 'text')
+    .map((segment) => segment.content)
+    .join('\n\n')
+    .trim();
+}
+
 /** Human-readable byte size for the vault list. */
 export function formatSize(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];

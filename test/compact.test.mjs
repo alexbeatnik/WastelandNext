@@ -15,24 +15,51 @@ import { setDataRoot } from '../src/main/paths.mjs';
 
 setDataRoot(mkdtempSync(join(tmpdir(), 'wl-compact-')));
 
-const { shouldCompact } = await import('../src/main/agent/agent.mjs');
+const { promptBudget, shouldCompact } = await import('../src/main/agent/agent.mjs');
 
 const usage = (used, max = 10_000) => ({ used, max, percent: (used / max) * 100 });
 const LONG = 12; // comfortably more than the kept tail
 
+// The threshold is a share of the *prompt budget*, not of the whole window:
+// 10_000 less the 1536 reserved for the reply leaves 8464, and 75% of that is
+// 6348. Measuring against the window instead is what let a prompt reach 4594 of
+// 4608 — a conversation that was, on paper, only 99% full and in practice had
+// fourteen tokens left to answer in.
+const BOUNDARY = 6348;
+
 test('a conversation well inside the window is left alone', () => {
   assert.equal(shouldCompact(usage(1000), LONG), false);
-  assert.equal(shouldCompact(usage(7000), LONG), false);
+  assert.equal(shouldCompact(usage(5000), LONG), false);
 });
 
 test('crossing the threshold triggers compaction', () => {
-  assert.equal(shouldCompact(usage(7500), LONG), true);
+  assert.equal(shouldCompact(usage(BOUNDARY + 500), LONG), true);
   assert.equal(shouldCompact(usage(9500), LONG), true);
 });
 
 test('the boundary itself counts as full enough', () => {
-  assert.equal(shouldCompact(usage(7500), LONG), true, '75% exactly should trigger');
-  assert.equal(shouldCompact(usage(7499), LONG), false);
+  assert.equal(shouldCompact(usage(BOUNDARY), LONG), true, '75% of the budget exactly should trigger');
+  assert.equal(shouldCompact(usage(BOUNDARY - 1), LONG), false);
+});
+
+test('room for the reply is reserved before the threshold is applied', () => {
+  // The reported case: a 4608-token window with the prompt all but filling it.
+  // Judged against the window that is 99% and only just over the line; judged
+  // against what the prompt may actually have, it is long past it.
+  assert.equal(shouldCompact({ used: 4594, max: 4608 }, LONG), true);
+  // And it fires early enough to leave something to answer with, rather than at
+  // the point where the model can emit a dozen tokens and stop mid-sentence.
+  assert.equal(shouldCompact({ used: 2400, max: 4608 }, LONG), true);
+  assert.equal(shouldCompact({ used: 1200, max: 4608 }, LONG), false);
+});
+
+test('the reserve is adjustable and cannot swallow a small window whole', () => {
+  assert.equal(promptBudget(15_360), 15_360 - 1536);
+  assert.equal(promptBudget(10_000, 2000), 8000);
+  // A window at or below twice the reserve would otherwise budget zero or less,
+  // and every conversation would compact forever.
+  assert.equal(promptBudget(2048), 1024);
+  assert.equal(promptBudget(0), 0);
 });
 
 test('a conversation with nothing older than the tail is never compacted', () => {

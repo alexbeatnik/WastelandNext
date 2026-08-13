@@ -112,6 +112,39 @@ history — each batch appends a page map — so three follow-ups can cross the 
 session reached 8562 of 15360 without ever triggering. The estimate includes the page context for the same reason: it
 is part of every prompt and, on a busy site, the largest part. `shouldCompact` is exported and tested on its own.
 
+**The window holds the prompt *and* the reply, so the prompt is budgeted against `max − REPLY_RESERVE`.** Measuring the
+prompt against the whole window says a conversation is fine right up to the point where there is no room left to answer:
+a real session reached 4594 of 4608, which is 99% full and fourteen tokens from silence — the model emitted a few words
+and stopped mid-sentence, which reads as the app cutting it off. `promptBudget` is what `shouldCompact` divides by, and
+it never returns more than half a window smaller than twice the reserve.
+
+**`fitToWindow` is the backstop for when compaction could not shrink enough.** Compaction keeps `KEEP_MESSAGES`
+verbatim, and one pasted README in that tail fills a small window on its own — so it can run, succeed, and leave the
+prompt still over the line. Nothing downstream noticed: the turn went out anyway and llama.cpp chose what to discard,
+which is how a model came to answer a conversation whose beginning had silently vanished. The system prompt and the
+newest message always survive; anything else goes oldest-first, and a newest message oversized on its own is cut from
+the middle so a pasted document keeps both what it is and the question appended under it. It returns new objects — the
+stored history is never mutated.
+
+**Thinking is persisted but never resent.** `<think>` is part of the raw reply and the view dims it, but
+`#buildMessages` puts assistant turns through `stripThinking` first. A model re-reads its own deliberation as settled
+fact, and on a small window the deliberation dwarfs the answer — a 4608-token session was full after two turns, almost
+entirely of reasoning already finished with. Every other provider drops prior reasoning for the same reason. Action
+fences deliberately survive: the model does need to see what it did. A reply that never got past thinking strips to
+nothing, so a short placeholder stands in rather than an empty assistant turn — two user messages in a row run together
+in some chat templates.
+
+**`estimateTokens` counts Cyrillic separately from Latin.** One ratio cannot serve both: Latin prose runs about 3.6
+characters to the token, Ukrainian nearer 1.6, because few tokenizers hold whole words and the rest falls back to byte
+pairs. A single 3.6 undercounted a Ukrainian conversation by roughly half — the meter read 99% while the prompt was
+already over the window. The estimate is deliberately the pessimistic one: guessing low costs a truncated prompt,
+guessing high costs one compaction sooner than needed.
+
+**Context is never traded below `MIN_TRADED_CONTEXT` (8192) for full GPU offload.** The floor was 4096 and a 12 GB card
+duly settled on 4608, which this app cannot live in: the system prompt, a page map and one pasted document are a few
+thousand tokens before the user has said anything. Below 8192 the trade is refused, the configured context stands, and
+some layers run on the CPU — a model that forgets what it was asked is not worth 3× the tokens per second.
+
 **`compact()` refuses while a turn is running.** It rewrites the whole message list, and a turn appending to the same
 file at that moment loses messages.
 

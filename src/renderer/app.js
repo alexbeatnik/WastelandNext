@@ -522,11 +522,12 @@ function paintBrowser(browser) {
   engine.className = `stat ${browser.engine ? '' : 'warn'}`;
 }
 
-function paintCtx({ used, max, percent }) {
-  $('ctx-label').textContent = `CTX: ${used} / ${max} (${Math.round(percent)}%)`;
+function paintCtx({ used = 0, max = 0, percent = 0 } = {}) {
+  const safePercent = Number.isFinite(percent) ? percent : 0;
+  $('ctx-label').textContent = `CTX: ${used} / ${max} (${Math.round(safePercent)}%)`;
   const meter = $('ctx-meter');
-  meter.className = `meter ctx${percent > 90 ? ' hot' : percent > 75 ? ' warn' : ''}`;
-  meter.firstElementChild.style.width = `${Math.min(100, percent)}%`;
+  meter.className = `meter ctx${safePercent > 90 ? ' hot' : safePercent > 75 ? ' warn' : ''}`;
+  meter.firstElementChild.style.width = `${Math.min(100, Math.max(0, safePercent))}%`;
 }
 
 /* ============================ settings → controls ============================ */

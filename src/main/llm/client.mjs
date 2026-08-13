@@ -139,12 +139,23 @@ export async function contextSize(baseUrl) {
 }
 
 /**
- * Rough token count for the context meter.
+ * Rough token count for the context meter and the compaction decision.
  *
- * Used only until the server reports real usage. ~3.6 chars/token is a decent
- * middle ground across Latin and Cyrillic text; the meter is an indicator, not
- * an accounting record.
+ * One ratio cannot serve both scripts. Latin prose runs about 3.6 characters to
+ * the token; Cyrillic runs nowhere near that — few tokenizers hold whole
+ * Ukrainian words, so most of the text falls back to byte pairs and lands nearer
+ * 1.6. A single 3.6 undercounted a Ukrainian conversation by roughly half: the
+ * meter read 4594 of 4608 while the prompt was already over the window, and
+ * llama.cpp was quietly discarding the oldest part of it to make room. The model
+ * then answered as if the start of the conversation had never happened.
+ *
+ * Still an estimate — deliberately the pessimistic one, because the cost of
+ * guessing low is a truncated prompt and the cost of guessing high is one
+ * compaction sooner than strictly needed.
  */
 export function estimateTokens(text) {
-  return Math.ceil(String(text ?? '').length / 3.6);
+  const source = String(text ?? '');
+  let ascii = 0;
+  for (let i = 0; i < source.length; i += 1) if (source.charCodeAt(i) < 128) ascii += 1;
+  return Math.ceil(ascii / 3.6 + (source.length - ascii) / 1.6);
 }
