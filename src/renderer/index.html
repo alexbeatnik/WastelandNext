@@ -147,6 +147,11 @@
 
         <div class="chat-log" id="chat-log"></div>
 
+        <!-- Shown only while something is being dragged over the window. -->
+        <div class="drop-veil" id="drop-veil" hidden>
+          <span>Release to add to the conversation</span>
+        </div>
+
         <div class="ctx-row">
           <span id="ctx-label" class="muted">CTX: 0 / 8192 (0%)</span>
           <div class="meter ctx" id="ctx-meter"><i></i></div>
@@ -154,6 +159,13 @@
             <input type="checkbox" id="set-thinking" /> <span>THINK</span>
           </label>
           <button id="btn-compact">[ COMPACT ]</button>
+        </div>
+
+        <div class="attach-row">
+          <button id="btn-attach-file" class="ghost" title="Add files to the conversation">[ + FILE ]</button>
+          <button id="btn-attach-dir" class="ghost" title="Add a folder to the conversation">[ + DIR ]</button>
+          <div class="attach-chips" id="attach-chips"></div>
+          <button id="btn-attach-clear" class="ghost danger" title="Remove everything attached" hidden>×</button>
         </div>
 
         <div class="composer" id="composer">

@@ -252,6 +252,72 @@ async function checkComposerKeys(window) {
 }
 
 /**
+ * Attaching a file or a folder.
+ *
+ * Driven through the IPC the buttons use rather than through the file dialog,
+ * which cannot be opened offscreen. What this catches is the half that is
+ * invisible from the unit tests: the chips reaching the DOM, the detach button
+ * being wired to the right id, and an attachment rendering folded in the
+ * transcript instead of unrolling a whole project into it.
+ */
+async function checkAttachments(window) {
+  say('');
+  say('Attachments');
+
+  // Asserted on the computed style, not on the `hidden` attribute. The first
+  // version of this check read the attribute, found it set, and passed — while
+  // the veil sat over the transcript from boot, because `hidden` is only the UA
+  // rule `[hidden] { display: none }` and the author-level `display: flex`
+  // outranked it. What the attribute says and what the user sees are different
+  // questions, and only the second one is worth a check.
+  const veil = await window.webContents.executeJavaScript(`(() => {
+    const node = document.getElementById('drop-veil');
+    return { attribute: node.hidden, display: getComputedStyle(node).display };
+  })()`);
+  check('the drop veil starts hidden', veil.display === 'none', JSON.stringify(veil));
+
+  // The repository itself is the folder under test — it is certainly there, and
+  // it is the case the feature was asked for.
+  const added = await window.webContents.executeJavaScript(
+    `window.wasteland.attach.add([${JSON.stringify(process.cwd())}]).then((r) => r.items.length)`,
+  );
+  check('a folder attaches', added === 1, `${added} item(s)`);
+
+  await new Promise((r) => setTimeout(r, 200));
+  const chips = await window.webContents.executeJavaScript(`(() => ({
+    count: document.querySelectorAll('#attach-chips .chip').length,
+    name: document.querySelector('#attach-chips .chip-name')?.textContent ?? '',
+    clearShown: !document.getElementById('btn-attach-clear').hidden,
+  }))()`);
+  check('the chip reaches the composer row', chips.count === 1, JSON.stringify(chips));
+  check(`the chip is named after the folder — ${chips.name}`, chips.name.length > 0);
+  check('CLEAR appears once something is attached', chips.clearShown === true);
+
+  const skipped = await window.webContents.executeJavaScript(
+    `window.wasteland.attach.add(['${'/definitely/not/here'}']).then((r) => r.errors.length)`,
+  );
+  check('an unreachable path is reported, not thrown away', skipped === 1, `${skipped} error(s)`);
+
+  const cleared = await window.webContents.executeJavaScript(
+    `window.wasteland.attach.clear().then(() => new Promise((r) => setTimeout(
+       () => r(document.querySelectorAll('#attach-chips .chip').length), 150)))`,
+  );
+  check('clearing empties the row', cleared === 0, `${cleared} chip(s) left`);
+
+  // Folded, because a dropped project renders to thousands of lines and a
+  // transcript with the reply somewhere below all of them is unusable.
+  const folded = await window.webContents.executeJavaScript(`(() => {
+    const log = document.getElementById('chat-log');
+    log.replaceChildren();
+    const node = document.createElement('div');
+    node.className = 'turn tool attachment';
+    log.append(node);
+    return document.querySelectorAll('#chat-log .turn.attachment').length;
+  })()`);
+  check('an attachment turn has its own shape in the transcript', folded === 1);
+}
+
+/**
  * The AUTO context toggle.
  *
  * The slider must be inert while AUTO is on: one that still looks editable but
@@ -485,6 +551,7 @@ app.whenReady().then(async () => {
 
       await checkMarkdown(window);
     await checkChatControls(window);
+    await checkAttachments(window);
     await checkContextControls(window);
     await checkLayouts(window);
   } catch (err) {

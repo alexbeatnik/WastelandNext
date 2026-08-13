@@ -191,6 +191,59 @@ export function registerIpc(windowGetter) {
   handle('agent:context', (chatId) => agent.contextFor(chatId));
   handle('shell:respond', (id, approved) => agent.answerShell(id, approved));
 
+  /* ---------- attachments ---------- */
+
+  /**
+   * Add paths, reporting per-path failures instead of losing the batch.
+   *
+   * Dropping six folders of which one is a symlink to nowhere should attach
+   * five and say why the sixth did not — throwing would discard all six and
+   * name only the first thing that went wrong.
+   */
+  const addAttachments = async (paths) => {
+    const errors = [];
+    for (const path of Array.isArray(paths) ? paths : [paths]) {
+      try {
+        await agent.attachments.add(path);
+      } catch (err) {
+        errors.push(err.message);
+      }
+    }
+    const items = agent.attachments.list();
+    send('attach:changed', { items, errors });
+    return { items, errors };
+  };
+
+  handle('attach:add', (paths) => addAttachments(paths));
+  handle('attach:list', () => agent.attachments.list());
+  handle('attach:remove', (id) => {
+    const items = agent.attachments.remove(id);
+    send('attach:changed', { items, errors: [] });
+    return items;
+  });
+  handle('attach:clear', () => {
+    const items = agent.attachments.clear();
+    send('attach:changed', { items, errors: [] });
+    return items;
+  });
+
+  /**
+   * `openFile` and `openDirectory` cannot be combined on Windows — the dialog
+   * silently honours only one — so the two are separate commands rather than
+   * one button that behaves differently per platform.
+   */
+  const pick = async (properties, title) => {
+    const result = await dialog.showOpenDialog(getWindow() ?? undefined, {
+      title,
+      properties: [...properties, 'multiSelections', 'dontAddToRecent'],
+    });
+    if (result.canceled || result.filePaths.length === 0) return { items: agent.attachments.list(), errors: [], canceled: true };
+    return addAttachments(result.filePaths);
+  };
+
+  handle('attach:pickFiles', () => pick(['openFile'], 'Add files to the conversation'));
+  handle('attach:pickFolder', () => pick(['openDirectory'], 'Add a folder to the conversation'));
+
   /* ---------- browser ---------- */
   handle('browser:status', () => browser.status);
   handle('browser:open', async () => {

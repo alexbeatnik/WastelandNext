@@ -136,10 +136,37 @@ function addMarkdownTurn(kind, text) {
   return node;
 }
 
+/**
+ * An attached file or folder in the transcript: one line, expandable.
+ *
+ * Drawn folded because it is the one message type whose size is chosen by the
+ * user rather than the model — a dropped project renders to thousands of lines,
+ * and a transcript where the reply is somewhere below all of them is unusable.
+ * The full text is still there, one click away, because what was sent to the
+ * model is exactly what the user should be able to check.
+ */
+function addAttachmentTurn(content) {
+  const headline = content.split('\n', 1)[0].replace(/^\[ATTACHED (FILE|FOLDER)\]\s*/, '');
+  const node = el('div', 'turn tool attachment');
+  const head = el('button', 'attachment-head', `▸ ${headline}`);
+  const body = el('pre', 'attachment-body', content);
+  body.hidden = true;
+  head.addEventListener('click', () => {
+    body.hidden = !body.hidden;
+    head.textContent = `${body.hidden ? '▸' : '▾'} ${headline}`;
+  });
+  node.append(head, body);
+  $('chat-log').append(node);
+  return node;
+}
+
 /** Draw one stored message, splitting reasoning out and hiding action fences. */
 function renderMessage(message) {
   if (message.role === 'user') return void addTurn('user', message.content);
-  if (message.role === 'tool') return void addTurn('tool', message.content);
+  if (message.role === 'tool') {
+    if (message.content.startsWith('[ATTACHED ')) return void addAttachmentTurn(message.content);
+    return void addTurn('tool', message.content);
+  }
 
   const segments = splitThinking(message.content);
   // With thinking switched off, the reasoning is hidden — but only when there
@@ -530,6 +557,127 @@ function paintCtx({ used = 0, max = 0, percent = 0 } = {}) {
   meter.firstElementChild.style.width = `${Math.min(100, Math.max(0, safePercent))}%`;
 }
 
+/* ============================ attachments ============================ */
+
+/** The chips above the composer: what will go with the next message. */
+function paintAttachments(items = []) {
+  const chips = $('attach-chips');
+  chips.replaceChildren();
+
+  for (const item of items) {
+    const chip = el('div', 'chip');
+    chip.title = `${item.path}\n${item.files} file(s), ${formatSize(item.bytes)}`;
+    chip.append(el('span', '', item.kind === 'dir' ? '▸' : '▪'));
+    chip.append(el('span', 'chip-name', item.name));
+    chip.append(el('span', 'muted', item.kind === 'dir' ? `${item.files}f` : formatSize(item.bytes)));
+
+    const detach = el('button', '', '×');
+    detach.title = 'Detach';
+    detach.addEventListener('click', async () => paintAttachments(await api.attach.remove(item.id)));
+    chip.append(detach);
+    chips.append(chip);
+  }
+
+  $('btn-attach-clear').hidden = items.length === 0;
+}
+
+/**
+ * Run an attach command and report what came of it.
+ *
+ * Failures are per-path, not per-batch: dropping six folders of which one is
+ * unreadable attaches five and names the sixth. Throwing the lot away and
+ * reporting only the first problem is not what the gesture asked for.
+ */
+async function attachVia(run) {
+  try {
+    const result = await run();
+    const items = result.items ?? result;
+    paintAttachments(items);
+    for (const error of result.errors ?? []) activity(`not attached — ${error}`, 'bad');
+
+    if (result.canceled) status('Ready');
+    else if (result.errors?.length) status(`Not attached: ${result.errors[0]}`);
+    else status(items.length === 1 ? '1 attachment ready.' : `${items.length} attachments ready.`);
+  } catch (err) {
+    status(err.message);
+    activity(err.message, 'bad');
+  }
+}
+
+/**
+ * Dropping files or folders anywhere on the window.
+ *
+ * `dragover` must be cancelled or `drop` never fires at all: Chromium's default
+ * is to navigate to what was dropped, which in this window means the app is
+ * replaced by a file viewer with no way back.
+ */
+function wireDrop() {
+  const veil = $('drop-veil');
+  let idle = null;
+
+  // A drag carrying selected text also fires these events, and veiling the
+  // transcript for one would be a lie about what is going to happen.
+  const holdsFiles = (event) => Array.from(event.dataTransfer?.types ?? []).includes('Files');
+
+  const hide = () => {
+    clearTimeout(idle);
+    idle = null;
+    veil.hidden = true;
+  };
+
+  /**
+   * Kept up by the drag itself rather than by counting enters against leaves.
+   *
+   * `dragover` repeats every few hundred milliseconds for as long as something
+   * is over the window, so re-arming a short timer on each one means the veil
+   * takes itself down the moment the events stop — whether the cursor left, the
+   * drag was cancelled with Escape, or it was dropped on another window. The
+   * counting version could not: `dragleave` is not guaranteed to balance
+   * `dragenter` at the window edge, and one missed leave left the veil up over
+   * the transcript for the rest of the session.
+   */
+  const show = () => {
+    veil.hidden = false;
+    clearTimeout(idle);
+    idle = setTimeout(hide, 300);
+  };
+
+  document.addEventListener('dragenter', (event) => {
+    if (!holdsFiles(event)) return;
+    event.preventDefault();
+    show();
+  });
+
+  document.addEventListener('dragover', (event) => {
+    if (!holdsFiles(event)) return;
+    event.preventDefault();
+    show();
+  });
+
+  // Belt and braces for the cases that do announce themselves.
+  document.addEventListener('dragleave', (event) => {
+    if (holdsFiles(event) && !event.relatedTarget) hide();
+  });
+  document.addEventListener('dragend', hide);
+  window.addEventListener('blur', hide);
+
+  document.addEventListener('drop', async (event) => {
+    if (!holdsFiles(event)) return;
+    event.preventDefault();
+    hide();
+
+    // `File.path` was Electron's own extension and is gone as of Electron 32;
+    // the path now comes from `webUtils` in the preload. Reading `.path` here
+    // would yield undefined for every drop and look like the app ignoring it.
+    const paths = Array.from(event.dataTransfer.files)
+      .map((file) => api.attach.pathFor(file))
+      .filter(Boolean);
+
+    if (paths.length === 0) return void status('Nothing with a filesystem path in that drop.');
+    await attachVia(() => api.attach.add(paths));
+  });
+}
+
 /* ============================ settings → controls ============================ */
 
 /**
@@ -680,6 +828,16 @@ function handleEvent(payload) {
 
     case 'log':
       activity(payload.text);
+      break;
+
+    case 'attach:changed':
+      paintAttachments(payload.items ?? []);
+      break;
+
+    // The attachments went into the transcript, so the composer no longer owes
+    // them: the main process says when, because it is what decided.
+    case 'attach:consumed':
+      paintAttachments([]);
       break;
 
     case 'turn:start':
@@ -885,6 +1043,11 @@ function wire() {
 
   $('btn-expand').addEventListener('click', () => $('composer').classList.toggle('expanded'));
 
+  $('btn-attach-file').addEventListener('click', () => attachVia(() => api.attach.pickFiles()));
+  $('btn-attach-dir').addEventListener('click', () => attachVia(() => api.attach.pickFolder()));
+  $('btn-attach-clear').addEventListener('click', async () => paintAttachments(await api.attach.clear()));
+  wireDrop();
+
   $('toggle-panel').addEventListener('click', async () => {
     const open = !state.settings.leftPanelOpen;
     $('workspace').classList.toggle('panel-hidden', !open);
@@ -1028,6 +1191,10 @@ async function boot() {
   paintCompute(snapshot.llm);
   paintBrowser({ ...snapshot.browser, engine: snapshot.engine });
   paintCtx({ used: 0, max: snapshot.settings.nCtx, percent: 0 });
+
+  // Attachments outlive a reload — they live in the main process — so the row
+  // is painted from what is actually pending, not assumed empty.
+  paintAttachments(await api.attach.list());
 
   await Promise.all([refreshVault(), refreshChats(), refreshTool()]);
 

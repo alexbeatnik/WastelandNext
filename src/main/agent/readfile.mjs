@@ -10,8 +10,14 @@ import { readFile as fsReadFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 
-/** Directory names that hold credentials often enough to be worth refusing. */
-const SECRET_DIRS = new Set(['.ssh', '.gnupg', '.aws', '.kube', '.docker', '.password-store', '.netrc']);
+/**
+ * Directory names that hold credentials often enough to be worth refusing.
+ *
+ * Exported because attachments apply the same list. A model naming a path and a
+ * user dropping a folder differ in how much they may reach, but neither has any
+ * business pasting a private key into a chat log.
+ */
+export const SECRET_DIRS = new Set(['.ssh', '.gnupg', '.aws', '.kube', '.docker', '.password-store', '.netrc']);
 
 /** Biggest file we will paste into a prompt. Beyond this we read the head. */
 export const MAX_READ_BYTES = 64 * 1024;

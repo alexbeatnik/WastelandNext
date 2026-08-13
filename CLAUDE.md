@@ -55,6 +55,32 @@ harmless; losing the actual reason is not.
 **`app.exit()` does not wait for anything.** Teardown promises must be awaited *before* it, and the child processes are
 torn down concurrently so a Chrome that will not close cannot eat the budget that would have stopped llama-server.
 
+**`File.path` no longer exists.** It was Electron's own extension to the web `File` object and was removed in Electron
+32; this app is on 34, so a renderer reading `file.path` on a drop gets `undefined` for every file and the drop looks
+like it was ignored. The path comes from `webUtils.getPathForFile`, which lives only in the preload — that is the point,
+since it is what stops the renderer turning an arbitrary `File` into a path on its own. It works in a sandboxed preload,
+so the sandbox stays on.
+
+**The `hidden` attribute loses to any author-level `display`.** `hidden` is nothing but the UA rule
+`[hidden] { display: none }`, and the weakest author declaration outranks the whole UA sheet — so `.drop-veil
+{ display: flex }` left the veil sitting over the transcript from boot, attribute faithfully set the entire time. Every
+element styled with a `display` *and* toggled by `hidden` needs its own `[hidden] { display: none }`; `.modal[hidden]`
+already did, and the veil was written without noticing why. A smoke check that reads `node.hidden` cannot see this —
+it passed while the bug was on screen. **Assert on `getComputedStyle(node).display`, never on the attribute**: what the
+attribute says and what the user sees are different questions, and only the second one is worth a check.
+
+**The drop veil is held up by a re-armed timer, not by counting `dragenter` against `dragleave`.** `dragover` repeats
+for as long as something is over the window, so a short timer re-armed on each one takes the veil down the moment the
+events stop — cursor left, Escape pressed, dropped on another window. Counting cannot do that: `dragleave` is not
+guaranteed to balance `dragenter` at the window edge, and one missed leave leaves the veil up for the rest of the
+session.
+
+**`dragover` must call `preventDefault()` or `drop` never fires.** Chromium's default for a dropped file is to navigate
+to it, which in this window replaces the app with a file viewer and no way back. `dragenter`/`dragleave` are counted,
+not toggled: crossing into a child element fires `dragleave` on the parent *after* `dragenter` on the child, so a
+boolean blinks the veil off every time the cursor passes over a message. The veil itself is `pointer-events: none`, or
+it becomes the drag target the instant it appears and flickers under the cursor.
+
 **Never build a PowerShell command by interpolating a path.** `psQuote` doubles apostrophes; without it a home directory
 like `C:\Users\O'Connor` closes the string early and the unpack fails on the user's own name.
 
@@ -147,6 +173,32 @@ some layers run on the CPU — a model that forgets what it was asked is not wor
 
 **`compact()` refuses while a turn is running.** It rewrites the whole message list, and a turn appending to the same
 file at that moment loses messages.
+
+**An attachment is folded into the transcript once, not re-sent every turn.** `Attachments` is a pending list that
+`send()` empties into one `tool` message ahead of the user's words. Held outside the transcript and prepended to every
+prompt instead, the same folder would go over the wire five times in five turns — and would sit outside compaction,
+which is the only thing that can shrink it once the conversation grows. Half the prompt budget is the attachment's; the
+other half has to hold the conversation it is for.
+
+**Attachment paths are not confined to the home directory, and `readfile.mjs` paths still are.** The difference is who
+named the path: a model naming one is a request to be vetted, a person picking one through a file dialog or dropping it
+on the window has already decided. A project checked out on another drive is ordinary. `SECRET_DIRS` applies to both —
+"I dragged the wrong folder in" is a mistake worth catching whoever made it.
+
+**The listing is the part of an attachment that is never dropped.** It is the cheapest thing in there and the most
+useful: "what shape is this project" is answerable from names alone, and a model shown the tree can ask for a file it
+wants. File bodies fill the remaining budget in usefulness order — README and manifest first, then shallow before deep
+and small before large — and what did not fit is named as not having fitted, so the model can tell "there is no more"
+from "there is more I have not seen". The first body goes in even when it alone blows the budget: a single dropped file
+rendering to its own filename and nothing else is indistinguishable from a bug.
+
+**An attachment turn is drawn folded.** It is the one message whose size the user chose rather than the model, and a
+dropped project renders to thousands of lines — a transcript with the reply somewhere below all of them is unusable.
+The full text stays one click away, because what was sent to the model is what the user must be able to check.
+
+**`isFirstTurn` counts user messages, not messages.** An attachment goes in ahead of the prompt, so a conversation
+started by dropping a folder would otherwise never be named. `#retitle` skips `tool` messages for the same reason:
+titling a chat from a directory listing yields "src, main, agent" for a conversation that was about something else.
 
 **The context meter is recomputed on every chat load**, not only mid-turn. `agent.contextFor(chatId)` exists for this:
 without it the meter keeps the previous conversation's number after NEW CHAT, which users read — correctly — as the

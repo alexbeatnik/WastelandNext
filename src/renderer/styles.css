@@ -169,6 +169,10 @@ body.no-crt .crt {
 
 .panel-chat {
   overflow: hidden;
+  /* The drop veil is absolutely placed inside this panel, so it must be the
+     containing block — otherwise it escapes to the viewport and covers the
+     model vault as well, which is not where anything can be dropped. */
+  position: relative;
 }
 
 /* The third column only exists where there is genuinely room for it. */
@@ -735,6 +739,39 @@ input[type='checkbox']:checked {
   overflow: auto;
 }
 
+/* An attachment overrides the tool turn's height cap: folded it needs none, and
+   unfolded a cap would put a second scrollbar inside the transcript's own. */
+.turn.tool.attachment {
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+}
+
+.attachment-head {
+  display: block;
+  width: 100%;
+  border: 0;
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+  color: var(--amber-dim);
+  background: none;
+  font-size: inherit;
+}
+
+.attachment-head:hover {
+  color: var(--amber-bright);
+}
+
+.attachment-body {
+  max-height: 22rem;
+  margin: 0;
+  padding: 0.4rem 0.5rem;
+  overflow: auto;
+  border-top: 1px solid var(--amber-faint);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .turn .cursor {
   display: inline-block;
   width: 0.55em;
@@ -798,6 +835,81 @@ input[type='checkbox']:checked {
 
 .ctx-row .meter {
   flex: 1;
+}
+
+/* Attachments waiting to go with the next message. */
+.attach-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.6rem;
+  border-top: 1px solid var(--amber-faint);
+}
+
+.attach-chips {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 0.3rem;
+  overflow-x: auto;
+  /* One row that scrolls, not a stack that grows: a dropped folder must not be
+     able to push the composer off the bottom of a short window. */
+  scrollbar-width: thin;
+}
+
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 0 0 auto;
+  max-width: 16rem;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--amber-faint);
+  color: var(--amber-dim);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+.chip .chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip button {
+  border: 0;
+  padding: 0 0.15rem;
+  color: var(--amber-dim);
+  background: none;
+}
+
+.chip button:hover {
+  color: var(--warn);
+}
+
+/* Covers the transcript while a drag is in flight, so the target is obvious. */
+.drop-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--amber-bright);
+  background: rgb(0 0 0 / 78%);
+  color: var(--amber-bright);
+  letter-spacing: 0.08em;
+  /* The veil must never become the drag target itself: taking pointer events
+     would fire dragleave the instant it appeared, and it would flicker on and
+     off under the cursor rather than staying up. */
+  pointer-events: none;
+}
+
+/* Without this the veil is visible from boot and never goes away. `hidden` is
+   only the UA rule `[hidden] { display: none }`, and *any* author-level display
+   outranks it — the `display: flex` above wins, attribute or no attribute. Same
+   guard as `.modal[hidden]`, and needed for exactly the same reason. */
+.drop-veil[hidden] {
+  display: none;
 }
 
 .composer {

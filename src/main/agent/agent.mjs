@@ -15,6 +15,7 @@ import { estimateTokens, streamChat } from '../llm/client.mjs';
 import { readForModel } from './readfile.mjs';
 import { COMPACT_PROMPT, buildSystemPrompt, pageMapContext, titlePrompt } from './prompts.mjs';
 import { extractActions, splitNarration, splitThinking, stripActionBlocks, stripThinking } from './actions.mjs';
+import { Attachments } from './attach.mjs';
 import { BatchGuard } from './batch-guard.mjs';
 
 /** How many times one user message may bounce back through the model. */
@@ -140,6 +141,8 @@ export class Agent extends EventEmitter {
   #pendingShell = new Map();
   /** Refuses a browser batch identical to one already run this turn. */
   #batchGuard = new BatchGuard();
+  /** Files and folders the user attached, waiting for the next message. */
+  attachments = new Attachments();
 
   constructor({ server, browser, lookupBrowser }) {
     super();
@@ -208,10 +211,18 @@ export class Agent extends EventEmitter {
 
   #contextUsage(messages) {
     const used = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
-    // What the endpoint reported beats what we configured: with an external
-    // endpoint the two have nothing to do with each other.
-    const max = this.#server.contextSize || Number(config.get('nCtx')) || 8192;
+    const max = this.#window();
     return { used, max, percent: Math.min(100, (used / max) * 100) };
+  }
+
+  /**
+   * The context window in force.
+   *
+   * What the endpoint reported beats what we configured: with an external
+   * endpoint the two have nothing to do with each other.
+   */
+  #window() {
+    return this.#server.contextSize || Number(config.get('nCtx')) || 8192;
   }
 
   /** One streamed completion, with tokens relayed to the UI as they land. */
@@ -253,10 +264,24 @@ export class Agent extends EventEmitter {
 
     try {
       let chat = chats.read(chatId) ?? chats.create(chats.titleFromPrompt(prompt));
+
+      // Attachments go in ahead of the message they came with, as an ordinary
+      // transcript entry: they are then compacted, budgeted and dropped by
+      // exactly the machinery that handles everything else, instead of being a
+      // second kind of context with its own rules. Half the prompt budget is
+      // theirs — the other half has to hold the conversation they are for.
+      const attached = this.attachments.take(Math.floor(promptBudget(this.#window()) / 2));
+      if (attached) {
+        chat = chats.append(chat.id, { role: 'tool', content: attached });
+        this.#say('attach:consumed', {});
+      }
+
       chat = chats.append(chat.id, { role: 'user', content: prompt });
       // Captured before the turn runs: afterwards the chat holds a reply too,
-      // and the model only gets to name a conversation once.
-      const isFirstTurn = chat.messages.length === 1;
+      // and the model only gets to name a conversation once. Counted in *user*
+      // messages rather than all of them, because an attachment goes in first
+      // and a chat opened by dropping a folder would otherwise never be named.
+      const isFirstTurn = chat.messages.filter((message) => message.role === 'user').length === 1;
       this.#say('turn:start', { chatId: chat.id, title: chat.title });
 
       await this.#runTurn(chat.id, 0);
@@ -524,6 +549,9 @@ export class Agent extends EventEmitter {
     if (!chat || chat.messages.length < 2) return;
 
     const transcript = chat.messages
+      // Attachments are skipped: naming a chat from a directory listing gives
+      // "src, main, agent" for a conversation that was about something else.
+      .filter((message) => message.role !== 'tool')
       .slice(0, 2)
       .map((m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${stripActionBlocks(m.content).slice(0, 600)}`)
       .join('\n\n');

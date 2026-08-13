@@ -7,7 +7,7 @@
  * Every call is a named method over a fixed channel list. The renderer cannot
  * name a channel of its own, so adding an API here is a deliberate act.
  */
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 /** Unwrap the `{ok, value|error}` envelope every handler returns. */
 async function call(channel, ...args) {
@@ -65,6 +65,34 @@ contextBridge.exposeInMainWorld('wasteland', {
     status: () => call('browser:status'),
     open: () => call('browser:open'),
     close: () => call('browser:close'),
+  },
+
+  attach: {
+    list: () => call('attach:list'),
+    add: (paths) => call('attach:add', paths),
+    remove: (id) => call('attach:remove', id),
+    clear: () => call('attach:clear'),
+    pickFiles: () => call('attach:pickFiles'),
+    pickFolder: () => call('attach:pickFolder'),
+
+    /**
+     * The filesystem path behind a dropped `File`.
+     *
+     * `File.path` was Electron's own extension to the web File object and was
+     * removed in Electron 32; this app is on 34, so reading it yields
+     * `undefined` and every drop looks like an empty selection. `webUtils` is
+     * the replacement and it only exists in the preload — which is the point,
+     * since it is what keeps the renderer from turning an arbitrary File into a
+     * path on its own. Available in a sandboxed preload, so the sandbox stays
+     * on.
+     */
+    pathFor: (file) => {
+      try {
+        return webUtils.getPathForFile(file) || '';
+      } catch {
+        return '';
+      }
+    },
   },
 
   /** Subscribe to the single event stream. Returns an unsubscribe function. */
