@@ -193,11 +193,31 @@ function scrollChat() {
   log.scrollTop = log.scrollHeight;
 }
 
+/**
+ * Which load is the current one.
+ *
+ * `chats.read` is a round trip, and a second pick started while the first is
+ * still out can finish first — leaving the older transcript drawn over the
+ * conversation the picker says is open. Every await below checks it is still
+ * the load that was asked for and drops out if it is not.
+ */
+let chatLoadSeq = 0;
+
 async function loadChat(id) {
+  // A turn writes into whichever chat the main process is running; switching
+  // out from under it would draw the reply into a conversation it does not
+  // belong to, and the finishing `send()` would then set the id back.
+  if (state.streaming) {
+    status('A turn is running — stop it before switching conversations.');
+    return;
+  }
+
+  const seq = (chatLoadSeq += 1);
   state.chatId = id ?? '';
   $('chat-log').replaceChildren();
   if (state.chatId) {
     const chat = await api.chats.read(state.chatId);
+    if (seq !== chatLoadSeq) return;
     for (const message of chat?.messages ?? []) renderMessage(message);
   }
   scrollChat();
@@ -206,7 +226,9 @@ async function loadChat(id) {
   // previous conversation's usage — which reads as NEW CHAT not having cleared
   // anything.
   try {
-    paintCtx(await api.agent.context(state.chatId));
+    const usage = await api.agent.context(state.chatId);
+    if (seq !== chatLoadSeq) return;
+    paintCtx(usage);
   } catch {
     /* a meter that is briefly stale is not worth failing the load over */
   }
@@ -254,6 +276,10 @@ function paintChatPicker(chats) {
     const drop = el('button', 'chat-drop danger', '×');
     drop.title = `Delete "${chat.title || 'Untitled'}"`;
     drop.addEventListener('click', async () => {
+      // A turn appends to the file as it goes; deleting it underneath one is a
+      // half-written conversation, and a chat the reply is still being written
+      // into is not one anybody means to throw away mid-sentence.
+      if (state.streaming) return status('A turn is running — stop it before deleting a conversation.');
       await api.chats.remove(chat.id);
       // Deleting the conversation on screen has to clear the transcript with
       // it; deleting any other must leave the view exactly where it was. The
@@ -877,7 +903,11 @@ async function send() {
   state.turnStarted = false;
 
   try {
-    state.chatId = await api.agent.send(state.chatId, prompt);
+    // The id comes back on `turn:start`, not from here: the main process is
+    // what decides which conversation the turn is in, and taking it from the
+    // resolved promise means taking it minutes later — after a reply, and after
+    // anything else has had a chance to move the view.
+    await api.agent.send(state.chatId, prompt);
     await refreshChats();
   } catch (err) {
     status(err.message);
@@ -926,6 +956,9 @@ function handleEvent(payload) {
       // From here on the user's message is persisted, so a later failure must
       // not put it back in the composer.
       state.turnStarted = true;
+      // The first message of a session is what creates the chat, so this is
+      // where a new conversation gets its id.
+      if (payload.chatId) state.chatId = payload.chatId;
       break;
 
     case 'reply:start':
@@ -1189,6 +1222,7 @@ function wire() {
 
   $('btn-delete-chat').addEventListener('click', async () => {
     if (!state.chatId) return;
+    if (state.streaming) return status('A turn is running — stop it before deleting a conversation.');
     await api.chats.remove(state.chatId);
     // Straight to a blank conversation: leaving the picker on a chat that no
     // longer exists would show a transcript with nothing behind it.

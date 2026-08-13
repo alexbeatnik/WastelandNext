@@ -44,6 +44,15 @@ machine with Git installed usually resolves `tar` to Git's GNU tar first. `extra
 System32 path explicitly, then falls back to PATH, then PowerShell `Expand-Archive`. This failed exactly once, in
 development, for exactly this reason.
 
+**Every extractor takes the entry names on trust.** bsdtar, GNU tar, `unzip` and `Expand-Archive` all write wherever
+the archive tells them to, including `..\..\Windows\System32`, and the archive here arrives over the network — after
+which we go looking inside it for a binary to spawn. `assertSafeArchive` in `llm/zip.mjs` reads the central directory
+(two short reads at the end of the file; entry names live there, so nothing is unpacked and nothing is held in memory)
+and refuses an absolute path, a drive letter or any `..` segment. Backslash counts as a separator even though the format
+says otherwise: Windows extractors honour both. An archive whose directory cannot be parsed is refused too — a truncated
+download and an HTML error page saved as a `.zip` both land there, and "could not check" is not a reason to unpack it
+anyway.
+
 **`toolsDir()` creates `tools/`, not its subdirectories.** The first llama-server download failed on opening the write
 stream because `tools/llama/` did not exist yet.
 
@@ -203,6 +212,16 @@ some layers run on the CPU — a model that forgets what it was asked is not wor
 **`compact()` refuses while a turn is running.** It rewrites the whole message list, and a turn appending to the same
 file at that moment loses messages.
 
+**The conversation cannot be switched or deleted while a turn is running.** NEW CHAT, a row in the picker and both
+delete buttons all refuse with a line in the status bar. The turn belongs to a chat the main process picked; switching
+underneath it draws the reply into a conversation it does not belong to, and the finishing `send()` then sets the id
+back to the one the user just left. The id itself comes from `turn:start`, not from the resolved `agent.send()` promise
+— the same fact, but announced when it becomes true rather than minutes later.
+
+**`loadChat` carries a sequence number.** `chats.read` is a round trip and two picks can be in flight at once; the
+older one finishing second draws the previous transcript over the conversation the picker says is open. Every await
+checks it is still the current load and drops out if it is not.
+
 **The conversation picker is not a `<select>`, and cannot become one again.** Every row carries its own delete, which a
 native option cannot hold. Deleting from the list must not open the conversation first: the only way to delete one used
 to be to switch to it, which loads a transcript and recomputes the meter for something about to be thrown away.
@@ -225,6 +244,14 @@ other half has to hold the conversation it is for.
 named the path: a model naming one is a request to be vetted, a person picking one through a file dialog or dropping it
 on the window has already decided. A project checked out on another drive is ordinary. `SECRET_DIRS` applies to both —
 "I dragged the wrong folder in" is a mistake worth catching whoever made it.
+
+**A path is vetted by where it lands, not by what it is called.** Both guards read text, and `stat`/`readFile` follow
+links — so a file called `notes.txt` sitting in home and pointing at `~/.ssh/id_rsa` satisfied every rule about the name
+and then handed over the key. `readfile.mjs` resolves through `realpath` and re-vets, and `attach.mjs` does the same for
+the path handed in (the walk already refuses to follow links inside a tree). Home is resolved too: on macOS it is itself
+a link, and comparing an unresolved home against a resolved path refuses every read there. A link that lands somewhere
+allowed still works — a project symlinked into home is ordinary, and refusing it would break a working setup to fix
+nothing.
 
 **The listing is the part of an attachment that is never dropped.** It is the cheapest thing in there and the most
 useful: "what shape is this project" is answerable from names alone, and a model shown the tree can ask for a file it
@@ -286,6 +313,12 @@ a live check "fail" with nothing wrong in the code under test. Close one before 
 **A chat id becomes a filename, so it is validated first.** `isSafeId` in `chats.mjs` admits only `[A-Za-z0-9_-]`.
 Ids arrive from IPC and are interpolated into a path; without the check a `../` in one would reach outside `chats/`.
 
+**A multi-part shard is never downloaded as if it were a model.** `pickGgufFile` returns null for a repo that offers
+nothing but `…-00001-of-00003.gguf`, and `resolveTarget` says so in a sentence naming the alternative. One shard
+downloads cleanly, is a real GGUF of a plausible size with a readable header, and is accepted into the vault — and then
+fails inside llama-server minutes later, long after the progress bar the user watched said it had arrived. The refusal
+is the only place they can still be told something useful.
+
 **A `.part` file surviving a failed download is the feature, not litter.** It is what `Range`-based resuming reads the
 offset from. `resumed` requires a 206 *and* bytes already on disk — a server volunteering 206 with nothing to resume
 would otherwise open the writer in append mode. A server that ignores the range answers 200, and then starting over is
@@ -322,6 +355,50 @@ its output are kept and `summariseFailure` turns them into a sentence, naming th
 (VRAM exhaustion, a port clash, an unknown flag). Classification runs on the **raw** lines: llama.cpp's severity marker
 is a bare `E` field, and an earlier version stripped it for readability *before* looking for it, so every unrecognised
 failure reported the cleanup message that follows the real error.
+
+**On Windows a crash is not an exit code, and an empty log is itself evidence.** `llama-server exited (3221225477)
+without saying why` is 0xC0000005: Windows kills a faulting process and the NTSTATUS lands where an exit code would go.
+The reported case was a current llama.cpp build (Clang 20) against a three-year-old Visual C++ redistributable
+(14.31.31103) — MSVCP140.dll *loads*, so there is no missing-DLL error to go on, and then it faults before `main` runs.
+Nothing was printed, so `summariseFailure` had nothing to quote and fell through to the number, which is the very
+failure this module exists to prevent. `explainCrash` names the statuses that have a remedy (an out-of-date runtime, a
+missing DLL, two builds mixed in `tools/llama`, the wrong architecture, a build wanting CPU instructions this processor
+does not have) and the summary is consulted **after** the log: a process that said what was wrong is always worth
+quoting, and reading a benign last line — `load_backend: loaded RPC backend` — as the reason for a crash points at the
+one thing that worked. Nothing below 0xC0000000 is one of these and no ordinary exit code reaches that high, so no
+platform check is needed to tell them apart.
+
+**`probeServerBinary` runs `--version` before a model load.** A binary that cannot start has nothing to do with the
+model, and finding that out after a header read, a spawn and a 180-second wait — with the status bar reading
+`LOADING <model>` throughout — sends the user to the wrong question entirely. Only a *crash* status is fatal to it: a
+build that merely dislikes `--version` exits non-zero with something to say, and grounding a working server over that
+would be worse than the bug it prevents. It is asynchronous on purpose. `spawnSync` would freeze the window for the
+whole timeout on a binary that never answers — an ordinary GUI program picked in SETTINGS does exactly that — and
+blocking the UI is the one thing running inference out of process is meant to prevent.
+
+**One load at a time, and the guard is a field rather than a reading of `#state`.** `starting` is only set several
+awaits into `load()` — after the header read, the binary probe and the port check — so two clicks in that window both
+saw `idle`, both probed, and both went on to spawn a server. The second loses the port to the first and reports that
+failure over the top of a load that was working. `load()` is a thin synchronous wrapper that stores the in-flight
+promise before anything can yield; asking twice for the *same* model returns that same promise, because a double click
+is not a mistake.
+
+**Nothing in the main process may use `spawnSync` on a binary a user chose.** `#ensureBinary` probed PATH that way and
+would freeze the window for as long as the process took to answer — and the wrong `llama-server` on PATH (a GUI
+program, a wrapper waiting on input) never answers at all. `probeServerBinary` asks the same question with a deadline.
+`llamaServerStatus` still uses `spawnSync` for `where`/`which`, which is a shell builtin's worth of work on a fixed
+argument.
+
+**`close`, not `exit`, is when a child's output is complete.** `exit` fires when the process is gone, which can be
+before its pipes have drained, so concluding there can read an empty tail for a server that explained itself on the way
+out — and print "without saying why" over the top of the answer. The relay also flushes the partial line still in its
+buffer on `end`: a failed `GGML_ASSERT` prints and aborts on the spot, without a trailing newline, so the one line
+worth keeping was exactly the one being dropped.
+
+That lateness is also why the handler asks whether the process it is reporting on is still `#proc`, rather than
+trusting `#stopping`. `unload()` waits for `exit` and clears the flag the moment it arrives, so `close` can land after
+the flag is down — and a model the user deliberately unloaded would be written up as a crash, the status bar showing a
+failure for something that did exactly what was asked.
 
 **A model's reply can arrive in `reasoning_content`, not `content`.** llama.cpp parses each family's thinking syntax —
 `<think>` tags, harmony channel markers — into that field by default. A client reading only `content` shows an empty

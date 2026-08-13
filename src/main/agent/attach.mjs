@@ -14,7 +14,7 @@
  * because the window belongs to whichever model is loaded at the time — and on
  * a small one the structure alone is worth more than three files read in full.
  */
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { estimateTokens } from '../llm/client.mjs';
@@ -118,23 +118,36 @@ export async function collect(input) {
   const vetted = vetAttachmentPath(input);
   if (!vetted.ok) return { ok: false, reason: vetted.reason };
 
+  // The walk below refuses to follow links; the path handed in is followed by
+  // `stat` and `readFile` whether we like it or not, so it is vetted by where
+  // it lands rather than by what it is called. A file named `notes.txt` that
+  // points at `~/.ssh/id_rsa` otherwise clears the name check and then pastes
+  // the key into the prompt.
+  let landed;
+  try {
+    landed = vetAttachmentPath(await realpath(vetted.path));
+  } catch {
+    return { ok: false, reason: 'no such file or folder' };
+  }
+  if (!landed.ok) return { ok: false, reason: `${landed.reason} — that path is a link` };
+
   let info;
   try {
-    info = await stat(vetted.path);
+    info = await stat(landed.path);
   } catch {
     return { ok: false, reason: 'no such file or folder' };
   }
 
   if (info.isFile()) {
-    const entry = await readEntry(vetted.path, basename(vetted.path), info.size);
+    const entry = await readEntry(landed.path, basename(landed.path), info.size);
     if (entry.skipped) return { ok: false, reason: entry.skipped };
     return {
       ok: true,
       kind: 'file',
-      path: vetted.path,
-      name: basename(vetted.path),
+      path: landed.path,
+      name: basename(landed.path),
       bytes: info.size,
-      files: [{ rel: basename(vetted.path), size: info.size, depth: 0, ...entry }],
+      files: [{ rel: basename(landed.path), size: info.size, depth: 0, ...entry }],
       truncatedWalk: false,
     };
   }
@@ -177,7 +190,7 @@ export async function collect(input) {
       } catch {
         continue;
       }
-      const rel = relative(vetted.path, full);
+      const rel = relative(landed.path, full);
       const record = { rel, size, depth };
       if (bytes < MAX_TOTAL_BYTES) {
         Object.assign(record, await readEntry(full, entry.name, size));
@@ -189,13 +202,13 @@ export async function collect(input) {
     }
   };
 
-  await walk(vetted.path, 0);
+  await walk(landed.path, 0);
 
   return {
     ok: true,
     kind: 'dir',
-    path: vetted.path,
-    name: basename(vetted.path) || vetted.path,
+    path: landed.path,
+    name: basename(landed.path) || landed.path,
     bytes: files.reduce((sum, file) => sum + file.size, 0),
     files,
     truncatedWalk,

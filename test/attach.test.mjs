@@ -8,7 +8,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -54,6 +54,37 @@ test('an ordinary path outside home is allowed', () => {
 test('an empty path is refused before it resolves to the working directory', () => {
   assert.equal(vetAttachmentPath('').ok, false);
   assert.equal(vetAttachmentPath('   ').ok, false);
+});
+
+test('a link pointing into a credential directory is refused by where it lands', async (t) => {
+  // The walk already refuses to follow links; the path handed in is followed by
+  // `stat` and `readFile` regardless, so a file called `notes.txt` that points
+  // at `.ssh/id_rsa` would clear the name check and paste the key.
+  const root = mkdtempSync(join(tmpdir(), 'wl-link-'));
+  mkdirSync(join(root, '.ssh'));
+  writeFileSync(join(root, '.ssh', 'id_rsa'), 'PRIVATE KEY\n');
+  try {
+    symlinkSync(join(root, '.ssh', 'id_rsa'), join(root, 'notes.txt'), 'file');
+  } catch {
+    return t.skip('this platform will not let an unprivileged process make a symlink');
+  }
+
+  const result = await collect(join(root, 'notes.txt'));
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /credentials/);
+});
+
+test('a folder link into a credential directory is refused as well', async () => {
+  // A directory link is the shape Windows allows without privileges, so this is
+  // the version of the check that runs on the platform the app ships to.
+  const root = mkdtempSync(join(tmpdir(), 'wl-link-dir-'));
+  mkdirSync(join(root, '.ssh'));
+  writeFileSync(join(root, '.ssh', 'id_rsa'), 'PRIVATE KEY\n');
+  symlinkSync(join(root, '.ssh'), join(root, 'keys'), 'junction');
+
+  const result = await collect(join(root, 'keys'));
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /credentials/);
 });
 
 /* ============================ collecting ============================ */
