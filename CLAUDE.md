@@ -138,6 +138,14 @@ or `2 * 3 * 4 = 24` comes out italicised.
 working in, and leaving that browser open afterwards, makes every failure look like the app interfering with their
 session.
 
+**"Look it up before saying you do not know" lives inside the lookup section, not in the base rules.** A model that
+answers "I have no access to real-time information" while holding a search action is describing a session it is not in
+— it did exactly that for the date, two messages after using the same action for the weather. The instruction names the
+class (anything that moves with time: the date, weather, prices, scores, versions, who holds an office) rather than
+listing questions, and it is part of `WEB_LOOKUP`, so a session with lookup switched off never sees it. `prompts.test.mjs`
+asserts both halves — present with the capability, absent without it — because encouraging a tool that is not there is
+the same bug as forbidding one that is.
+
 **A disabled capability is absent from the system prompt, not forbidden in it.** A model told about a tool reaches for
 it, and the resulting refusal reads to the user as a bug. `buildSystemPrompt` assembles from parts; `prompts.test.mjs`
 guards this.

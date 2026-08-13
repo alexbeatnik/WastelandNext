@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { kvBytesPerToken, readGgufMetadata, recommendContext } from './gguf.mjs';
 import { contextForFullOffload, detectVram, recommendGpuLayers } from './gpu.mjs';
 import { explainCrash, summariseFailure } from './failure.mjs';
+import { PlacementReader } from './offload.mjs';
 import { portInUse } from './port.mjs';
 import * as config from '../config.mjs';
 import { contextSize } from './client.mjs';
@@ -126,6 +127,8 @@ export class LlamaServer extends EventEmitter {
   #contextSize = 0;
   #autoContext = null;
   #autoGpu = null;
+  /** What llama.cpp said it did, as opposed to what `#autoGpu` asked for. */
+  #placement = null;
   #logTail = [];
   /** The in-flight `load()`, and what it is loading. See `load()`. */
   #loading = null;
@@ -144,6 +147,9 @@ export class LlamaServer extends EventEmitter {
       contextSize: this.#contextSize,
       autoContext: this.#autoContext,
       autoGpu: this.#autoGpu,
+      // The plan above is a request. This is the outcome, and where the two
+      // disagree the outcome is what the user is shown.
+      placement: this.#placement,
     };
   }
 
@@ -308,11 +314,17 @@ export class LlamaServer extends EventEmitter {
     });
 
     this.#logTail = [];
+    // Read as the lines arrive, not from the tail afterwards: the tail holds 60
+    // lines, a model load prints several times that, and the ones that say
+    // where the weights went are near the start.
+    const placement = new PlacementReader();
     const relay = (stream) => {
       let buffer = '';
       const take = (line) => {
         if (!line.trim()) return;
         this.emit('log', line.trim());
+        placement.feed(line);
+        this.#placement = placement.placement;
         this.#logTail.push(line.trim());
         if (this.#logTail.length > LOG_TAIL) this.#logTail.shift();
       };
@@ -496,6 +508,7 @@ export class LlamaServer extends EventEmitter {
     this.#contextSize = 0;
     this.#autoContext = null;
     this.#autoGpu = null;
+    this.#placement = null;
     if (!proc) {
       this.#setState('idle');
       return;

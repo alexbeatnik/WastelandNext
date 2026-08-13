@@ -93,6 +93,32 @@ test('the action fence is shown, and nothing forbids it', () => {
   assert.doesNotMatch(prompt, /no (markdown|code fences|fenced)/i);
 });
 
+test('lookup is reached for before a refusal, not after one', () => {
+  // The reported session: "what is today's date" answered with "I have no
+  // access to real-time information", and then, when pushed, a negotiation
+  // about which site to open — with the lookup action sitting right there and
+  // the same model having used it for the weather two messages earlier.
+  const prompt = buildSystemPrompt({ capabilities: { webLookup: true } });
+  assert.match(prompt, /BEFORE saying you do not know/i);
+  assert.match(prompt, /today's date/i);
+  assert.match(prompt, /no access to real-time information/i);
+  assert.match(prompt, /search first/i);
+});
+
+test('the answer must come from the result, not from memory dressed as one', () => {
+  const prompt = buildSystemPrompt({ capabilities: { webLookup: true } });
+  assert.match(prompt, /do not fill the gap from\s+memory/i);
+});
+
+test('none of that survives with lookup switched off', () => {
+  // The whole point of assembling the prompt from parts: told to look things up
+  // with no lookup to hand, the model reaches for it and the refusal reads as a
+  // bug — which is the same failure this section was written to end.
+  const prompt = buildSystemPrompt({ capabilities: { browser: true, readFile: true, shell: true } });
+  assert.doesNotMatch(prompt, /BEFORE saying you do not know/i);
+  assert.doesNotMatch(prompt, /no access to real-time information/i);
+});
+
 test('the browser section says a resolved step is not a reached goal', () => {
   // A model told "all steps succeeded" stops checking and repeats itself; this
   // is what let one loop five times on a sort that never applied.

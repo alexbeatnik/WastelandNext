@@ -580,28 +580,55 @@ function paintLlm(llm) {
   label.className = `stat ${llm.state === 'ready' ? 'ok' : llm.state === 'error' ? 'warn' : ''}`;
 }
 
-/** Where the loaded model is actually running — the question a size cannot answer. */
+/**
+ * Where the loaded model is actually running — the question a size cannot answer.
+ *
+ * Read from what llama.cpp printed, never from the plan that was sent to it.
+ * The two differ exactly where it matters: with no NVIDIA card to measure, the
+ * planner asks for full offload — right for an AMD or Intel card under Vulkan,
+ * which `nvidia-smi` cannot see — and a machine with no GPU at all took the
+ * same branch, so the badge read `RUN: GPU` for a model running wholly on the
+ * processor. `RUN: ?` is the honest reading when llama.cpp said nothing we
+ * recognise; a request is not an outcome, and the badge is about the outcome.
+ */
 function paintCompute(llm) {
   state.llmReady = llm?.state === 'ready';
   const label = $('stat-compute');
-  const auto = llm?.autoGpu;
 
-  if (llm?.state !== 'ready' || !auto) {
+  if (llm?.state !== 'ready') {
     label.hidden = true;
     return;
   }
 
-  const text =
-    auto.layers === 0
+  const real = llm.placement;
+  const auto = llm.autoGpu;
+  const asked = !auto
+    ? ''
+    : auto.layers === 999
+      ? 'asked for every layer on the GPU'
+      : `asked for ${auto.layers} layer(s) on the GPU`;
+
+  const text = !real
+    ? 'RUN: ?'
+    : real.where === 'cpu'
       ? 'RUN: CPU'
-      : auto.layers === 999
+      : real.where === 'gpu'
         ? 'RUN: GPU'
-        : `RUN: GPU ${auto.layers} LAYERS + CPU`;
+        : real.blocks
+          ? `RUN: GPU ${real.layers}/${real.blocks} LAYERS + CPU`
+          : 'RUN: GPU + CPU';
+
+  // The evidence goes in the tooltip rather than the badge: if the reading is
+  // ever wrong, the line it was read from is what makes that visible instead of
+  // it being another confident number.
+  const title = real
+    ? [real.evidence, real.devices.length ? real.devices.join(', ') : '', asked].filter(Boolean).join(' · ')
+    : ['llama-server did not say where the weights went', asked].filter(Boolean).join(' · ');
 
   label.hidden = false;
   label.textContent = text;
-  label.title = auto.reason + (auto.vramBytes ? ` · ${(auto.vramBytes / 1024 ** 3).toFixed(1)} GB VRAM` : '');
-  label.className = `stat ${auto.layers === 0 ? 'warn' : 'ok'}`;
+  label.title = title;
+  label.className = `stat ${!real ? '' : real.where === 'cpu' ? 'warn' : 'ok'}`.trim();
 }
 
 function paintBrowser(browser) {
