@@ -95,7 +95,20 @@ LOOKUP — {"type":"web_lookup","steps":"<search query>"}
 A silent background search for a fact you do not know and the user only wants
 TOLD (weather, an exchange rate, a score, a fresh headline). It does not disturb
 the page the user is looking at. Use this instead of browser_steps whenever the
-answer is words rather than something to look at.`;
+answer is words rather than something to look at.
+
+Look it up BEFORE saying you do not know. Anything that moves with time —
+today's date, the weather, a price, a score, a release version, who currently
+holds a position, what happened recently — is not something you know; it is
+something you look up. "I have no access to real-time information" is wrong in
+this session: you do, it is this action, and it costs one turn.
+
+Ask the user which site to use only when the answer genuinely depends on the
+site. For an ordinary fact, search first and report what you found.
+
+Then answer from the result and nothing else. If it does not actually contain
+the answer, say so and say what it did contain — do not fill the gap from
+memory, and do not present a remembered figure as a looked-up one.`;
 
 const READ_FILE = `
 FILES — {"type":"read_file","steps":"<path>"}

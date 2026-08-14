@@ -6,7 +6,7 @@
  * reading key material back into a chat log; it is a guardrail on a convenience
  * feature, not a security boundary.
  */
-import { readFile as fsReadFile, stat } from 'node:fs/promises';
+import { readFile as fsReadFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 
@@ -49,6 +49,28 @@ export function resolveReadablePath(input, home = homedir()) {
 }
 
 /**
+ * Follow symlinks and vet where the path ends up.
+ *
+ * Returns `{ok: true, path}` with the resolved path, or `{ok: false, reason}`.
+ * A path that resolves to itself is passed straight back, so the ordinary case
+ * costs one `realpath` and nothing else.
+ */
+export async function resolveThroughLinks(path, home = homedir()) {
+  let real;
+  try {
+    real = await realpath(path);
+  } catch {
+    return { ok: false, reason: 'no such file' };
+  }
+  if (real === path) return { ok: true, path };
+
+  const realHome = await realpath(home).catch(() => home);
+  const again = resolveReadablePath(real, realHome);
+  if (!again.ok) return { ok: false, reason: `${again.reason} — that path is a link` };
+  return { ok: true, path: real };
+}
+
+/**
  * Read a vetted file as text.
  *
  * Oversized files are truncated with a marker rather than refused: the head of
@@ -58,21 +80,30 @@ export async function readForModel(input, home = homedir()) {
   const vetted = resolveReadablePath(input, home);
   if (!vetted.ok) return { ok: false, reason: vetted.reason };
 
+  // The check above reads text; `stat` and `readFile` follow links. A link
+  // sitting in home and pointing at `~/.ssh/id_rsa` passes every rule above by
+  // its *name* and then hands over the key, so what is vetted is where the path
+  // actually lands. Home itself is a link on some systems (macOS resolves
+  // `/Users/x` to `/System/Volumes/…`), so the real path is measured against a
+  // resolved home or every read would be refused as "outside".
+  const landed = await resolveThroughLinks(vetted.path, home);
+  if (!landed.ok) return { ok: false, reason: landed.reason };
+
   let info;
   try {
-    info = await stat(vetted.path);
+    info = await stat(landed.path);
   } catch {
     return { ok: false, reason: 'no such file' };
   }
   if (info.isDirectory()) return { ok: false, reason: 'that is a directory' };
 
   try {
-    const buffer = await fsReadFile(vetted.path);
+    const buffer = await fsReadFile(landed.path);
     const truncated = buffer.length > MAX_READ_BYTES;
     const text = buffer.subarray(0, MAX_READ_BYTES).toString('utf8');
     return {
       ok: true,
-      path: vetted.path,
+      path: landed.path,
       size: info.size,
       truncated,
       content: truncated ? `${text}\n… (truncated at ${MAX_READ_BYTES} bytes of ${info.size})` : text,

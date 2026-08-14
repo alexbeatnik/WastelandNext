@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { summariseFailure } from '../src/main/llm/failure.mjs';
+import { explainCrash, summariseFailure } from '../src/main/llm/failure.mjs';
 
 /** Verbatim tail of a 25 GB model loaded onto a 12 GB card. */
 const VRAM_OOM = [
@@ -87,4 +87,78 @@ test('an uneventful log falls back to its last line', () => {
 test('a very long line is truncated rather than flooding the status bar', () => {
   const summary = summariseFailure([`E ${'x'.repeat(500)}`]);
   assert.ok(summary.length <= 200, `too long: ${summary.length}`);
+});
+
+/**
+ * Windows crash statuses.
+ *
+ * The number below is verbatim from the report this was written for: a current
+ * llama.cpp build against a machine whose Visual C++ redistributable was three
+ * years old. It faulted inside MSVCP140.dll before `main` ran, so the log was
+ * genuinely empty and the exit code was the only evidence there was — and the
+ * app printed it as a number.
+ */
+const ACCESS_VIOLATION = 3221225477; // 0xC0000005
+
+test('a crash before the first line of output is explained, not numbered', () => {
+  const summary = summariseFailure([], { code: ACCESS_VIOLATION });
+  assert.doesNotMatch(summary, /3221225477/);
+  assert.doesNotMatch(summary, /without saying why/);
+  assert.match(summary, /Visual C\+\+/);
+});
+
+test('the signed reading of the same 32 bits is the same crash', () => {
+  assert.equal(summariseFailure([], { code: -1073741819 }), summariseFailure([], { code: ACCESS_VIOLATION }));
+});
+
+test('a crash that did explain itself is explained by the log, not the code', () => {
+  const summary = summariseFailure(
+    ['0.00.100.000 I srv starting', '0.02.000.000 E srv something nobody has seen before went wrong'],
+    { code: ACCESS_VIOLATION },
+  );
+  assert.match(summary, /something nobody has seen before went wrong/);
+});
+
+test('a crash after a harmless line is not blamed on that line', () => {
+  // What this build actually printed before dying: the backend it had just
+  // loaded. Quoting it as the reason points at the one thing that worked.
+  const summary = summariseFailure(['load_backend: loaded RPC backend from ggml-rpc.dll'], {
+    code: ACCESS_VIOLATION,
+  });
+  assert.doesNotMatch(summary, /RPC/);
+  assert.match(summary, /crashed/);
+});
+
+test('a build needing instructions this CPU lacks says which way to go', () => {
+  const summary = summariseFailure([], { code: 0xc000001d });
+  assert.match(summary, /CPU instructions/);
+});
+
+test('an unrecognised crash is still reported as a crash, in hex', () => {
+  const summary = summariseFailure([], { code: 0xc0000123 });
+  assert.match(summary, /0xC0000123/);
+  assert.match(summary, /crashed/);
+});
+
+test('an ordinary exit code is never mistaken for a crash status', () => {
+  assert.equal(explainCrash(1), null);
+  assert.equal(explainCrash(134), null);
+  assert.equal(explainCrash(0), null);
+  assert.equal(explainCrash(null), null);
+  // Still the plain fallback, exactly as before.
+  assert.match(summariseFailure([], { code: 1 }), /exited \(1\)/);
+});
+
+test('a clean exit that never served is a wrong binary, not a mystery', () => {
+  // Pointing SETTINGS at an executable that is not llama-server: it runs, it
+  // succeeds, and no server ever appears.
+  const summary = summariseFailure([], { code: 0 });
+  assert.match(summary, /right binary/);
+  assert.doesNotMatch(summary, /without saying why/);
+});
+
+test('the remedy too long for a status bar is offered apart from it', () => {
+  const crash = explainCrash(ACCESS_VIOLATION, { silent: true });
+  assert.match(crash.hint, /vc_redist/);
+  assert.doesNotMatch(crash.summary, /https/);
 });

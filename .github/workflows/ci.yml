@@ -1,0 +1,88 @@
+name: CI
+
+# Runs the test suite on every pull request.
+#
+# Not on pushes to main: the release workflow already runs `npm test` there,
+# before it packages anything, so a second run would only cost minutes and tell
+# nobody anything new.
+on:
+  pull_request:
+  workflow_dispatch:
+
+# A pull request that gets three pushes in a minute should run three times only
+# if somebody is watching all three. Superseded runs are cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One failing platform should not hide the other's result — the whole
+      # point of running both is to see where they disagree.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `postinstall` stages the browser engine and is deliberately tolerant:
+      # with no manul-browser checkout and no Go it reports and exits 0, which
+      # is what lets this job skip both. The unit tests never touch the engine —
+      # `bundled.test.mjs` exercises the packaged resolution in plain Node.
+      - name: Install dependencies
+        run: npm ci
+
+      # Windows is what the app ships to. Linux is here because several checks
+      # can only really run there: Windows refuses file symlinks to an
+      # unprivileged process, so the guard against a link into `.ssh` skips on
+      # the runner that matters most and would go unproven otherwise.
+      - name: Test
+        run: npm test
+
+  smoke:
+    name: Smoke (windows)
+    runs-on: windows-latest
+    # Not a gate yet, deliberately. It boots a real Electron window and drives
+    # the renderer, which is exactly the thing worth checking before a merge —
+    # and also the thing most likely to need a desktop session a hosted runner
+    # does not reliably provide. Left non-blocking until it has proven itself
+    # stable here; promote it to a required check then, and delete this comment.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The report is written to a file because Electron on Windows has no
+      # attached console: `console.log` from the main process goes nowhere when
+      # stdout is piped, which is why `smoke.mjs` writes SMOKE_REPORT at all.
+      - name: Smoke
+        env:
+          SMOKE_REPORT: smoke-report.txt
+        run: npm run smoke
+
+      - name: Upload the smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report
+          path: smoke-report.txt
+          if-no-files-found: ignore

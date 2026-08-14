@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { looksLikeRepoId, pickGgufFile, removeWhenReleased, resolveTarget, rewriteHuggingFaceUrl } from '../src/main/models/manager.mjs';
+import { isShard, looksLikeRepoId, pickGgufFile, removeWhenReleased, resolveTarget, rewriteHuggingFaceUrl } from '../src/main/models/manager.mjs';
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -58,9 +58,22 @@ test('skips multi-part shards, which one download cannot assemble', () => {
   assert.equal(pickGgufFile(files), 'big-Q8_0.gguf');
 });
 
-test('falls back to a shard only when nothing else exists', () => {
+test('never falls back to a shard, even when the repo holds nothing else', () => {
+  // One shard downloads cleanly, is a real GGUF of a plausible size, and is
+  // accepted into the vault — and then fails inside llama-server minutes later,
+  // long after the progress bar said the model had arrived. Refusing it here is
+  // the only place the user can still be told something useful.
   const files = ['big-Q4_K_M-00001-of-00003.gguf', 'big-Q4_K_M-00002-of-00003.gguf'];
-  assert.equal(pickGgufFile(files), 'big-Q4_K_M-00001-of-00003.gguf');
+  assert.equal(pickGgufFile(files), null);
+});
+
+test('a shard is recognised by its numbering, not by anything around it', () => {
+  assert.equal(isShard('big-Q4_K_M-00001-of-00003.gguf'), true);
+  assert.equal(isShard('big-Q4_K_M.gguf'), false);
+  // A version number is not a shard suffix; neither is a shard-shaped name that
+  // is not at the end.
+  assert.equal(isShard('model-v2-00001-of-00003-extra.gguf'), false);
+  assert.equal(isShard('model-1-of-3.gguf'), false);
 });
 
 test('returns null when a repo holds no GGUF at all', () => {

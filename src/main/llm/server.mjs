@@ -7,7 +7,7 @@
  * endpoint, so the client in `client.mjs` talks to a spawned server and to a
  * remote one through exactly the same code path.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
@@ -15,7 +15,8 @@ import { totalmem } from 'node:os';
 import { join } from 'node:path';
 import { kvBytesPerToken, readGgufMetadata, recommendContext } from './gguf.mjs';
 import { contextForFullOffload, detectVram, recommendGpuLayers } from './gpu.mjs';
-import { summariseFailure } from './failure.mjs';
+import { explainCrash, summariseFailure } from './failure.mjs';
+import { PlacementReader } from './offload.mjs';
 import { portInUse } from './port.mjs';
 import * as config from '../config.mjs';
 import { contextSize } from './client.mjs';
@@ -27,6 +28,8 @@ const READY_TIMEOUT_MS = 180_000;
 const POLL_MS = 400;
 /** Lines of output kept so a crash can be explained after the fact. */
 const LOG_TAIL = 60;
+/** How long the binary gets to answer `--version`. A working one takes ~50 ms. */
+const PROBE_TIMEOUT_MS = 10_000;
 
 const EXE = process.platform === 'win32' ? 'llama-server.exe' : 'llama-server';
 
@@ -40,6 +43,68 @@ export function resolveServerBinary(settings = config.load()) {
   const cached = join(toolsDir(), 'llama', EXE);
   if (existsSync(cached)) return cached;
   return EXE;
+}
+
+/**
+ * Does this binary run at all?
+ *
+ * A build that faults on startup dies before printing a line, so a model load
+ * spends a header read, a spawn and a wait only to arrive at an empty log and a
+ * bare exit code — which is where "llama-server exited (3221225477) without
+ * saying why" came from. `--version` asks the same question in milliseconds,
+ * and asks it before the user has been told a model is loading.
+ *
+ * Only a *crash* is fatal. A build that merely dislikes `--version` exits
+ * non-zero with something to say, and grounding a working server over that
+ * would be a worse bug than the one this prevents.
+ *
+ * Asynchronous, and deliberately not `spawnSync`: this runs in the main
+ * process, and a binary that neither answers nor exits — the wrong exe picked
+ * in SETTINGS is enough, a GUI program never returns — would otherwise freeze
+ * the window for the whole timeout. The point of running inference out of
+ * process is not blocking the UI; checking the binary must not undo that.
+ */
+export function probeServerBinary(bin, { timeoutMs = PROBE_TIMEOUT_MS } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(bin, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      resolve({ ok: false, detail: err.message });
+      return;
+    }
+
+    let printed = '';
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      // Not a crash, and saying so would be a guess. A binary that will not
+      // answer the cheapest question there is has still failed the check.
+      finish({ ok: false, detail: `${bin} did not answer --version within ${Math.round(timeoutMs / 1000)}s` });
+    }, timeoutMs);
+
+    child.stdout?.on('data', (chunk) => {
+      printed += chunk;
+    });
+    child.stderr?.on('data', (chunk) => {
+      printed += chunk;
+    });
+    child.on('error', (err) => {
+      finish({ ok: false, detail: err.code === 'ENOENT' ? `${bin} not found` : err.message });
+    });
+    // `close` rather than `exit`, for the same reason it is used for the server
+    // itself: whether anything was printed is the question being asked.
+    child.on('close', (code) => {
+      const crash = explainCrash(code, { silent: !printed.trim() });
+      finish(crash ? { ok: false, detail: crash.summary, hint: crash.hint } : { ok: true });
+    });
+  });
 }
 
 /**
@@ -62,7 +127,12 @@ export class LlamaServer extends EventEmitter {
   #contextSize = 0;
   #autoContext = null;
   #autoGpu = null;
+  /** What llama.cpp said it did, as opposed to what `#autoGpu` asked for. */
+  #placement = null;
   #logTail = [];
+  /** The in-flight `load()`, and what it is loading. See `load()`. */
+  #loading = null;
+  #loadingModel = '';
 
   get state() {
     return this.#state;
@@ -77,6 +147,9 @@ export class LlamaServer extends EventEmitter {
       contextSize: this.#contextSize,
       autoContext: this.#autoContext,
       autoGpu: this.#autoGpu,
+      // The plan above is a request. This is the outcome, and where the two
+      // disagree the outcome is what the user is shown.
+      placement: this.#placement,
     };
   }
 
@@ -111,17 +184,52 @@ export class LlamaServer extends EventEmitter {
   /**
    * Boot a server for `modelFile` (a name inside the models directory, or an
    * absolute path). Loading a model that is already loaded is a no-op.
+   *
+   * The in-flight load is held in a field so a second call cannot walk past the
+   * guard. Reading `#state` is not enough: `starting` is only set several awaits
+   * in — after the binary probe and the port check — and two clicks in that
+   * window both saw `idle`, both probed, and both spawned a server. The second
+   * one loses the port, and its failure is reported over the top of a load that
+   * was working.
    */
-  async load(modelFile) {
+  load(modelFile) {
+    if (this.#loading) {
+      // Asking twice for the same model is a double click, not a mistake:
+      // joining the load already running is what was wanted either way.
+      if (this.#loadingModel === modelFile) return this.#loading;
+      return Promise.reject(new Error('a model is already loading — please wait'));
+    }
+    const started = this.#load(modelFile).finally(() => {
+      if (this.#loading === started) {
+        this.#loading = null;
+        this.#loadingModel = '';
+      }
+    });
+    this.#loading = started;
+    this.#loadingModel = modelFile;
+    return started;
+  }
+
+  async #load(modelFile) {
     const path = modelFile.includes('/') || modelFile.includes('\\') ? modelFile : join(modelsDir(), modelFile);
     if (!existsSync(path)) throw new Error(`model not found: ${path}`);
-    if ((this.#state === 'ready' || this.#state === 'starting') && this.#model === modelFile) return this.status;
-    if (this.#state === 'starting') throw new Error('a model is already loading — please wait');
+    if (this.#state === 'ready' && this.#model === modelFile) return this.status;
 
     await this.unload();
 
     const settings = config.load();
     const bin = await this.#ensureBinary(settings);
+    // Checked before anything is reported as loading: a binary that cannot
+    // start has nothing to do with the model, and saying so while the status
+    // bar reads "LOADING <model>" sends the user to the wrong question.
+    const probe = await probeServerBinary(bin);
+    if (!probe.ok) {
+      // The hint carries what will not fit in a status bar — a URL, a folder to
+      // delete — so it goes to the log, which has room for it.
+      if (probe.hint) this.emit('log', `${probe.detail} — ${probe.hint}`);
+      this.#setState('error', probe.detail);
+      throw new Error(probe.detail);
+    }
     const host = settings.llamaHost || '127.0.0.1';
     const port = Number(settings.llamaPort) || 8080;
     // Before anything is spawned: a server already on this port would answer
@@ -179,32 +287,62 @@ export class LlamaServer extends EventEmitter {
       // app down with an "uncaught exception" dialog. The state event and the
       // rejected `load()` promise are how this is reported.
     });
-    this.#proc.on('exit', (code, signal) => {
+    // `close`, not `exit`. `exit` fires when the process is gone, which can be
+    // before stdout and stderr have been drained — so concluding there can read
+    // an empty log for a server that said exactly what was wrong on its way
+    // out, and report "without saying why" over the top of the answer. `close`
+    // is the one that waits for the pipes, and it carries the same code.
+    //
+    // That lateness is why this asks whether the process it is reporting on is
+    // still the current one, rather than trusting `#stopping`. `unload()` waits
+    // for `exit` and clears the flag as soon as it arrives; `close` can land
+    // after that, and a deliberate unload would then be written up as a crash —
+    // the status bar reading MODEL: ... instead of NONE for a model the user
+    // just unloaded.
+    const child = this.#proc;
+    child.on('close', (code, signal) => {
+      if (this.#proc !== child) return;
       this.#proc = null;
       if (this.#stopping) return;
-      // A spawn failure emits `error` first and `exit` straight after. The
+      // A spawn failure emits `error` first and `close` straight after. The
       // first carries the real reason ("llama-server.exe not found"); this one
       // would replace it with a generic line derived from an empty log.
       if (this.#state === 'error') return;
       // Otherwise the exit code alone names no cause, and the reason is in the
-      // last lines it printed.
+      // last lines it printed — or, when it printed none, in the code itself.
       this.#setState('error', summariseFailure(this.#logTail, { code, signal }));
     });
 
     this.#logTail = [];
+    // Read as the lines arrive, not from the tail afterwards: the tail holds 60
+    // lines, a model load prints several times that, and the ones that say
+    // where the weights went are near the start.
+    const placement = new PlacementReader();
     const relay = (stream) => {
       let buffer = '';
+      const take = (line) => {
+        if (!line.trim()) return;
+        this.emit('log', line.trim());
+        placement.feed(line);
+        this.#placement = placement.placement;
+        this.#logTail.push(line.trim());
+        if (this.#logTail.length > LOG_TAIL) this.#logTail.shift();
+      };
       stream.setEncoding('utf8');
       stream.on('data', (chunk) => {
         buffer += chunk;
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          this.emit('log', line.trim());
-          this.#logTail.push(line.trim());
-          if (this.#logTail.length > LOG_TAIL) this.#logTail.shift();
-        }
+        for (const line of lines) take(line);
+      });
+      // The last line is the one worth keeping and the one most likely to
+      // arrive without a trailing newline: a failed GGML_ASSERT prints and
+      // aborts on the spot. Held in `buffer` and never flushed, exactly that
+      // line was dropped.
+      stream.on('end', () => {
+        const rest = buffer;
+        buffer = '';
+        take(rest);
       });
     };
     relay(this.#proc.stdout);
@@ -232,8 +370,11 @@ export class LlamaServer extends EventEmitter {
     if (installed) return installed;
 
     // Nothing configured, nothing cached. It may still be on PATH — try that
-    // first, since a download is the expensive answer.
-    if (spawnSync(EXE, ['--version'], { stdio: 'ignore' }).error === undefined) return EXE;
+    // first, since a download is the expensive answer. Asked asynchronously for
+    // the reason `probeServerBinary` explains: `spawnSync` on a binary that
+    // never answers freezes the whole window, and the wrong `llama-server` on
+    // PATH — a GUI program, a wrapper waiting on input — is exactly that.
+    if ((await probeServerBinary(EXE)).ok) return EXE;
 
     this.#setState('starting', 'downloading llama-server');
     this.emit('tool', { stage: 'start', tool: 'llama-server' });
@@ -367,6 +508,7 @@ export class LlamaServer extends EventEmitter {
     this.#contextSize = 0;
     this.#autoContext = null;
     this.#autoGpu = null;
+    this.#placement = null;
     if (!proc) {
       this.#setState('idle');
       return;

@@ -57,14 +57,23 @@ export async function removeWhenReleased(path, attempts = 5) {
   return false;
 }
 
-/** Rank the GGUF files in a repo and return the best one's filename. */
+/** One piece of a model split across several files: `…-00001-of-00003.gguf`. */
+export function isShard(filename) {
+  return /-\d{5}-of-\d{5}\.gguf$/i.test(String(filename));
+}
+
+/**
+ * Rank the GGUF files in a repo and return the best one's filename.
+ *
+ * Shards are not candidates, and a repo offering nothing else returns null
+ * rather than the first piece. Downloading one shard produces a file that
+ * passes every check this app makes — it is a real GGUF, of a plausible size,
+ * with a readable header — and then fails inside llama-server minutes later,
+ * long after the download the user was watching said it had succeeded.
+ */
 export function pickGgufFile(filenames) {
-  const ggufs = filenames.filter((f) => f.toLowerCase().endsWith('.gguf'));
-  if (ggufs.length === 0) return null;
-  // Multi-part shards need every piece; we only ever fetch one file, so the
-  // first shard alone would be a broken model. Skip them.
-  const single = ggufs.filter((f) => !/-\d{5}-of-\d{5}\.gguf$/i.test(f));
-  const candidates = single.length > 0 ? single : ggufs;
+  const candidates = filenames.filter((f) => f.toLowerCase().endsWith('.gguf') && !isShard(f));
+  if (candidates.length === 0) return null;
   for (const quant of QUANT_PREFERENCE) {
     const hit = candidates.find((f) => f.toLowerCase().includes(quant));
     if (hit) return hit;
@@ -98,7 +107,19 @@ export async function resolveTarget(input) {
   const meta = await res.json();
   const files = (meta.siblings ?? []).map((s) => s.rfilename);
   const filename = pickGgufFile(files);
-  if (!filename) throw new Error(`no .gguf files in ${value}`);
+  if (!filename) {
+    // "No .gguf files" would be a lie for a repo full of shards, and would send
+    // the user looking for a different repo when the model is right there —
+    // it simply cannot arrive as one file.
+    const shards = files.filter((f) => isShard(f));
+    if (shards.length > 0) {
+      throw new Error(
+        `${value} ships only as ${shards.length} multi-part shards; this downloads one file at a time. ` +
+          'Pick a repo with a single-file quantisation, or merge the parts yourself and add the result with OPEN FILE.',
+      );
+    }
+    throw new Error(`no .gguf files in ${value}`);
+  }
   return {
     url: `https://huggingface.co/${value}/resolve/main/${encodeURI(filename)}`,
     filename: basename(filename),

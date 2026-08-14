@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { removeWhenReleased } from '../models/manager.mjs';
+import { assertSafeArchive } from './zip.mjs';
 import { existsSync, mkdirSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -206,6 +207,11 @@ export async function downloadLlamaServer({ onProgress, onStatus, signal } = {})
 
   try {
     await pipeline(source, createWriteStream(zipPath), { signal });
+    // Every extractor here trusts the names in the archive, so they are read
+    // and checked first: a substituted release could otherwise drop a file
+    // anywhere this process can write, and the binary we then go looking for is
+    // one we spawn.
+    await assertSafeArchive(zipPath);
     onStatus?.('Unpacking…');
     extractZip(zipPath, dir);
   } finally {
