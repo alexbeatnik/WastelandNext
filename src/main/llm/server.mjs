@@ -13,7 +13,7 @@ import { stat } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { totalmem } from 'node:os';
 import { join } from 'node:path';
-import { kvBytesPerToken, readGgufMetadata, recommendContext } from './gguf.mjs';
+import { kvBudget, readGgufMetadata, recommendContext } from './gguf.mjs';
 import { contextForFullOffload, detectVram, recommendGpuLayers } from './gpu.mjs';
 import { explainCrash, summariseFailure } from './failure.mjs';
 import { PlacementReader } from './offload.mjs';
@@ -507,6 +507,7 @@ export class LlamaServer extends EventEmitter {
 
     if (settings.autoGpuLayers) {
       const vramBytes = detectVram();
+      const kvCost = kvBudget(meta) ?? { perToken: 0, fixedBytes: 0 };
 
       // With both AUTOs on, the context is traded down to whatever keeps every
       // layer on the card. A layer left on the CPU is paid on every token, so
@@ -514,10 +515,10 @@ export class LlamaServer extends EventEmitter {
       // context with a third of the model on the processor. Only ever a
       // reduction: `maxContext` is the ceiling already decided above.
       if (settings.autoContext && vramBytes) {
-        const kv = kvBytesPerToken(meta) ?? 0;
         const fitted = contextForFullOffload({
           fileSize,
-          kvBytesPerToken: kv,
+          kvBytesPerToken: kvCost.perToken,
+          kvFixedBytes: kvCost.fixedBytes,
           vramBytes,
           maxContext: plan.context,
         });
@@ -525,7 +526,7 @@ export class LlamaServer extends EventEmitter {
           this.emit(
             'log',
             `context ${plan.context} → ${fitted} so the whole model stays on the GPU ` +
-              `(KV ${(kv / 1024).toFixed(1)} KB/token)`,
+              `(KV ${(kvCost.perToken / 1024).toFixed(1)} KB/token)`,
           );
           plan.context = fitted;
           this.#autoContext = {
@@ -540,7 +541,8 @@ export class LlamaServer extends EventEmitter {
         meta,
         fileSize,
         contextTokens: plan.context,
-        kvBytesPerToken: kvBytesPerToken(meta) ?? 0,
+        kvBytesPerToken: kvCost.perToken,
+        kvFixedBytes: kvCost.fixedBytes,
         vramBytes: vramBytes ?? 0,
       });
       this.#autoGpu = { ...choice, vramBytes };

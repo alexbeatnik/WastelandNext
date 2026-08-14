@@ -12,7 +12,8 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { PlacementReader, describePlacement, readOffload, readWeightsDevice } from '../src/main/llm/offload.mjs';
+import { PlacementReader, readOffload, readWeightsDevice } from '../src/main/llm/offload.mjs';
+import { describePlacement } from '../src/shared/render.mjs';
 
 /** Feed a block of output through a reader, the way the relay does. */
 function read(lines) {
@@ -96,13 +97,46 @@ test('a current build says the same thing behind a timestamp and a severity fiel
 0.01.369.129 I load_tensors:   CPU_Mapped model buffer size =  3536.00 MiB
 0.01.369.130 I load_tensors:      Vulkan0 model buffer size =  4241.18 MiB
 `);
-  // 3.5 GB left on the processor and still 43/43 on the GPU: Gemma keeps its
-  // per-layer input embeddings off the card. This is the strongest case there
-  // is for the summary line winning over a count of devices — counting here
-  // would report a partial offload for a model with every layer resident.
-  assert.equal(placement.where, 'gpu');
   assert.deepEqual([placement.layers, placement.blocks], [43, 43]);
   assert.deepEqual(placement.devices, ['CPU_Mapped', 'Vulkan0']);
+});
+
+/*
+ * Verbatim from the machine that reported "it says it is loading onto the GPU
+ * and it is actually running on RAM and the CPU" — build 10428, an RTX 3060
+ * under Vulkan, the same gemma-4-E4B. Both readings are in here and they
+ * disagree: every layer is on the card, and 47% of the weights are not.
+ */
+test('every layer on the card is not a full offload when half the bytes are in RAM', () => {
+  const placement = read(`
+0.02.606.286 I llama_prepare_model_devices: using device Vulkan0 (NVIDIA GeForce RTX 3060) (0000:01:00.0) - 11324 MiB free
+0.03.311.436 I load_tensors: offloading output layer to GPU
+0.03.311.441 I load_tensors: offloading 41 repeating layers to GPU
+0.03.311.442 I load_tensors: offloaded 43/43 layers to GPU
+0.03.311.452 I load_tensors:   CPU_Mapped model buffer size =  3381.00 MiB
+0.03.311.454 I load_tensors:      Vulkan0 model buffer size =  3876.08 MiB
+`);
+  // Gemma keeps its per-layer input embeddings on the processor whatever `-ngl`
+  // says, and they are not a rounding error. Reporting `RUN: GPU` here is the
+  // wrong answer that looks like a right one — the user reads the badge, then
+  // waits on tokens computed from RAM.
+  assert.equal(placement.where, 'partial');
+  assert.equal(Math.round(placement.gpuShare * 100), 53);
+  // Not `43/43 LAYERS + CPU`: the layer count is true and says nothing, because
+  // layers are not what was split here.
+  assert.equal(describePlacement(placement), 'RUN: GPU 53% WEIGHTS + CPU');
+});
+
+test('a token-embedding table left behind is still a full offload', () => {
+  // The other side of the same line. Every model that keeps its embeddings on
+  // the processor would read as partial if the threshold were zero, and calling
+  // a 96%-resident model partial is its own wrong answer.
+  const placement = read(`
+load_tensors: offloaded 29/29 layers to GPU
+load_tensors:        CUDA0 model buffer size =  7168.00 MiB
+load_tensors:   CPU_Mapped model buffer size =   308.23 MiB
+`);
+  assert.equal(placement.where, 'gpu');
   assert.equal(describePlacement(placement), 'RUN: GPU');
 });
 
