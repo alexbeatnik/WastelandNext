@@ -408,6 +408,27 @@ trusting `#stopping`. `unload()` waits for `exit` and clears the flag the moment
 the flag is down — and a model the user deliberately unloaded would be written up as a crash, the status bar showing a
 failure for something that did exactly what was asked.
 
+**Where the weights went is printed only at llama.cpp's `trace` threshold.** Build 10405 loads a model in seventeen
+lines and not one of them names a device, so the badge read `RUN: ?` on a machine running every layer on the GPU — the
+reading was honest and the evidence had simply stopped arriving, the offload summary and the per-device buffer lines
+having moved above the default verbosity of 3. `server.mjs` spawns with `-lv 4`. It is the only source: `/props`,
+`/v1/models` and `/slots` were all checked and none of them mentions a device, and `--log-file` duplicates the console
+stream rather than diverting it. Those lines also carry a timestamp and a severity field now (`0.01.369.125 I
+load_tensors: …`), which is why `BUFFER_RE` in `offload.mjs` no longer anchors at the start of the line — the literal
+`load_tensors:` marker is what keeps the KV cache and the compute buffers out of an answer about the weights, and it
+must stay.
+
+**Trace is 246 lines for a load and 38 more on every turn, and the activity log is not a trace viewer.** `logFilter`
+splits the two audiences: the placement reader and the 60-line failure tail see every line, the log sees warnings,
+errors, and anything from a build that prints no severity field at all. It filters on llama.cpp's own severity marker
+rather than on a list of which components are dull, because that list is precisely what goes stale — this filter exists
+because the lines it reads moved once already. An unprefixed line is a wrapped continuation and shares its heading's
+fate; llama.cpp wraps both indented (the sampler parameters) and at column 0 (the chat template it echoes back, in the
+model's own turn syntax), and eleven lines of Gemma's turn markers with nothing above them to explain them is worse than
+none. The exception is a line reading as a complaint: a failed `GGML_ASSERT` prints bare, and taking it for a
+continuation would hide the one line worth having. The lifecycle lines this hides — `loading model`, `model loaded`,
+`listening on` — are already in the status bar, in the user's own words, off the `state` event.
+
 **A model's reply can arrive in `reasoning_content`, not `content`.** llama.cpp parses each family's thinking syntax —
 `<think>` tags, harmony channel markers — into that field by default. A client reading only `content` shows an empty
 reply for a model that thinks first, which is what a 30B did here. `streamChat` reads both and folds the thinking into a

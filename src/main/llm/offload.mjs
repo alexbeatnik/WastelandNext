@@ -14,6 +14,12 @@
  * 60 lines, a model load prints many more, and the interesting ones are near
  * the start.
  *
+ * It only prints them when asked: current builds put both behind the `trace`
+ * threshold, which is why `server.mjs` spawns with `-lv 4`. Nothing here can
+ * make up for that flag being absent — there is no other source. `/props`,
+ * `/v1/models` and `/slots` were all checked, and none of them mentions a
+ * device.
+ *
  * Nothing here guesses. When llama.cpp says nothing we recognise, the placement
  * stays null and the UI says it does not know — which is a true statement, and
  * the previous behaviour was not.
@@ -29,14 +35,21 @@
 const OFFLOAD_RE = /offloaded\s+(\d+)\s*\/\s*(\d+)\s+layers?\s+to\s+GPU/i;
 
 /**
- * `load_tensors:        CUDA0 model buffer size =  4095.05 MiB`
+ * `load_tensors:        CUDA0 model buffer size =  4095.05 MiB`, and in a
+ * current build the same line behind a timestamp and a severity field:
+ * `0.01.369.130 I load_tensors:      Vulkan0 model buffer size =  4241.18 MiB`.
  *
  * The word `model` appeared partway through llama.cpp's history and the older
- * form is still met in the wild, so it is optional here. Only `load_tensors`
- * lines are read: the KV cache and the compute buffers print in the same shape,
- * and they say where the *cache* went, which is a different question.
+ * form is still met in the wild, so it is optional here.
+ *
+ * What must not be relaxed is `load_tensors:` itself. The KV cache and the
+ * compute buffers print in the same shape — `llama_kv_cache: CPU KV buffer
+ * size`, `sched_reserve: Vulkan0 compute buffer size` — and they say where the
+ * *cache* went, which is a different question with a different answer. Anchoring
+ * at the start of the line used to do that job and no longer can, so the marker
+ * carries it instead.
  */
-const BUFFER_RE = /^(?:llm_)?load_tensors:\s+(\S+)\s+(?:model\s+)?buffer size\s*=/i;
+const BUFFER_RE = /(?:^|\s)(?:llm_)?load_tensors:\s+(\S+)\s+(?:model\s+)?buffer size\s*=/i;
 
 /** Buffer owners that are the processor under another name. */
 const CPU_DEVICE = /^(?:CPU|BLAS|AMX|RPC)/i;
