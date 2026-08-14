@@ -86,6 +86,32 @@ export function formatDuration(seconds) {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+/**
+ * The compute badge, from a placement read out of llama.cpp's own output.
+ *
+ * Here rather than beside `PlacementReader` in `main/llm/offload.mjs` for the
+ * reason everything else in this file is: the renderer draws this string and
+ * the reader produces what it describes, and a second copy written out by hand
+ * in `app.js` is how the two come to disagree about what a partial offload
+ * looks like. Importing across the process boundary is not the alternative.
+ */
+export function describePlacement(placement) {
+  if (!placement) return 'RUN: ?';
+  if (placement.where === 'cpu') return 'RUN: CPU';
+  if (placement.where === 'gpu') return 'RUN: GPU';
+  // Layers first: when that is what was split, it is the more useful number and
+  // the one the settings slider speaks in.
+  if (placement.blocks && placement.layers < placement.blocks) {
+    return `RUN: GPU ${placement.layers}/${placement.blocks} LAYERS + CPU`;
+  }
+  // Otherwise the split is in bytes — every layer is on the card and a good
+  // share of the weights is not — and the layer count would read as a
+  // contradiction. `43/43 LAYERS + CPU` states something true that no one can
+  // act on.
+  if (placement.gpuShare != null) return `RUN: GPU ${Math.round(placement.gpuShare * 100)}% WEIGHTS + CPU`;
+  return 'RUN: GPU + CPU';
+}
+
 /** Human-readable byte size for the vault list. */
 export function formatSize(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];

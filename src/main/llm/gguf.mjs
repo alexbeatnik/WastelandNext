@@ -115,7 +115,15 @@ function readValue(cursor, type, version, { wanted }) {
   if (type === T.ARRAY) {
     const itemType = cursor.u32();
     const count = cursor.size(version);
-    // Arrays are only ever the tokenizer's, which nothing here needs. Fixed
+    // One array is worth reading: the sliding-window pattern, which says which
+    // layers hold a full-size KV cache and which hold a window's worth. It is
+    // one bool per layer, so tens of bytes.
+    if (wanted && itemType === T.BOOL) {
+      const values = [];
+      for (let i = 0; i < count; i += 1) values.push(cursor.u8() !== 0);
+      return values;
+    }
+    // Everything else is the tokenizer's, which nothing here needs. Fixed
     // widths are skipped in one jump; strings have to be walked to be measured.
     if (WIDTH[itemType]) {
       cursor.skip(WIDTH[itemType] * count);
@@ -191,8 +199,25 @@ function wantedKeys(arch) {
     `${arch}.embedding_length`,
     `${arch}.attention.head_count`,
     `${arch}.attention.head_count_kv`,
+    `${arch}.attention.key_length`,
+    `${arch}.attention.value_length`,
+    `${arch}.attention.key_length_swa`,
+    `${arch}.attention.value_length_swa`,
+    `${arch}.attention.sliding_window`,
+    `${arch}.attention.sliding_window_pattern`,
+    `${arch}.attention.shared_kv_layers`,
   ]);
 }
+
+/**
+ * The suffixes worth materialising, as a cheap filter before the value is read.
+ *
+ * Deliberately not a prefix test on the architecture: `general.architecture` is
+ * written first in practice but not by requirement, so the arch may still be
+ * unknown here.
+ */
+const INTERESTING_SUFFIX =
+  /\.(context_length|block_count|embedding_length|head_count|head_count_kv|key_length|value_length|key_length_swa|value_length_swa|sliding_window|sliding_window_pattern|shared_kv_layers)$/;
 
 /**
  * Parse a header out of `buffer`.
@@ -221,7 +246,7 @@ export function parseGgufHeader(buffer) {
     const type = cursor.u32();
     // Cheap filter: anything not under `general.` or `<arch>.attention`-shaped
     // is skipped without being materialised. Tokenizer data is the bulk.
-    const interesting = key.startsWith('general.') || /\.(context_length|block_count|embedding_length|head_count|head_count_kv)$/.test(key);
+    const interesting = key.startsWith('general.') || INTERESTING_SUFFIX.test(key);
     const value = readValue(cursor, type, version, { wanted: interesting });
     if (interesting && value !== undefined) raw.set(key, value);
   }
@@ -239,6 +264,16 @@ export function parseGgufHeader(buffer) {
     embeddingLength: pick('embedding_length') ?? null,
     headCount: pick('attention.head_count') ?? null,
     headCountKv: pick('attention.head_count_kv') ?? pick('attention.head_count') ?? null,
+    // Head width is stated outright by the models that do not derive it from
+    // `embedding_length / head_count`. Gemma 4 is one: 2560/8 gives 320, and
+    // the header says 512. Guessing costs 60% of the KV estimate.
+    keyLength: pick('attention.key_length') ?? null,
+    valueLength: pick('attention.value_length') ?? null,
+    keyLengthSwa: pick('attention.key_length_swa') ?? null,
+    valueLengthSwa: pick('attention.value_length_swa') ?? null,
+    slidingWindow: pick('attention.sliding_window') ?? null,
+    slidingWindowPattern: pick('attention.sliding_window_pattern') ?? null,
+    sharedKvLayers: pick('attention.shared_kv_layers') ?? null,
     keys,
   };
 }
@@ -277,22 +312,88 @@ export async function readGgufMetadata(path) {
 }
 
 /**
- * Bytes of KV cache one token costs.
+ * How much of the KV cache is paid up front, regardless of context length.
  *
- * Both K and V are stored for every layer, at `n_embd_head * n_head_kv` values
- * each. Grouped-query attention shows up here as `head_count_kv` being a
- * fraction of `head_count`, which is why a modern 7B is far cheaper per token
- * than an older one of the same size.
+ * A sliding-window layer never caches more than its window, plus the batch in
+ * flight — llama.cpp sizes that cache at `n_swa + n_batch` cells and stops. So
+ * the cost of those layers is a constant, not a rate, and calling it a rate is
+ * what made the estimate wrong by nearly five times.
  */
-export function kvBytesPerToken(meta, { bytesPerElement = 2 } = {}) {
+const BATCH_TOKENS = 2048;
+
+/**
+ * What a KV cache costs: a rate per token, plus a fixed part.
+ *
+ * `perToken` is the layers that cache the whole conversation. `fixedBytes` is
+ * the sliding-window layers, which do not grow with it.
+ *
+ * Three things in the header change this and were all being ignored:
+ *
+ *   - **Head width.** K and V are `key_length * head_count_kv` values each.
+ *     Most models leave `key_length` out and `embedding_length / head_count` is
+ *     the right answer; the ones that state it mean it. Gemma 4 states 512
+ *     where the division gives 320.
+ *   - **Shared KV layers.** `shared_kv_layers` counts trailing layers that
+ *     reuse an earlier layer's cache and allocate none of their own — 18 of
+ *     gemma-4-E4B's 42.
+ *   - **Sliding-window attention.** `sliding_window_pattern` is one bool per
+ *     layer saying which of the rest are windowed.
+ *
+ * Measured against llama.cpp on gemma-4-E4B at 15872 tokens: 4 full layers at
+ * 248 MiB and 20 windowed layers at 100 MiB, against the 1.6 GB the old formula
+ * predicted. That gap is not academic — it is subtracted from the VRAM budget
+ * before layers are placed, so an imaginary gigabyte of cache pushes real
+ * layers onto the processor, and it caps the context at a fraction of what the
+ * card would hold. This is a model that can afford 32768 and was being given
+ * 15872.
+ *
+ * Everything falls back to the old reading when the keys are absent, which is
+ * most models: no pattern means no windowed layers, and the estimate stays the
+ * pessimistic one it always was.
+ */
+export function kvBudget(meta, { bytesPerElement = 2, batchTokens = BATCH_TOKENS } = {}) {
   const heads = Number(meta?.headCount) || 0;
   const layers = Number(meta?.blockCount) || 0;
   const embedding = Number(meta?.embeddingLength) || 0;
-  if (!heads || !layers || !embedding) return null;
+  if (!layers) return null;
 
   const headsKv = Number(meta?.headCountKv) || heads;
-  const embeddingKv = (embedding / heads) * headsKv;
-  return 2 * layers * embeddingKv * bytesPerElement;
+  if (!headsKv) return null;
+
+  const headDim = heads && embedding ? embedding / heads : 0;
+  const keyLength = Number(meta?.keyLength) || headDim;
+  const valueLength = Number(meta?.valueLength) || headDim;
+  if (!keyLength || !valueLength) return null;
+
+  const perFullLayer = (keyLength + valueLength) * headsKv * bytesPerElement;
+  const keySwa = Number(meta?.keyLengthSwa) || keyLength;
+  const valueSwa = Number(meta?.valueLengthSwa) || valueLength;
+  const perSwaLayer = (keySwa + valueSwa) * headsKv * bytesPerElement;
+
+  // Trailing layers that share an earlier cache allocate nothing.
+  const shared = Math.min(layers, Math.max(0, Number(meta?.sharedKvLayers) || 0));
+  const cached = layers - shared;
+
+  const window = Number(meta?.slidingWindow) || 0;
+  const pattern = Array.isArray(meta?.slidingWindowPattern) ? meta.slidingWindowPattern : null;
+  const swaLayers = window && pattern ? pattern.slice(0, cached).filter(Boolean).length : 0;
+  const fullLayers = cached - swaLayers;
+
+  return {
+    perToken: fullLayers * perFullLayer,
+    fixedBytes: swaLayers * perSwaLayer * (window + batchTokens),
+  };
+}
+
+/**
+ * Bytes of KV cache one token costs, for the layers that scale with context.
+ *
+ * Kept as its own function because that rate is what the offload arithmetic
+ * divides by. Callers that are budgeting memory want `kvBudget` — dropping
+ * `fixedBytes` understates a windowed model by a few hundred megabytes.
+ */
+export function kvBytesPerToken(meta, options) {
+  return kvBudget(meta, options)?.perToken ?? null;
 }
 
 /** Context sizes are kept to a round number; llama.cpp is happier and so are logs. */
@@ -323,7 +424,8 @@ export function recommendContext({
   floor = 2048,
 } = {}) {
   const modelMax = Number(meta?.contextLength) || 0;
-  const perToken = kvBytesPerToken(meta);
+  const budget_ = kvBudget(meta);
+  const perToken = budget_?.perToken || null;
 
   // No usable metadata: fall back to the model's footprint. A bigger file means
   // more layers and a wider embedding, so it buys less context per gigabyte.
@@ -340,7 +442,9 @@ export function recommendContext({
     };
   }
 
-  const budget = totalMemory * memoryShare - fileSize - overheadBytes;
+  // The windowed layers are paid whatever the context ends up being, so they
+  // come off the budget before it is divided rather than out of the rate.
+  const budget = totalMemory * memoryShare - fileSize - overheadBytes - (budget_.fixedBytes ?? 0);
   const affordable = budget > 0 ? Math.floor(budget / perToken) : 0;
 
   const limits = [

@@ -353,6 +353,28 @@ when only a uselessly short context would. It shares `GPU_SHARE` and `GPU_OVERHE
 precisely so the two cannot disagree about what fits. Measured on a 12 GB card with Qwen3.5-9B: 61.4 tok/s at 15360 with
 every layer resident, against 18.5 tok/s at 32768 with 23 of 32 — the trade is worth roughly 3×.
 
+**`offloaded 43/43 layers to GPU` is not the same statement as "the model is on the GPU".** llama.cpp answers two
+questions and they can disagree: the summary counts *layers*, the `load_tensors:` buffer lines weigh *bytes*. Gemma
+keeps its per-layer input embeddings on the processor whatever `-ngl` says — a 7.1 GB gemma-4-E4B loaded as 3876 MiB on
+Vulkan0 and 3381 MiB `CPU_Mapped`, 47% of the weights in RAM and paid on every token, under a badge reading `RUN: GPU`.
+That is the same class of wrong answer as reporting a GPU on a machine with none. `PlacementReader` lets the summary
+describe the split but never promote it: past `CPU_WEIGHT_LIMIT` (15%) of the weight bytes in RAM the reading is
+`partial` however many layers were counted. The threshold cannot be zero — a genuinely full offload still leaves the
+token-embedding table behind, and the largest vocabulary in circulation is under 8% of the model it belongs to. When
+the split is in bytes rather than layers the badge says so (`RUN: GPU 53% WEIGHTS + CPU`); printing `43/43 LAYERS + CPU`
+states something true that no one can act on.
+
+**KV cost is not one rate times every layer.** Three things in the header change it and all three were being ignored.
+**Head width** is `key_length`, not `embedding_length / head_count`, for the models that state it — gemma-4 says 512
+where the division gives 320. **`shared_kv_layers`** counts trailing layers that reuse an earlier cache and allocate
+none of their own, 18 of gemma-4-E4B's 42. **`sliding_window_pattern`** is one bool per layer marking the ones that
+never cache more than their window plus the batch in flight, so their cost is a constant and not a rate — which is why
+`kvBudget` returns `{perToken, fixedBytes}` and callers subtract the fixed part from the budget before dividing.
+Measured against llama.cpp at 32768 tokens: 512 MiB over 4 full layers and 100 MiB over 20 windowed ones, against the
+2.6 GB one flat rate predicted. That surplus is subtracted from VRAM before layers are placed, so an imaginary gigabyte
+of cache pushes real layers onto the processor — and it capped this model at 15872 tokens on a card that holds 32768.
+The pattern array is the only array `parseGgufHeader` materialises; everything else is the tokenizer's and is skipped.
+
 **The size-only placement estimate reserves a third of the card.** The KV cache is not a rounding error: on a 9B at 32k
 it is several gigabytes, and an earlier "size + 25%" margin labelled models GPU-resident that in fact ran two thirds of
 their layers on the CPU. Exact placement comes from the header via `models/placement.mjs`; the estimate is only for
@@ -407,6 +429,27 @@ That lateness is also why the handler asks whether the process it is reporting o
 trusting `#stopping`. `unload()` waits for `exit` and clears the flag the moment it arrives, so `close` can land after
 the flag is down — and a model the user deliberately unloaded would be written up as a crash, the status bar showing a
 failure for something that did exactly what was asked.
+
+**Where the weights went is printed only at llama.cpp's `trace` threshold.** Build 10405 loads a model in seventeen
+lines and not one of them names a device, so the badge read `RUN: ?` on a machine running every layer on the GPU — the
+reading was honest and the evidence had simply stopped arriving, the offload summary and the per-device buffer lines
+having moved above the default verbosity of 3. `server.mjs` spawns with `-lv 4`. It is the only source: `/props`,
+`/v1/models` and `/slots` were all checked and none of them mentions a device, and `--log-file` duplicates the console
+stream rather than diverting it. Those lines also carry a timestamp and a severity field now (`0.01.369.125 I
+load_tensors: …`), which is why `BUFFER_RE` in `offload.mjs` no longer anchors at the start of the line — the literal
+`load_tensors:` marker is what keeps the KV cache and the compute buffers out of an answer about the weights, and it
+must stay.
+
+**Trace is 246 lines for a load and 38 more on every turn, and the activity log is not a trace viewer.** `logFilter`
+splits the two audiences: the placement reader and the 60-line failure tail see every line, the log sees warnings,
+errors, and anything from a build that prints no severity field at all. It filters on llama.cpp's own severity marker
+rather than on a list of which components are dull, because that list is precisely what goes stale — this filter exists
+because the lines it reads moved once already. An unprefixed line is a wrapped continuation and shares its heading's
+fate; llama.cpp wraps both indented (the sampler parameters) and at column 0 (the chat template it echoes back, in the
+model's own turn syntax), and eleven lines of Gemma's turn markers with nothing above them to explain them is worse than
+none. The exception is a line reading as a complaint: a failed `GGML_ASSERT` prints bare, and taking it for a
+continuation would hide the one line worth having. The lifecycle lines this hides — `loading model`, `model loaded`,
+`listening on` — are already in the status bar, in the user's own words, off the `state` event.
 
 **A model's reply can arrive in `reasoning_content`, not `content`.** llama.cpp parses each family's thinking syntax —
 `<think>` tags, harmony channel markers — into that field by default. A client reading only `content` shows an empty
