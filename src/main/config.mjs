@@ -44,15 +44,26 @@ export const DEFAULTS = {
   externalEndpoint: '',
 
   /** Browser */
-  browserEnabled: true,
   browserHeadless: false,
   chromePath: '',
 
-  /** Agent capabilities */
-  allowBrowser: true,
-  allowWebLookup: true,
-  allowReadFile: true,
-  allowShell: false,
+  /**
+   * Plugin state, keyed by id: `{enabled, approved}`.
+   *
+   * What the model may do is decided here now, not by the four `allow*` flags
+   * this replaced. Those keys are deliberately *not* in the defaults any more:
+   * `mergeEnablement` reads them only when every one of them is present on
+   * disk, which is exactly the case of a config written by an older build, and
+   * a fresh install must not inherit a decision nobody made.
+   */
+  plugins: {},
+  /** Where GET PLUGINS looks. A setting so a developer can point it elsewhere. */
+  pluginRegistry: '',
+  /** `<plugin-id>/<theme-id>`, or empty for the app's own amber. */
+  theme: '',
+
+  /** Audio output, shared by whichever plugin is driving it. */
+  audioVolume: 0.8,
 
   /** UI */
   activeChat: '',

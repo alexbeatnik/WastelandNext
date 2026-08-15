@@ -67,6 +67,25 @@ contextBridge.exposeInMainWorld('wasteland', {
     close: () => call('browser:close'),
   },
 
+  plugins: {
+    list: () => call('plugins:list'),
+    setEnabled: (id, enabled) => call('plugins:setEnabled', id, enabled),
+    setSetting: (id, key, value) => call('plugins:setSetting', id, key, value),
+    pickFolder: (id, key) => call('plugins:pickFolder', id, key),
+    themes: () => call('plugins:themes'),
+    available: () => call('plugins:available'),
+    install: (entry) => call('plugins:install', entry),
+    uninstall: (id) => call('plugins:uninstall', id),
+  },
+
+  audio: {
+    status: () => call('audio:status'),
+    command: (name) => call('audio:command', name),
+    volume: (value) => call('audio:volume', value),
+    ended: () => call('audio:ended'),
+    failed: (message) => call('audio:failed', message),
+  },
+
   updates: {
     status: () => call('update:status'),
     check: () => call('update:check'),

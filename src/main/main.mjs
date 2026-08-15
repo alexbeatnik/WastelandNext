@@ -11,12 +11,18 @@ import { fileURLToPath } from 'node:url';
 import { setDataRoot } from './paths.mjs';
 import * as config from './config.mjs';
 import { server } from './llm/server.mjs';
-import { registerIpc, shutdown } from './ipc.mjs';
+import { registerSchemes } from './plugins/protocol.mjs';
+import { registerIpc, serveAssets, shutdown } from './ipc.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
 
 setDataRoot(app.getPath('userData'));
+
+// Before `whenReady`, and therefore at module scope: after the app is ready the
+// scheme table is fixed, and a scheme registered late is an ordinary opaque one
+// — no Range support, so a seek in a long track would do nothing.
+registerSchemes();
 
 let window = null;
 
@@ -64,6 +70,8 @@ function createWindow() {
 
 app.whenReady().then(() => {
   config.load();
+  // The handlers, as opposed to the schemes, can only be installed now.
+  serveAssets();
   registerIpc(() => window);
   createWindow();
 

@@ -23,8 +23,14 @@ Type a request. The model answers, or emits a fenced action block and the app ca
 The browser is always one the app launches itself; there is no attach-to-your-own-Chrome mode, so a failure can never
 look like the app meddling with tabs you were using.
 
-Each capability has its own toggle in the left panel. A disabled capability is left out of the system prompt entirely
-rather than described and then refused, so the model does not reach for tools it cannot have.
+**Every one of those is a plugin**, and each has its own toggle in the PLUGINS section of the left panel. The four
+above ship with the app and cannot be removed, only switched off; **GET PLUGINS** below it lists what the
+[plugin registry](https://github.com/alexbeatnik/wasteland-plugins) offers — with icons, descriptions and an UPDATE
+button when a newer version is published — and installs into the data directory on a click. A
+plugin contributes its action handlers and the slice of the system prompt that documents them in one act, so a
+disabled capability is left out of the prompt entirely rather than described and then refused — the model does not
+reach for tools it cannot have, and the two halves cannot drift apart. What a plugin is allowed to reach for is
+declared in its manifest and handed to it by name, so the plugin list is a true account of what is running.
 
 After a browser batch the page is scanned and its real labels are fed back, so the next step targets text that is
 actually on screen instead of a guess. A title that is not on screen yet takes two turns by design: search on the
@@ -312,38 +318,55 @@ src/
 │   │   └── placement.mjs   where a model would run, before it is loaded
 │   ├── browser/
 │   │   └── manul-browser.mjs  the manul-browser bridge
+│   ├── plugins/
+│   │   ├── host.mjs        the registry: discovery, activation, contributions
+│   │   ├── manifest.mjs    validating what a plugin claims about itself
+│   │   ├── registry.mjs    the published index: fetch, verify, install, remove
+│   │   └── protocol.mjs    serving a plugin's files and one audio file
+│   ├── audio.mjs           audio output, driven by whichever plugin wants it
 │   └── agent/
 │       ├── agent.mjs       the turn pipeline, compaction, window budgeting
 │       ├── attach.mjs      files and folders the user put in front of the model
 │       ├── actions.mjs     reading actions out of a reply
 │       ├── batch-guard.mjs refusing a browser batch identical to one already run
-│       ├── prompts.mjs     the system prompt, assembled per capability
+│       ├── prompts.mjs     assembling the system prompt from plugin fragments
 │       └── readfile.mjs    the read-only file path
+├── plugins/                the plugins that ship with the app
+│   ├── index.mjs           the static list of built-ins
+│   ├── browser-control.mjs browser_steps · browser_close
+│   ├── web-lookup.mjs      web_lookup, in its own headless browser
+│   ├── read-file.mjs       read_file
+│   └── system-shell.mjs    system_shell, behind the approval dialog
 ├── preload/preload.cjs     the renderer's whole view of main
 ├── renderer/               index.html · styles.css · app.js
 └── shared/
     ├── render.mjs          text shaping both processes need
     ├── markdown.mjs        markdown → data the renderer builds nodes from
+    ├── media.mjs           MIME types, Range parsing, clock formatting
+    ├── schemes.mjs         how a wasteland-plugin:// or wasteland-media:// URL is spelled
     └── engine.mjs          finding the manul-browser checkout
 ```
 
 ## Testing
 
 ```bash
-npm test       # 288 unit tests, no Electron, no network
+npm test       # 413 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
 ```
 
 `npm test` covers the pure logic: action extraction and its JSON repair, `<think>` splitting and stripping, markdown
 parsing, chat storage and id validation, path vetting, HuggingFace URL rewriting and quantisation choice, prompt
-assembly, GGUF header parsing and the context/GPU arithmetic, the compaction threshold and the window backstop, folder
+assembly, plugin manifest validation and host activation, registry entries and version comparison, Range parsing and
+custom-scheme URLs, GGUF header parsing and the context/GPU arithmetic, the compaction threshold and the window backstop, folder
 collection and its budget, download speed and resume, crash-log summarising, checkout resolution, and where a
 *packaged* app looks for the engine.
 
-`npm run smoke` boots the real window offscreen — 83 checks — and covers what unit tests cannot: a renderer that throws
+`npm run smoke` boots the real window offscreen — 118 checks — and covers what unit tests cannot: a renderer that throws
 on boot, a preload that failed to expose its bridge, an IPC channel renamed on one side only, a layout that breaks at
 one screen shape, or a control that stops resetting what it should. It clicks NEW CHAT, presses Enter, attaches a
-folder and detaches one of two, deletes a conversation from the picker without opening it, opens the About box and
+folder and detaches one of two, switches a plugin off and checks the main process agrees, installs a theme and
+asserts the window actually repaints, plays a real audio file through the media scheme, deletes a conversation
+from the picker without opening it, opens the About box and
 checks every link in it would leave the window, resizes through seven screen shapes, and checks that a reply containing
 `<img onerror=…>` is drawn as text rather than run.
 

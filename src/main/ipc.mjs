@@ -17,6 +17,10 @@ import { detectVram, placementForSize } from './llm/gpu.mjs';
 import { server } from './llm/server.mjs';
 import { downloadLlamaServer, llamaServerStatus } from './llm/tools.mjs';
 import { BrowserBridge, browser, engineAvailable } from './browser/manul-browser.mjs';
+import { PluginHost } from './plugins/host.mjs';
+import { serveProtocols } from './plugins/protocol.mjs';
+import * as registry from './plugins/registry.mjs';
+import { audio } from './audio.mjs';
 import { Agent } from './agent/agent.mjs';
 import { Updater } from './updater.mjs';
 
@@ -40,7 +44,30 @@ const VERSION = (() => {
 
 /** Lookups get their own headless browser so they never touch the visible one. */
 const lookupBrowser = new BrowserBridge();
-const agent = new Agent({ server, browser, lookupBrowser });
+
+/**
+ * The two browsers are handed to the host as *services*, not imported by the
+ * plugins that use them. That is what makes "which plugin can reach what" a
+ * fact readable from a manifest, and what lets the host be tested with a stub
+ * browser and no Chrome anywhere.
+ */
+const plugins = new PluginHost({ services: { browser, lookupBrowser, audio } });
+const agent = new Agent({ server, plugins });
+
+/**
+ * Install the custom-scheme handlers. Called from `main.mjs` once the app is
+ * ready; the schemes themselves were registered before that.
+ *
+ * Both questions the handlers ask are answered by the objects that know: which
+ * directory a plugin owns is the host's business, and which file may be read
+ * right now is the audio service's.
+ */
+export function serveAssets() {
+  serveProtocols({
+    pluginDir: (id) => plugins.dirFor(id),
+    mediaAllows: (path) => audio.allows(path),
+  });
+}
 
 let getWindow = () => null;
 let download = null;
@@ -62,6 +89,9 @@ function snapshot() {
     busy: agent.busy,
     version: VERSION,
     update: updater?.status ?? { state: 'idle' },
+    plugins: plugins.list(),
+    themes: plugins.themes(),
+    audio: audio.status(),
   };
 }
 
@@ -69,6 +99,9 @@ export function registerIpc(windowGetter) {
   getWindow = windowGetter;
 
   agent.on('event', ({ event, ...payload }) => send(event, payload));
+  plugins.on('changed', (list) => send('plugins:changed', { plugins: list, themes: plugins.themes() }));
+  plugins.on('log', (line) => send('log', { text: line }));
+  audio.on('state', (status) => send('audio:state', status));
   server.on('state', (status) => send('llm:state', status));
   server.on('log', (line) => send('llm:log', { line }));
   server.on('tool', (progress) => send('tool:progress', progress));
@@ -289,6 +322,86 @@ export function registerIpc(windowGetter) {
   handle('attach:pickFiles', () => pick(['openFile'], 'Add files to the conversation'));
   handle('attach:pickFolder', () => pick(['openDirectory'], 'Add a folder to the conversation'));
 
+  /* ---------- plugins ---------- */
+
+  /**
+   * Awaited rather than answered from whatever is registered so far.
+   *
+   * Discovery is asynchronous, so a renderer that asked at exactly the wrong
+   * moment would paint an empty list and then be corrected by an event — which
+   * looks like the plugins section flickering into existence on every boot.
+   */
+  handle('plugins:list', async () => {
+    await plugins.ready;
+    return plugins.list();
+  });
+  handle('plugins:setEnabled', (id, enabled) => plugins.setEnabled(id, enabled));
+  handle('plugins:setSetting', (id, key, value) => plugins.setSetting(id, key, value));
+
+  /**
+   * A folder setting, picked through the native dialog.
+   *
+   * Opened here because only the main process can, and parented to the window
+   * so it behaves as a sheet on macOS rather than a stray window — the same
+   * reason `models:addFile` lives here.
+   */
+  handle('plugins:pickFolder', async (id, key) => {
+    const result = await dialog.showOpenDialog(getWindow() ?? undefined, {
+      title: 'Choose a folder',
+      properties: ['openDirectory', 'dontAddToRecent'],
+    });
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true, plugins: plugins.list() };
+    return { canceled: false, plugins: await plugins.setSetting(id, key, result.filePaths[0]) };
+  });
+  handle('plugins:themes', async () => {
+    await plugins.ready;
+    return plugins.themes();
+  });
+
+  /* ---------- the registry ---------- */
+
+  handle('plugins:available', () => registry.fetchIndex());
+
+  /**
+   * Install or update — the same operation, because an update is an install
+   * over the top of one that is already there. The plugin keeps whatever the
+   * user had decided about it: `mergeEnablement` never overrules a record that
+   * already exists, so a plugin switched on stays on across an update and one
+   * that was never allowed to run does not become allowed by being newer.
+   */
+  handle('plugins:install', async (entry) => {
+    const installed = await registry.install(entry, {
+      onProgress: (progress) => send('plugins:progress', progress),
+    });
+    send('plugins:progress', { stage: 'done', id: installed.id });
+    await plugins.refresh();
+    return installed;
+  });
+
+  handle('plugins:uninstall', async (id) => {
+    const entry = plugins.list().find((plugin) => plugin.id === id);
+    // A built-in has no directory to delete, and offering it would be a button
+    // that cannot work.
+    if (entry?.builtin) throw new Error(`${entry.name} ships with the app and cannot be removed`);
+    await registry.uninstall(id);
+    await plugins.refresh();
+    return plugins.list();
+  });
+
+  /* ---------- audio ---------- */
+
+  handle('audio:status', () => audio.status());
+  /**
+   * One command channel rather than a method per button: the set of buttons is
+   * the transport's to declare, so a fixed list of IPC names here would be a
+   * second, competing account of what the player can do.
+   */
+  handle('audio:command', (name) => audio.command(name));
+  handle('audio:volume', (value) => audio.setVolume(value));
+  /** The renderer reporting what only it can know. */
+  handle('audio:ended', () => audio.command('ended'));
+  handle('audio:failed', (message) => audio.fail(message));
+
   /* ---------- browser ---------- */
   handle('browser:status', () => browser.status);
   handle('browser:open', async () => {
@@ -299,11 +412,16 @@ export function registerIpc(windowGetter) {
     await browser.close();
     return browser.status;
   });
+
+  // Started last and deliberately not awaited: registering the handlers is what
+  // lets the window boot, and a plugin that is slow to import must not hold the
+  // window back. Anything that needs the list waits on `plugins.ready`.
+  plugins.load();
 }
 
 /** Called from `before-quit`. Stops the browsers; the model is unloaded after. */
 export async function shutdown() {
   download?.abort();
   agent.stop();
-  await Promise.allSettled([browser.close(), lookupBrowser.close()]);
+  await Promise.allSettled([plugins.shutdown(), browser.close(), lookupBrowser.close()]);
 }

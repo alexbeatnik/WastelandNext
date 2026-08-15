@@ -42,4 +42,6 @@ export const modelsDir = () => ensureDir('models');
 export const chatsDir = () => ensureDir('chats');
 export const toolsDir = () => ensureDir('tools');
 export const logsDir = () => ensureDir('logs');
+/** Installed plugins, one directory each. Built-ins ship inside the app. */
+export const pluginsDir = () => ensureDir('plugins');
 export const configPath = () => join(dataRoot(), 'config.json');

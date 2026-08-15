@@ -10,16 +10,22 @@
 import { app, BrowserWindow } from 'electron';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { setDataRoot } from '../src/main/paths.mjs';
-import { registerIpc } from '../src/main/ipc.mjs';
+import { setDataRoot, pluginsDir } from '../src/main/paths.mjs';
+import { registerSchemes } from '../src/main/plugins/protocol.mjs';
+import { registerIpc, serveAssets } from '../src/main/ipc.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
 
 // A scratch data root, so a smoke run never touches real chats or settings.
 setDataRoot(mkdtempSync(join(tmpdir(), 'wl-smoke-')));
+
+// At module scope, exactly as in `main.mjs`: after the app is ready the scheme
+// table is fixed, and a theme served over an unregistered scheme is refused by
+// the page's CSP without ever reaching the handler.
+registerSchemes();
 
 /**
  * A GUI Electron process on Windows has no attached console, so stdout goes
@@ -431,6 +437,103 @@ async function checkContextControls(window) {
 }
 
 /**
+ * The plugin list.
+ *
+ * The unit tests drive the host directly and never see the half that is only
+ * visible from here: the rows reaching the DOM, a checkbox bound to the right
+ * id, and — the one that matters — a toggle whose effect comes back from the
+ * main process rather than from the click. A row that painted itself optimistically
+ * would pass every assertion below except the last one.
+ */
+async function checkPlugins(window) {
+  say('');
+  say('Plugins');
+
+  const read = () =>
+    window.webContents.executeJavaScript(`(() => ({
+      rows: [...document.querySelectorAll('#plugin-list .plugin-item')].map((row) => ({
+        name: row.querySelector('.plugin-name').textContent,
+        checked: row.querySelector('input[type=checkbox]').checked,
+        off: row.classList.contains('off'),
+        adds: row.querySelector('.plugin-adds')?.textContent ?? '',
+        note: row.querySelector('.plugin-note')?.textContent ?? '',
+      })),
+      status: document.getElementById('plugin-status').textContent,
+    }))()`);
+
+  const start = await read();
+  // Four built-ins plus the theme pack the runner installed.
+  check(`every plugin is listed — ${start.rows.length}`, start.rows.length === 5, JSON.stringify(start.rows.map((r) => r.name)));
+  check(`the section says how many are running — ${start.status}`, /\d+ of \d+ active/.test(start.status), start.status);
+
+  const browser = start.rows.find((row) => row.name === 'Browser control');
+  const shell = start.rows.find((row) => row.name === 'Shell commands');
+  check('browser control is on by default', browser?.checked === true && browser?.off === false, JSON.stringify(browser));
+  // The one capability that has always been off until asked for.
+  check('shell is off by default, and looks it', shell?.checked === false && shell?.off === true, JSON.stringify(shell));
+  check(`a row names the actions it adds — ${browser?.adds}`, /browser_steps/.test(browser?.adds ?? ''), browser?.adds);
+  check('a working plugin has nothing to explain', browser?.note === '', browser?.note);
+
+  // A theme pack is manifest and CSS: there is no code to run, so there is
+  // nothing to approve, and it must be active on the strength of being enabled.
+  const theme = start.rows.find((row) => row.name === 'Smoke theme');
+  check('an installed theme pack is active without being approved', theme?.checked === true && theme?.off === false, JSON.stringify(theme));
+  check('and it says which theme it adds', /theme: Green/.test(theme?.adds ?? ''), theme?.adds);
+
+  // Switch one off through the checkbox, exactly as a user would.
+  await window.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('#plugin-list .plugin-item')]
+      .find((r) => r.querySelector('.plugin-name').textContent === 'File reading');
+    const box = row.querySelector('input[type=checkbox]');
+    box.checked = false;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await new Promise((r) => setTimeout(r, 500));
+
+  const off = await read();
+  const readFile = off.rows.find((row) => row.name === 'File reading');
+  check('switching a plugin off is reflected in its row', readFile?.checked === false && readFile?.off === true, JSON.stringify(readFile));
+  // Asserted against the number, not merely against "it changed": the first
+  // version of this check passed because the handler blanked the status line it
+  // had just written, and an empty string is different from anything.
+  check(`and in the count — ${off.status}`, /^3 of 5 active$/.test(off.status), `${start.status} → ${off.status}`);
+
+  // The state must survive a round trip through the main process, not merely
+  // live in the checkbox that was clicked.
+  const persisted = await window.webContents.executeJavaScript(
+    `window.wasteland.plugins.list().then((list) => list.find((p) => p.id === 'read-file'))`,
+  );
+  check('the main process agrees it is off', persisted.enabled === false && persisted.active === false, JSON.stringify(persisted));
+
+  // Put it back, so the rest of the run sees the defaults.
+  await window.webContents.executeJavaScript(`window.wasteland.plugins.setEnabled('read-file', true)`);
+  await new Promise((r) => setTimeout(r, 400));
+  const back = await window.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('#plugin-list .plugin-item')]
+      .find((r) => r.querySelector('.plugin-name').textContent === 'File reading');
+    return { checked: row.querySelector('input[type=checkbox]').checked, off: row.classList.contains('off') };
+  })()`);
+  // Painted from the event, not from a click — nothing was clicked this time.
+  check('an enable from elsewhere repaints the row', back.checked === true && back.off === false, JSON.stringify(back));
+
+  // The registry, pointed at a closed port by the runner. A boot that cannot
+  // reach it must be silent — the update badges are worth a background fetch,
+  // an error about a list nobody asked to see is not — but pressing REFRESH is
+  // asking, and then the failure has to be said out loud.
+  const quiet = await window.webContents.executeJavaScript(`document.getElementById('store-status').textContent`);
+  check(`an unreachable registry is quiet at boot — "${quiet}"`, quiet === '', quiet);
+
+  await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
+  await new Promise((r) => setTimeout(r, 1500));
+  const asked = await window.webContents.executeJavaScript(`(() => ({
+    status: document.getElementById('store-status').textContent,
+    rows: document.querySelectorAll('#store-list .plugin-item').length,
+  }))()`);
+  check(`asking for it out loud reports the failure — "${asked.status}"`, /registry/i.test(asked.status), JSON.stringify(asked));
+  check('and lists nothing rather than something stale', asked.rows === 0, `${asked.rows} row(s)`);
+}
+
+/**
  * Markdown in an assistant reply is drawn as structure, not printed literally.
  *
  * The reply is pushed through the real `reply:end` event, so this exercises the
@@ -490,6 +593,159 @@ function assertOk(value) {
   if (!value) throw new Error('interaction setup failed');
 }
 
+/** A playable 8 kHz mono PCM WAV of `samples` bytes of silence. */
+function silentWav(samples) {
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0, 'ascii');
+  header.writeUInt32LE(36 + samples, 4);
+  header.write('WAVEfmt ', 8, 'ascii');
+  header.writeUInt32LE(16, 16); // fmt chunk length
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(1, 22); // mono
+  header.writeUInt32LE(8000, 24); // sample rate
+  header.writeUInt32LE(8000, 28); // byte rate
+  header.writeUInt16LE(1, 32); // block align
+  header.writeUInt16LE(8, 34); // bits per sample
+  header.write('data', 36, 'ascii');
+  header.writeUInt32LE(samples, 40);
+  // 8-bit PCM is unsigned, so silence is 128 rather than 0.
+  return Buffer.concat([header, Buffer.alloc(samples, 128)]);
+}
+
+/**
+ * A theme, end to end.
+ *
+ * Every part of this is invisible to the unit tests: whether the scheme was
+ * registered in time, whether the CSP lets a stylesheet through it, whether the
+ * handler finds the file inside the plugin, and whether the picker points the
+ * `<link>` at the right place. The assertion is on a colour actually changing,
+ * because everything short of that can be true while the screen is unchanged.
+ */
+async function checkThemes(window) {
+  say('');
+  say('Themes');
+
+  const offered = await window.webContents.executeJavaScript(`(() => {
+    const select = document.getElementById('set-theme');
+    return {
+      options: [...select.options].map((option) => option.value),
+      labels: [...select.options].map((option) => option.textContent),
+      value: select.value,
+    };
+  })()`);
+  check(
+    `the picker lists the installed theme — ${offered.labels.join(' | ')}`,
+    offered.options.includes('smoke-theme/green'),
+    JSON.stringify(offered),
+  );
+  check('and starts on the built-in look', offered.value === '', offered.value);
+
+  const before = await window.webContents.executeJavaScript(`getComputedStyle(document.body).color`);
+
+  await window.webContents.executeJavaScript(`(() => {
+    const select = document.getElementById('set-theme');
+    select.value = 'smoke-theme/green';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  // The stylesheet is fetched over the custom scheme, so this is a real load.
+  await new Promise((r) => setTimeout(r, 800));
+
+  const applied = await window.webContents.executeJavaScript(`(() => ({
+    href: document.getElementById('theme-css').getAttribute('href') ?? '',
+    color: getComputedStyle(document.body).color,
+    sheets: [...document.styleSheets].length,
+  }))()`);
+  check(`the link points at the plugin scheme — ${applied.href}`, applied.href.startsWith('wasteland-plugin://smoke-theme/'), applied.href);
+  check(
+    `the theme actually repaints the window — ${before} → ${applied.color}`,
+    applied.color === 'rgb(51, 255, 51)',
+    `expected rgb(51, 255, 51), got ${applied.color}`,
+  );
+
+  // Back to amber, so the layout checks below see the shipped palette.
+  await window.webContents.executeJavaScript(`(() => {
+    const select = document.getElementById('set-theme');
+    select.value = '';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await new Promise((r) => setTimeout(r, 300));
+  const restored = await window.webContents.executeJavaScript(`(() => ({
+    href: document.getElementById('theme-css').getAttribute('href'),
+    color: getComputedStyle(document.body).color,
+  }))()`);
+  check('choosing the built-in look takes the stylesheet away again', restored.href === null && restored.color !== 'rgb(51, 255, 51)', JSON.stringify(restored));
+}
+
+/**
+ * The player bar, driven the way a plugin drives it.
+ *
+ * The audio service is poked directly from the main process here because that
+ * is exactly what a plugin does — there is no renderer API for loading a track,
+ * on purpose. What this proves is the half a plugin cannot: that the bar
+ * appears, that the media scheme serves a real file to a real `<audio>`, and
+ * that a transport with no next button does not draw one.
+ */
+async function checkPlayer(window, wavPath) {
+  say('');
+  say('Audio player');
+
+  const { audio } = await import('../src/main/audio.mjs');
+
+  const hiddenAtBoot = await window.webContents.executeJavaScript(
+    `getComputedStyle(document.getElementById('player')).display`,
+  );
+  // Asserted through the computed style, never the attribute: `.player { display: flex }`
+  // outranks the UA rule behind `hidden`, which is how the drop veil once shipped visible.
+  check('the bar is absent until something is loaded', hiddenAtBoot === 'none', hiddenAtBoot);
+
+  let advanced = 0;
+  audio.setTransport({
+    pluginId: 'smoke',
+    buttons: ['next', 'stop'],
+    handle: (command) => {
+      if (command === 'next' || command === 'ended') advanced += 1;
+    },
+  });
+  audio.load({ path: wavPath, label: 'Silence', sublabel: '1 of 1' }, { play: false });
+  await new Promise((r) => setTimeout(r, 1200));
+
+  const shown = await window.webContents.executeJavaScript(`(() => {
+    const bar = document.getElementById('player');
+    return {
+      display: getComputedStyle(bar).display,
+      title: document.getElementById('player-title').textContent,
+      sub: document.getElementById('player-sub').textContent,
+      duration: document.getElementById('player-duration').textContent,
+      toggle: document.getElementById('player-toggle').textContent,
+      next: getComputedStyle(document.getElementById('player-next')).display,
+      previous: getComputedStyle(document.getElementById('player-previous')).display,
+    };
+  })()`);
+
+  check(`the bar appears with the track named — ${shown.title}`, shown.display !== 'none' && shown.title === 'Silence', JSON.stringify(shown));
+  check(`the plugin's own second line is shown — ${shown.sub}`, shown.sub === '1 of 1');
+  // The duration can only come from the element having actually loaded the
+  // file, which means the media scheme served it: this is the end-to-end bit.
+  check(`the media scheme delivered a playable file — ${shown.duration}`, /^0:0[01]$/.test(shown.duration), shown.duration);
+  check('a paused track shows a play button', shown.toggle === '▶');
+  // The transport declared next and stop but not previous.
+  check('declared buttons are shown', shown.next !== 'none', shown.next);
+  check('undeclared ones are not', shown.previous === 'none', shown.previous);
+
+  await window.webContents.executeJavaScript(`document.getElementById('player-next').click()`);
+  await new Promise((r) => setTimeout(r, 300));
+  check('the next button reaches the plugin that registered it', advanced === 1, `${advanced} advance(s)`);
+
+  // Switching the driving plugin off must take the bar with it, or a bar left
+  // behind offers buttons nothing is listening to.
+  audio.releasePlugin('smoke');
+  await new Promise((r) => setTimeout(r, 300));
+  const gone = await window.webContents.executeJavaScript(
+    `getComputedStyle(document.getElementById('player')).display`,
+  );
+  check('releasing the transport clears the bar', gone === 'none', gone);
+}
+
 app.on('window-all-closed', () => {});
 
 // `app.whenReady()` is awaited in a callback rather than at module top level:
@@ -513,11 +769,43 @@ app.whenReady().then(async () => {
       if (level >= 2) errors.push(message);
     });
 
+    // A theme pack, installed the way the registry installer would leave one.
+    // It is the only way to exercise the whole path a theme takes: manifest →
+    // host → picker → custom scheme → CSP → a colour actually changing.
+    const themeDir = join(pluginsDir(), 'smoke-theme');
+    mkdirSync(join(themeDir, 'themes'), { recursive: true });
+    writeFileSync(
+      join(themeDir, 'plugin.json'),
+      JSON.stringify({
+        id: 'smoke-theme',
+        name: 'Smoke theme',
+        version: '1.0.0',
+        apiVersion: 2,
+        description: 'Two colours, for the smoke test.',
+        themes: [{ id: 'green', name: 'Green', file: 'themes/green.css' }],
+      }),
+    );
+    writeFileSync(join(themeDir, 'themes', 'green.css'), ':root { --amber: #33ff33; }\n');
+
+    // One second of silence, so the media scheme has something real to serve.
+    // A missing file would exercise the error path instead, which is not the
+    // question — whether Range-capable delivery works at all is.
+    const wavPath = join(mkdtempSync(join(tmpdir(), 'wl-smoke-audio-')), 'silence.wav');
+    writeFileSync(wavPath, silentWav(8000));
+
+    serveAssets();
     registerIpc(() => window);
+
 
     // A model registered from outside the vault. The native picker cannot be
     // clicked from here, but everything downstream of it can be checked.
     const config = await import('../src/main/config.mjs');
+    // The registry is asked for at boot, which would make this run depend on
+    // the network and on what is published there. Pointed at a closed port
+    // instead: it fails immediately and deterministically, which is also the
+    // case worth checking — a machine with no network must still boot quietly.
+    config.update({ pluginRegistry: 'https://127.0.0.1:1/index.json' });
+
     const externalModel = join(mkdtempSync(join(tmpdir(), 'wl-smoke-away-')), 'elsewhere-Q4_K_M.gguf');
     const magic = Buffer.alloc(4096);
     magic.write('GGUF', 0, 'ascii');
@@ -573,7 +861,7 @@ app.whenReady().then(async () => {
     // Nothing has been searched for yet, so an empty result list is correct.
     check('search results start empty', probe.results === 0, `${probe.results} entries`);
     check('vault section rendered', probe.vault > 0);
-    check('all left-panel sections present', probe.sections === 6, `${probe.sections} sections`);
+    check('all left-panel sections present', probe.sections === 8, `${probe.sections} sections`);
     check('composer present', probe.composer);
     check('model search controls present', probe.search);
     check('the open-a-file control is present', probe.openFile);
@@ -724,7 +1012,10 @@ app.whenReady().then(async () => {
     check('both columns have width', probe.leftWidth > 100 && probe.chatWidth > 300, `${probe.leftWidth}/${probe.chatWidth}`);
     check('no renderer errors', errors.length === 0, errors.join(' | '));
 
-      await checkMarkdown(window);
+    await checkMarkdown(window);
+    await checkPlugins(window);
+    await checkThemes(window);
+    await checkPlayer(window, wavPath);
     await checkChatControls(window);
     await checkAttachments(window);
     await checkContextControls(window);

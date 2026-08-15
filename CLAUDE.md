@@ -12,6 +12,122 @@ renderer's `handleEvent`.
 The renderer holding no pipeline state is deliberate: a reload can never leave the two disagreeing about whether a turn
 is running.
 
+## Plugins
+
+Everything the model may *do* is a plugin. `PluginHost` in `plugins/host.mjs` is the registry; `agent.mjs` no longer
+knows that a browser exists. A plugin contributes exactly four things — action handlers, the slice of the system prompt
+documenting them, context recomputed each turn, and a hook run once per user message — and reaches the app only through
+services it named in its manifest and the host handed it by name.
+
+**The prompt fragment and the handler ship together, in one activation.** That pairing used to be four checkboxes and a
+`switch`, held in step by hand. It is now impossible to register an action without its documentation or document one
+that will not dispatch, and `plugins.test.mjs` asserts the two sets are equal against the real built-ins. This is what
+the whole indirection is for; do not add an action type to `prompts.mjs`.
+
+**Built-ins are imported statically from `src/plugins/index.mjs`, never discovered on disk.** They are part of the
+build, so there is nothing to discover — and a packaged app keeps `src/` inside `app.asar`, where whether a dynamic
+import resolves is a question worth not having to answer. Only installed plugins, which live on the ordinary
+filesystem under the data root, are imported by path.
+
+**A manifest is untrusted input.** It arrives inside an archive from a repository we do not control. The id becomes a
+directory name *and* a key in `config.plugins`, so it is validated for the same reason `isSafeId` exists in
+`chats.mjs`; `main` is checked with the same question `assertSafeArchive` asks of an archive entry, backslash counted
+as a separator. A manifest naming an `apiVersion` this build does not implement is listed with "update Wasteland Next"
+rather than loaded — a plugin failing somewhere inside `activate` on a function that does not exist yet is the same
+bug as a pinned llama.cpp tag that predates a flag.
+
+**A plugin present on disk is not an instruction to run it.** `approved` is recorded when the user switches an
+installed plugin on, and that click is the consent — the warning sits on the row being clicked. A directory that
+appeared in `plugins/` runs nothing until then. Built-ins are approved by shipping inside the application.
+
+**Half a plugin is worse than none.** Contributions are collected during `activate` and committed only once it has
+returned: one that registers two actions and throws between them would otherwise leave the model holding an action
+whose other half never arrived.
+
+**An action type can be claimed once, and built-ins are activated first.** Quietly letting a newcomer shadow
+`system_shell` is how an action stops meaning what the prompt says it means. The second claimant is refused with a
+reason on its row.
+
+**A switched-off plugin's action types are still known.** `owner()` reads them from the manifest without loading
+anything, so the dispatcher answers "Browser control is switched off" instead of "unknown action type". The difference
+is not cosmetic: told the second, a model retries with different spelling; told the first, it tells the user.
+
+**Nothing a plugin does may end a turn.** A handler that throws produces feedback the model can act on, exactly as one
+returning a failure does. Without that, a third-party typo leaves the transcript with a blinking cursor and no reply —
+which is the same failure `reply:start` owing a `reply:end` exists to prevent.
+
+**The approval dialog belongs to the turn, not to the plugin.** `turn.confirm` is what `system-shell` calls; the
+pending map, the `shell:request`/`shell:resolved` events and the answer from Stop all stay in `agent.mjs`. A plugin
+that wanted to skip the dialog would only have to not call anything, so the question cannot live on its side.
+
+**The old `allow*` keys are read exactly once, and only when all of them are present.** They are gone from `DEFAULTS`,
+so a fresh install has none — and reading an absent key as `false` would ship with every capability disabled and no
+hint why. `mergeEnablement` also never overrules an id already recorded: rediscovery on the next boot must not undo
+what the user chose.
+
+**A theme pack has no code, and that is the whole consent model.** `main` is optional in a manifest; a plugin without
+one contributes only what the app reads itself — stylesheets, an icon — so there is nothing to approve and the
+approval step keeps meaning something. `needsApproval` is the single place that decides, and a manifest declaring
+actions or services with no entry point is refused rather than listed as working while doing nothing.
+
+**The custom schemes must be registered before `app.whenReady()`**, which is why `registerSchemes()` sits at module
+scope in `main.mjs` and in `smoke.mjs`. Registered late, a scheme is an ordinary opaque one: no `stream: true`, no
+Range support, and a seek in a long track silently does nothing. `serveProtocols` — the handlers — can only be
+installed after ready, so the two halves are deliberately separate calls.
+
+**`wasteland-plugin:` is the only way a theme can exist.** `style-src 'self'` on a `file://` page rejects an inline
+`<style>` built from IPC text *and* a stylesheet in another directory. Both are named in the CSP in `index.html`;
+`script-src` stays `'self'` alone, because no plugin runs code in that window. A theme therefore arrives as a `<link>`
+pointed at our own handler, which serves nothing outside one plugin's directory.
+
+**`shared/schemes.mjs` exists because `protocol.mjs` imports `electron`.** The first version put the URL builders
+beside the handler, and `host.mjs` importing one of them took the whole plugin test suite down with
+`does not provide an export named 'protocol'` — the same lesson `classifyError` records, learned again. Anything both
+processes need must not live in a file that imports `electron`.
+
+**The audio service is not a music player, and must not become one.** It knows one source, whether it is playing, how
+loud, and what to write on the bar. The queue, shuffle, repeat, the library and what "next" means all belong to the
+plugin, which registers a transport the app asks. That is what lets a second plugin drive the same bar, and what keeps
+a plugin that plays one notification sound from inheriting a next button it cannot honour. The bar's buttons come from
+the transport's own list, so an undeclared one is never drawn.
+
+**The media scheme reaches anywhere on disk, so the allowlist is the one file that is loaded.** Not the queue — the app
+does not have the queue — and not "is the path well formed". `audio.allows` answers exactly "did we put this in front
+of the user", and `clear()` revokes it.
+
+**The renderer never builds a media URL.** `status().source.src` is built in the main process, because the scheme and
+its encoding belong to the handler that takes them apart again — a second encoder is a second thing to get wrong about
+a filename containing `#`, which ends a path and starts a fragment.
+
+**`.player[hidden]` is not optional.** The bar is `display: flex`, and any author-level `display` outranks the UA rule
+behind `hidden` — the drop veil shipped visible for exactly this reason. The smoke check reads `getComputedStyle`.
+
+**A registry icon is a data URI or nothing.** The page allows `img-src data:` and no remote host, so a linked icon
+would both fail to draw and turn opening the plugin list into a request telling somebody who opened it. `parseEntry`
+drops anything that is not `data:image/`.
+
+**An install is atomic, and a checksum is mandatory.** Fetch to scratch, compare the digest the index published, read
+the archive's central directory without unpacking (`assertSafeArchive`), unpack to staging, validate the manifest, and
+only then move it into `plugins/`. A half-unpacked directory would be discovered on the next boot and listed as a
+broken plugin the user never installed. An entry with no `sha256` is refused outright: the index is the only thing
+being trusted, and without a digest nothing ties it to the bytes.
+
+**Versions are compared numerically, in two places.** `1.10.0` is newer than `1.9.0`, which a string comparison gets
+backwards — and an update button that never appears is indistinguishable from a registry that never publishes. The
+renderer has its own small copy because it decides which rows show UPDATE.
+
+**Anything meant to be discovered must be on disk before `registerIpc`.** It is what starts `plugins.load()`. The smoke
+runner writes its test theme first for that reason; the version that wrote it afterwards reported four plugins and a
+theme picker with one entry, both truthfully.
+
+**`#broken` carries every field `list()` reads.** A plugin that could not be understood is still a row on screen, and a
+row that throws while being drawn takes the whole list with it.
+
+**`paintPlugins` owns the section's status line.** It writes the active count, which is also how a previous error
+message goes away; the first version of the toggle handler cleared the line immediately afterwards and blanked the
+count it had just written. The smoke check asserts the number, not that the text changed — an empty string is
+different from anything, so the weaker check passed on the bug.
+
 ## Traps
 
 **`ELECTRON_RUN_AS_NODE`.** VS Code's integrated terminal sets this. With it set, `npx electron .` runs the binary as

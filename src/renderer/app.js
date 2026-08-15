@@ -9,6 +9,7 @@
 import { formatDuration, formatSize, splitThinking, stripActionBlocks } from '../shared/render.mjs';
 import { describeUpdate, isBusy, isReady } from '../shared/updates.mjs';
 import { parseMarkdown } from '../shared/markdown.mjs';
+import { formatTime } from '../shared/media.mjs';
 
 const api = window.wasteland;
 const $ = (id) => document.getElementById(id);
@@ -25,6 +26,11 @@ const state = {
   autoGpu: null,
   llmReady: false,
   update: { state: 'idle' },
+  /** What is installed, what the registry offers, and what is on the bar. */
+  plugins: [],
+  store: { plugins: [], error: '', fetched: false },
+  themes: [],
+  audio: { source: null },
 };
 
 /* ============================ small helpers ============================ */
@@ -641,6 +647,440 @@ function paintBrowser(browser) {
   engine.className = `stat ${browser.engine ? '' : 'warn'}`;
 }
 
+/* ============================ plugins ============================ */
+
+/** A plugin's icon, or a glyph standing in for one that has none. */
+function pluginIcon(plugin) {
+  if (plugin.icon) {
+    const image = document.createElement('img');
+    image.className = 'plugin-icon';
+    image.src = plugin.icon;
+    image.alt = '';
+    // A broken icon must not leave a torn image in the row.
+    image.addEventListener('error', () => image.replaceWith(el('span', 'plugin-icon glyph', '▪')));
+    return image;
+  }
+  return el('span', 'plugin-icon glyph', plugin.themes?.length ? '◐' : '▪');
+}
+
+/** The controls a plugin declared for its own settings. */
+function settingControls(plugin) {
+  const box = el('div', 'plugin-settings');
+
+  for (const setting of plugin.settings ?? []) {
+    const row = el('div', 'plugin-setting');
+    row.append(el('span', 'plugin-setting-label', setting.label));
+
+    if (setting.type === 'toggle') {
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = Boolean(setting.value);
+      input.addEventListener('change', () => saveSetting$(plugin.id, setting.key, input.checked));
+      row.append(input);
+    } else if (setting.type === 'folder') {
+      const value = el('span', 'plugin-setting-value', setting.value || 'not set');
+      value.title = setting.value || '';
+      const pick = el('button', 'ghost', '[ CHOOSE… ]');
+      pick.addEventListener('click', async () => {
+        pick.disabled = true;
+        try {
+          const result = await api.plugins.pickFolder(plugin.id, setting.key);
+          if (!result.canceled) paintPlugins(result.plugins);
+        } catch (err) {
+          $('plugin-status').textContent = err.message;
+        } finally {
+          pick.disabled = false;
+        }
+      });
+      row.append(value, pick);
+    } else {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = setting.value ?? '';
+      input.placeholder = setting.placeholder ?? '';
+      let timer = null;
+      input.addEventListener('input', () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => saveSetting$(plugin.id, setting.key, input.value), 500);
+      });
+      row.append(input);
+    }
+    box.append(row);
+  }
+  return box;
+}
+
+async function saveSetting$(id, key, value) {
+  try {
+    paintPlugins(await api.plugins.setSetting(id, key, value));
+  } catch (err) {
+    $('plugin-status').textContent = err.message;
+  }
+}
+
+/**
+ * The installed plugin list.
+ *
+ * Painted entirely from what the main process reports, including the checkbox:
+ * "switched on" and "actually running" are different facts — a plugin can be
+ * enabled and still be sitting there with a reason it could not load — and a
+ * row that reads its own state from the click would show the first while
+ * meaning the second.
+ */
+function paintPlugins(list = []) {
+  state.plugins = list;
+  const host = $('plugin-list');
+  host.replaceChildren();
+
+  for (const plugin of list) {
+    const row = el('div', 'plugin-item');
+    row.classList.toggle('off', !plugin.active);
+    row.classList.toggle('failed', Boolean(plugin.error));
+
+    const label = el('label', 'check');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = plugin.enabled;
+    box.addEventListener('change', async () => {
+      box.disabled = true;
+      try {
+        // `paintPlugins` rewrites the status line with the new count, which is
+        // also how the previous error message goes away. Clearing it here as
+        // well — as the first version did — wipes the count it just wrote.
+        paintPlugins(await api.plugins.setEnabled(plugin.id, box.checked));
+      } catch (err) {
+        // Put the box back where it was: the setting did not change, and a
+        // checkbox showing a state the main process never accepted is a lie.
+        box.checked = !box.checked;
+        $('plugin-status').textContent = err.message;
+      } finally {
+        box.disabled = false;
+      }
+    });
+
+    label.append(box, pluginIcon(plugin), el('span', 'plugin-name', plugin.name));
+    row.append(label, el('span', 'plugin-meta', `${plugin.version} · ${plugin.builtin ? 'BUILT-IN' : 'INSTALLED'}`));
+    if (plugin.description) row.append(el('div', 'plugin-desc muted', plugin.description));
+
+    const adds = [...(plugin.actions ?? []), ...(plugin.themes ?? []).map((theme) => `theme: ${theme.name}`)];
+    if (adds.length) row.append(el('div', 'plugin-adds muted', adds.join('  ')));
+    if (plugin.settings?.length) row.append(settingControls(plugin));
+
+    const note = plugin.error
+      ? plugin.error
+      : plugin.enabled && !plugin.active
+        ? 'switched on, but not running'
+        : plugin.needsApproval && !plugin.approved
+          ? 'runs code from outside the app — switching it on allows that'
+          : '';
+    if (note) row.append(el('div', 'plugin-note', note));
+
+    // An update is offered rather than applied: it is the same code path as a
+    // fresh install, and installing something the user did not ask for is what
+    // the approval step exists to prevent.
+    const published = state.store.plugins.find((entry) => entry.id === plugin.id);
+    const buttons = el('div', 'plugin-buttons');
+    if (published && published.compatible && isNewerVersion(published.version, plugin.version)) {
+      const update = el('button', '', `[ UPDATE → ${published.version} ]`);
+      update.addEventListener('click', () => installPlugin(published, update));
+      buttons.append(update);
+    }
+    if (!plugin.builtin) {
+      const remove = el('button', 'ghost danger', '[ REMOVE ]');
+      remove.title = 'Delete this plugin from disk';
+      remove.addEventListener('click', async () => {
+        remove.disabled = true;
+        try {
+          paintPlugins(await api.plugins.uninstall(plugin.id));
+          paintStore();
+        } catch (err) {
+          $('plugin-status').textContent = err.message;
+          remove.disabled = false;
+        }
+      });
+      buttons.append(remove);
+    }
+    if (buttons.childElementCount) row.append(buttons);
+
+    host.append(row);
+  }
+
+  const active = list.filter((plugin) => plugin.active).length;
+  $('plugin-status').textContent = list.length ? `${active} of ${list.length} active` : 'No plugins found.';
+}
+
+/**
+ * Is the published version worth offering over the installed one?
+ *
+ * The renderer's own copy of the comparison in `registry.mjs`, and it is the
+ * same three lines for the same reason: `1.10.0` is newer than `1.9.0`, which a
+ * string comparison gets backwards — and an update button that never appears
+ * looks exactly like a registry that never publishes.
+ */
+function isNewerVersion(published, installed) {
+  const parts = (value) =>
+    String(value ?? '')
+      .trim()
+      .replace(/^v/i, '')
+      .split('-')[0]
+      .split('.')
+      .map((part) => Number.parseInt(part, 10) || 0);
+  const a = parts(published);
+  const b = parts(installed);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
+    if (diff !== 0) return diff > 0;
+  }
+  return false;
+}
+
+async function refreshPlugins() {
+  try {
+    paintPlugins(await api.plugins.list());
+  } catch (err) {
+    $('plugin-status').textContent = err.message;
+  }
+}
+
+/* ============================ the registry ============================ */
+
+async function installPlugin(entry, button) {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = '[ … ]';
+  try {
+    const installed = await api.plugins.install(entry);
+    activity(`plugin installed: ${installed.name} ${installed.version}`);
+    await Promise.all([refreshPlugins(), refreshThemes()]);
+    paintStore();
+  } catch (err) {
+    $('store-status').textContent = err.message;
+    activity(`plugin install failed: ${err.message}`, 'bad');
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+/** The registry, drawn against what is already installed. */
+function paintStore() {
+  const host = $('store-list');
+  host.replaceChildren();
+
+  for (const entry of state.store.plugins) {
+    const installed = state.plugins.find((plugin) => plugin.id === entry.id);
+    const row = el('div', 'plugin-item');
+    if (!entry.compatible) row.classList.add('off');
+
+    const head = el('div', 'plugin-head');
+    head.append(pluginIcon(entry), el('span', 'plugin-name', entry.name));
+    row.append(head, el('span', 'plugin-meta', `${entry.version} · ${entry.kind === 'theme' ? 'THEME' : 'PLUGIN'}`));
+    if (entry.description) row.append(el('div', 'plugin-desc muted', entry.description));
+    if (entry.author) row.append(el('div', 'plugin-adds muted', `by ${entry.author}`));
+
+    const buttons = el('div', 'plugin-buttons');
+    if (!entry.compatible) {
+      row.append(el('div', 'plugin-note', `needs plugin API ${entry.apiVersion} — update Wasteland Next`));
+    } else if (!installed) {
+      const install = el('button', '', '[ INSTALL ]');
+      install.addEventListener('click', () => installPlugin(entry, install));
+      buttons.append(install);
+    } else if (isNewerVersion(entry.version, installed.version)) {
+      const update = el('button', '', `[ UPDATE → ${entry.version} ]`);
+      update.addEventListener('click', () => installPlugin(entry, update));
+      buttons.append(update);
+    } else {
+      row.append(el('div', 'plugin-note', `installed (${installed.version})`));
+    }
+    if (buttons.childElementCount) row.append(buttons);
+
+    host.append(row);
+  }
+
+  if (state.store.error) $('store-status').textContent = state.store.error;
+  else if (state.store.plugins.length) $('store-status').textContent = `${state.store.plugins.length} available`;
+  else if (state.store.fetched) $('store-status').textContent = 'The registry lists nothing yet.';
+}
+
+/**
+ * Ask the registry what it has.
+ *
+ * `quiet` is the boot call: a machine with no network must not open with an
+ * error about a plugin list nobody asked to see. The update badges on installed
+ * rows come from this, which is why it runs at boot at all rather than waiting
+ * for the section to be opened.
+ */
+async function refreshStore({ quiet = false } = {}) {
+  if (!quiet) $('store-status').textContent = 'Asking the registry…';
+  try {
+    const index = await api.plugins.available();
+    state.store = { plugins: index.plugins ?? [], error: '', fetched: true };
+  } catch (err) {
+    state.store = { plugins: [], error: quiet ? '' : err.message, fetched: true };
+    if (quiet) return;
+  }
+  paintStore();
+  // The installed rows carry the update button, so they are repainted too.
+  paintPlugins(state.plugins);
+}
+
+/* ============================ themes ============================ */
+
+function paintThemes(themes = []) {
+  state.themes = themes;
+  const select = $('set-theme');
+  const current = state.settings.theme ?? '';
+
+  select.replaceChildren();
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = 'Amber — built in';
+  select.append(none);
+
+  for (const theme of themes) {
+    const option = document.createElement('option');
+    option.value = theme.key;
+    option.textContent = `${theme.name} — ${theme.pluginName}`;
+    select.append(option);
+  }
+
+  // A theme whose plugin has been removed or switched off is no longer on
+  // offer; saying so beats silently selecting something else.
+  if (current && !themes.some((theme) => theme.key === current)) {
+    const missing = document.createElement('option');
+    missing.value = current;
+    missing.textContent = `${current} — unavailable`;
+    select.append(missing);
+  }
+  select.value = current;
+  applyTheme(current);
+}
+
+/**
+ * Point the theme stylesheet at the chosen plugin's CSS.
+ *
+ * A `<link>` is used rather than an injected `<style>` because the CSP has no
+ * `'unsafe-inline'` and will not get one: a stylesheet arriving over the plugin
+ * scheme is served by our own handler out of one directory, whereas inline
+ * styles would be open to anything that can put text on the page.
+ */
+function applyTheme(key) {
+  const link = $('theme-css');
+  const theme = state.themes.find((item) => item.key === key);
+  if (theme) link.setAttribute('href', theme.url);
+  else link.removeAttribute('href');
+}
+
+async function refreshThemes() {
+  try {
+    paintThemes(await api.plugins.themes());
+  } catch {
+    /* the built-in look is always there to fall back to */
+  }
+}
+
+/* ============================ the player ============================ */
+
+/**
+ * The audio element the app owns.
+ *
+ * Created here rather than in the markup because nothing else touches it, and
+ * because `preload = 'metadata'` matters: the bar wants a duration as soon as a
+ * track is cued, without pulling the whole file down to get one.
+ */
+const sound = new Audio();
+sound.preload = 'metadata';
+
+let seeking = false;
+
+function paintPlayer(status = { source: null }) {
+  state.audio = status;
+  const bar = $('player');
+  bar.hidden = !status.source;
+
+  for (const name of ['previous', 'next', 'stop']) {
+    $(`player-${name}`).hidden = !(status.buttons ?? []).includes(name);
+  }
+
+  $('player-toggle').textContent = status.playing ? '⏸' : '▶';
+  $('player-toggle').title = status.playing ? 'Pause' : 'Play';
+  $('player-title').textContent = status.source?.label ?? '';
+  $('player-title').title = status.source?.path ?? '';
+  $('player-sub').textContent = status.error || status.source?.sublabel || '';
+  $('player-sub').classList.toggle('bad', Boolean(status.error));
+  $('player-volume').value = String(Math.round((status.volume ?? 1) * 100));
+
+  if (!status.source) {
+    sound.removeAttribute('src');
+    sound.load();
+    return;
+  }
+
+  // Only when it actually changed: reassigning the same src restarts the track,
+  // which turns a pause into a rewind.
+  if (sound.getAttribute('src') !== status.source.src) {
+    sound.setAttribute('src', status.source.src);
+    sound.load();
+  }
+
+  // Hearing is logarithmic, so a linear slider would cram all the useful
+  // volume into its top quarter. Squaring it is what A-Player settled on.
+  sound.volume = (status.volume ?? 1) ** 2;
+
+  if (status.playing) {
+    // A play() rejection is ordinary here — a file that will not decode, or a
+    // src replaced mid-load — and it is reported rather than thrown away.
+    sound.play().catch((err) => api.audio.failed(err.message).then(paintPlayer).catch(() => {}));
+  } else {
+    sound.pause();
+  }
+}
+
+function paintPlayhead() {
+  const duration = Number.isFinite(sound.duration) ? sound.duration : 0;
+  $('player-position').textContent = formatTime(sound.currentTime);
+  $('player-duration').textContent = duration ? formatTime(duration) : '—:—';
+  if (!seeking) $('player-seek').value = String(duration ? Math.round((sound.currentTime / duration) * 1000) : 0);
+}
+
+function wirePlayer() {
+  sound.addEventListener('timeupdate', paintPlayhead);
+  sound.addEventListener('loadedmetadata', paintPlayhead);
+  sound.addEventListener('durationchange', paintPlayhead);
+  // What the main process cannot know: only the element sees the file run out.
+  sound.addEventListener('ended', () => api.audio.ended().then(paintPlayer).catch(() => {}));
+  sound.addEventListener('error', () => {
+    if (sound.getAttribute('src')) api.audio.failed('this file could not be played').then(paintPlayer).catch(() => {});
+  });
+
+  const command = (name) => api.audio.command(name).then(paintPlayer).catch((err) => status(err.message));
+  $('player-toggle').addEventListener('click', () => command('toggle'));
+  $('player-previous').addEventListener('click', () => command('previous'));
+  $('player-next').addEventListener('click', () => command('next'));
+  $('player-stop').addEventListener('click', () => command('stop'));
+
+  const seek = $('player-seek');
+  // Held while the user drags, or the timeupdate that arrives mid-gesture drags
+  // the thumb back under their finger.
+  seek.addEventListener('pointerdown', () => {
+    seeking = true;
+  });
+  const commitSeek = () => {
+    seeking = false;
+    if (Number.isFinite(sound.duration)) sound.currentTime = (Number(seek.value) / 1000) * sound.duration;
+  };
+  seek.addEventListener('change', commitSeek);
+  seek.addEventListener('pointerup', commitSeek);
+
+  $('player-volume').addEventListener('input', (event) => {
+    // Applied straight to the element so the slider is audible while dragging;
+    // the main process is told on change, since that is what gets persisted.
+    sound.volume = (Number(event.target.value) / 100) ** 2;
+  });
+  $('player-volume').addEventListener('change', (event) => {
+    api.audio.volume(Number(event.target.value) / 100).then(paintPlayer).catch(() => {});
+  });
+}
+
 function paintCtx({ used = 0, max = 0, percent = 0 } = {}) {
   const safePercent = Number.isFinite(percent) ? percent : 0;
   $('ctx-label').textContent = `CTX: ${used} / ${max} (${Math.round(safePercent)}%)`;
@@ -885,15 +1325,12 @@ function applySettings(settings) {
   $('set-llama-path').value = settings.llamaServerPath;
   $('set-system-prompt').value = settings.systemPrompt;
 
-  $('set-browser-enabled').checked = settings.browserEnabled;
   $('set-browser-headless').checked = settings.browserHeadless;
   $('set-chrome').value = settings.chromePath;
 
-  $('set-allow-browser').checked = settings.allowBrowser;
-  $('set-allow-lookup').checked = settings.allowWebLookup;
-  $('set-allow-read').checked = settings.allowReadFile;
+  // What the model may do is not painted from here any more: it belongs to the
+  // plugin list, which the main process owns and reports whole.
   $('set-thinking').checked = settings.thinking;
-  $('set-allow-shell').checked = settings.allowShell;
   $('set-crt').checked = settings.crtEffects;
 
   document.body.classList.toggle('no-crt', !settings.crtEffects);
@@ -1115,6 +1552,25 @@ function handleEvent(payload) {
     case 'chat:compacted':
       activity(`compacted ${payload.summarised} message(s)`, 'ok');
       loadChat(state.chatId);
+      break;
+
+    case 'plugins:changed':
+      paintPlugins(payload.plugins ?? []);
+      // Themes ride along: switching a theme pack off has to take its entry out
+      // of the picker, and the two facts arrive from the same place.
+      paintThemes(payload.themes ?? []);
+      break;
+
+    case 'plugins:progress':
+      if (payload.stage === 'download' && payload.total) {
+        $('store-status').textContent = `Downloading ${payload.id} — ${Math.round((payload.received / payload.total) * 100)}%`;
+      } else if (payload.stage && payload.stage !== 'done') {
+        $('store-status').textContent = `${payload.stage} ${payload.id}…`;
+      }
+      break;
+
+    case 'audio:state':
+      paintPlayer(payload);
       break;
 
     case 'config:changed':
@@ -1351,13 +1807,19 @@ function wire() {
   bindText('set-system-prompt', 'systemPrompt');
   bindText('set-chrome', 'chromePath');
 
-  bindCheck('set-browser-enabled', 'browserEnabled');
   bindCheck('set-browser-headless', 'browserHeadless');
-  bindCheck('set-allow-browser', 'allowBrowser');
-  bindCheck('set-allow-lookup', 'allowWebLookup');
-  bindCheck('set-allow-read', 'allowReadFile');
-  bindCheck('set-allow-shell', 'allowShell');
   bindCheck('set-crt', 'crtEffects');
+
+  $('btn-store-refresh').addEventListener('click', () => refreshStore());
+
+  $('set-theme').addEventListener('change', async (event) => {
+    // Applied first, saved after: a stylesheet swap should feel instant, and
+    // the write is a round trip.
+    applyTheme(event.target.value);
+    await saveSetting({ theme: event.target.value });
+  });
+
+  wirePlayer();
 
   $('set-crt').addEventListener('change', (event) => document.body.classList.toggle('no-crt', !event.target.checked));
 }
@@ -1385,15 +1847,26 @@ async function boot() {
   paintCompute(snapshot.llm);
   paintBrowser({ ...snapshot.browser, engine: snapshot.engine });
   paintCtx({ used: 0, max: snapshot.settings.nCtx, percent: 0 });
+  // A first paint from the snapshot, which may have been taken while discovery
+  // was still running; `refreshPlugins` below waits for it to settle.
+  paintPlugins(snapshot.plugins ?? []);
+  // After `applySettings`, which is where the chosen theme comes from.
+  paintThemes(snapshot.themes ?? []);
+  paintPlayer(snapshot.audio ?? { source: null });
 
   // Attachments outlive a reload — they live in the main process — so the row
   // is painted from what is actually pending, not assumed empty.
   paintAttachments(await api.attach.list());
 
-  await Promise.all([refreshVault(), refreshChats(), refreshTool()]);
+  await Promise.all([refreshVault(), refreshChats(), refreshTool(), refreshPlugins(), refreshThemes()]);
 
   if (!snapshot.engine) activity('manul-browser engine not built — run `npm run engine` for browser control.', 'bad');
   status('Ready');
+
+  // Last, unawaited and quiet. It is what puts UPDATE on an installed row, so
+  // it cannot wait for the section to be opened — but a machine with no network
+  // must not open with an error about a list nobody asked to see.
+  refreshStore({ quiet: true });
 }
 
 boot().catch((err) => {
