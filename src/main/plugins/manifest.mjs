@@ -129,6 +129,22 @@ export function parseManifest(raw, { builtin = false } = {}) {
     themes.push({ id, name: String(entry.name ?? id).trim() || id, file });
   }
 
+  /**
+   * Languages, keyed by the English text they replace.
+   *
+   * Declarative for the same reason themes are: a dictionary is data the app
+   * reads itself, so a language pack has nothing to run and nothing to approve.
+   */
+  const locales = [];
+  for (const entry of Array.isArray(raw.locales) ? raw.locales : []) {
+    const id = String(entry?.id ?? '').trim();
+    const file = String(entry?.file ?? '');
+    // `uk`, `pt-br` — a tag, and one that is about to become part of a URL.
+    if (!/^[a-z]{2,3}(-[a-z0-9]{2,8})*$/.test(id)) return { ok: false, reason: `"${id || '(no id)'}" is not a usable language tag` };
+    if (!isContainedPath(file)) return { ok: false, reason: `language "${id}" points outside the plugin: "${file}"` };
+    locales.push({ id, name: String(entry.name ?? id).trim() || id, file });
+  }
+
   const settings = [];
   for (const entry of Array.isArray(raw.settings) ? raw.settings : []) {
     const key = String(entry?.key ?? '').trim();
@@ -159,6 +175,7 @@ export function parseManifest(raw, { builtin = false } = {}) {
       order: Number.isFinite(Number(raw.order)) ? Number(raw.order) : 100,
       enabledByDefault: raw.enabledByDefault !== false,
       themes,
+      locales,
       settings,
       /** Settings keys this plugin replaced, for the one-time migration below. */
       legacy: Array.isArray(raw.legacy) ? raw.legacy.map((key) => String(key)) : [],

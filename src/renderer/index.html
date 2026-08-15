@@ -13,7 +13,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; style-src 'self' wasteland-plugin:; script-src 'self'; img-src 'self' data: wasteland-plugin:; font-src 'self' wasteland-plugin:; media-src 'self' wasteland-media:;"
+      content="default-src 'self'; style-src 'self' wasteland-plugin:; script-src 'self'; img-src 'self' data: wasteland-plugin:; font-src 'self' wasteland-plugin:; media-src 'self' wasteland-media:; connect-src 'self' wasteland-plugin:;"
     />
     <title>Wasteland Next</title>
     <link rel="stylesheet" href="styles.css" />
@@ -37,7 +37,7 @@
     <main class="workspace" id="workspace">
       <!-- ===================== LEFT PANEL ===================== -->
       <aside class="panel panel-left" id="panel-left">
-        <details class="section" open>
+        <details class="section" id="section-find" open>
           <summary>FIND A MODEL</summary>
           <div class="section-body">
             <label class="field">
@@ -164,6 +164,12 @@
           <summary>INTERFACE</summary>
           <div class="section-body">
             <label class="field">
+              <span>LANGUAGE</span>
+              <select id="set-locale">
+                <option value="">English — built in</option>
+              </select>
+            </label>
+            <label class="field">
               <span>THEME</span>
               <select id="set-theme">
                 <option value="">Amber — built in</option>
@@ -191,6 +197,18 @@
           </div>
           <button id="btn-new-chat" title="Start a new conversation">[ NEW ]</button>
           <button id="btn-delete-chat" class="ghost danger" title="Delete this conversation">×</button>
+
+          <!-- Which model is answering belongs where the answering happens. It
+               was only in the left rail, which is closed on a narrow window and
+               scrolled away on a tall one. -->
+          <div class="chat-picker model-picker">
+            <button id="model-current" class="chat-current" aria-haspopup="listbox" aria-expanded="false"
+                    title="Choose the model that answers">
+              <span id="model-current-label">— no model —</span>
+              <span class="chat-caret">▾</span>
+            </button>
+            <div class="chat-menu" id="model-menu" role="listbox" hidden></div>
+          </div>
         </div>
 
         <div class="chat-log" id="chat-log"></div>

@@ -51,8 +51,16 @@ export class PluginHost extends EventEmitter {
   #turnHooks = [];
   /** Stylesheets offered by enabled plugins, whether or not they run code. */
   #themes = [];
+  /** Dictionaries, same deal: data the app reads, no code involved. */
+  #locales = [];
   /** `id → [fn]`, called when the user edits one of a plugin's settings. */
   #settingsHooks = new Map();
+  /**
+   * `id → version-mtime` of the code actually imported, for the life of the
+   * process. Kept outside `#entries` because rediscovery rebuilds those, and
+   * the whole point is to remember what an earlier discovery loaded.
+   */
+  #loadedStamps = new Map();
   #ready = null;
 
   /**
@@ -160,7 +168,7 @@ export class PluginHost extends EventEmitter {
         entries.push(this.#broken(name, `the manifest calls itself "${parsed.manifest.id}" but it is installed as "${name}"`, false));
         continue;
       }
-      entries.push({ manifest: parsed.manifest, module: null, dir, error: '', active: false, contributions: null });
+      entries.push({ manifest: parsed.manifest, module: null, dir, error: '', active: false, contributions: null, stale: false });
     }
     return entries;
   }
@@ -181,6 +189,7 @@ export class PluginHost extends EventEmitter {
         // still a row on screen, and a row that throws while being drawn takes
         // the whole list with it.
         themes: [],
+        locales: [],
         settings: [],
         icon: '',
         builtin,
@@ -250,6 +259,7 @@ export class PluginHost extends EventEmitter {
     this.#contexts = [];
     this.#turnHooks = [];
     this.#themes = [];
+    this.#locales = [];
     this.#settingsHooks.clear();
 
     for (const entry of [...this.#entries.values()].sort(byRank)) {
@@ -269,6 +279,16 @@ export class PluginHost extends EventEmitter {
           pluginName: entry.manifest.name,
           key: `${entry.manifest.id}/${theme.id}`,
           url: pluginAssetUrl(entry.manifest.id, theme.file),
+        });
+      }
+
+      for (const locale of entry.manifest.locales ?? []) {
+        this.#locales.push({
+          ...locale,
+          pluginId: entry.manifest.id,
+          pluginName: entry.manifest.name,
+          key: `${entry.manifest.id}/${locale.id}`,
+          url: pluginAssetUrl(entry.manifest.id, locale.file),
         });
       }
 
@@ -322,20 +342,24 @@ export class PluginHost extends EventEmitter {
   }
 
   /**
-   * Import a plugin's entry point, seeing the file that is on disk *now*.
+   * Import a plugin's entry point, and notice when what is on disk has moved
+   * on from what is running.
    *
    * Node caches ES modules by resolved URL, and an update writes over the same
-   * path — so a plugin updated while the app is running would go on executing
-   * the code it was first loaded with, silently, until a restart. That is worse
-   * than an update that fails: the version on the row says 1.0.1 and the
-   * behaviour is 1.0.0's.
+   * path, so an updated plugin goes on executing the code it was first loaded
+   * with until the app restarts. An earlier version tried to defeat that by
+   * importing the entry point under a unique query — and made it worse. The
+   * query is not inherited by the plugin's own `import './library.mjs'`, which
+   * resolves without it and comes back from the cache: a *new* entry point
+   * against *old* dependencies. The observed result was
+   * `does not provide an export named 'readTracks'` — a plugin that had been
+   * working, broken by being updated.
    *
-   * The query makes it a different module for the loader. It is keyed on the
-   * version and the file's modification time rather than on the clock, so
-   * switching a plugin off and on again reuses the cached module and only a
-   * genuinely changed file costs a new one — every distinct URL stays in the
-   * loader's registry for the life of the process, and a fresh instance per
-   * toggle would be a leak.
+   * So the cache is left alone and the mismatch is reported instead. The old
+   * code keeps running, which it was doing anyway, and the row says a restart
+   * is what finishes the update. Hot-swapping a module graph needs a loader
+   * hook, and a loader hook in the main process affects every import in the
+   * app to fix one that a restart fixes for free.
    */
   async #import(entry) {
     const target = join(entry.dir, entry.manifest.main);
@@ -347,7 +371,14 @@ export class PluginHost extends EventEmitter {
     } catch {
       /* the version alone still distinguishes an update */
     }
-    return import(`${pathToFileURL(target).href}?v=${encodeURIComponent(stamp)}`);
+
+    const loaded = this.#loadedStamps.get(entry.manifest.id);
+    if (loaded === undefined) this.#loadedStamps.set(entry.manifest.id, stamp);
+    // Anything already imported answers from the loader's registry whatever we
+    // pass, so this is a statement about what the user will get, not a choice.
+    else if (loaded !== stamp) entry.stale = true;
+
+    return import(pathToFileURL(target).href);
   }
 
   /** The object a plugin's `activate` is handed. */
@@ -470,6 +501,11 @@ export class PluginHost extends EventEmitter {
     return [...this.#themes];
   }
 
+  /** Every language on offer, for the language picker. */
+  locales() {
+    return [...this.#locales];
+  }
+
   /** Where an installed plugin's files are, for the protocol handler. */
   dirFor(id) {
     return this.#entries.get(id)?.dir ?? null;
@@ -529,6 +565,7 @@ export class PluginHost extends EventEmitter {
         actions: entry.manifest.actions,
         services: entry.manifest.services,
         themes: entry.manifest.themes,
+        locales: entry.manifest.locales ?? [],
         // Declaration and value together: the row draws the control from the
         // first and fills it from the second, and neither is useful alone.
         settings: entry.manifest.settings.map((setting) => ({ ...setting, value: values[setting.key] ?? '' })),
@@ -542,6 +579,12 @@ export class PluginHost extends EventEmitter {
         // say so. A theme pack is never "active": it has nothing to activate,
         // and enabled is the whole of its state.
         active: entry.active || (Boolean(state.enabled) && !this.#hasCode(entry) && !entry.broken),
+        /**
+         * Newer on disk than in memory. The version shown is the manifest's —
+         * what the user installed — while the behaviour is still the old
+         * code's, and saying so is the only way that difference is visible.
+         */
+        stale: Boolean(entry.stale),
         error: entry.error,
       };
     });

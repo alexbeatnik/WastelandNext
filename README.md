@@ -23,14 +23,8 @@ Type a request. The model answers, or emits a fenced action block and the app ca
 The browser is always one the app launches itself; there is no attach-to-your-own-Chrome mode, so a failure can never
 look like the app meddling with tabs you were using.
 
-**Every one of those is a plugin**, and each has its own toggle in the PLUGINS section of the left panel. The four
-above ship with the app and cannot be removed, only switched off; **GET PLUGINS** below it lists what the
-[plugin registry](https://github.com/alexbeatnik/wasteland-plugins) offers — with icons, descriptions and an UPDATE
-button when a newer version is published — and installs into the data directory on a click. A
-plugin contributes its action handlers and the slice of the system prompt that documents them in one act, so a
-disabled capability is left out of the prompt entirely rather than described and then refused — the model does not
-reach for tools it cannot have, and the two halves cannot drift apart. What a plugin is allowed to reach for is
-declared in its manifest and handed to it by name, so the plugin list is a true account of what is running.
+**Every one of those is a plugin**, switched on and off in the PLUGINS section of the left panel — and more can be
+installed. See [Plugins](#plugins) below.
 
 After a browser batch the page is scanned and its real labels are fed back, so the next step targets text that is
 actually on screen instead of a guess. A title that is not on screen yet takes two turns by design: search on the
@@ -71,6 +65,45 @@ opens it, because what was sent to the model is what you should be able to check
 Unlike `read_file`, an attachment is not confined to your home directory: a model naming a path is a request to be
 vetted, but you picking one through a dialog have already decided, and a checkout on another drive is ordinary. The
 credential directories — `.ssh`, `.aws`, `.gnupg` and friends — are refused either way.
+
+## Plugins
+
+Everything the model may *do* is a plugin. The four capabilities above ship with the app and cannot be removed, only
+switched off; **GET PLUGINS** lists what the [registry](https://github.com/alexbeatnik/wasteland-plugins) offers — with
+icons, descriptions, and an UPDATE button when a newer version is published — and installs into the data directory on a
+click.
+
+A plugin contributes its action handlers **and** the slice of the system prompt that documents them, in one act. That
+is the point of the indirection: a switched-off capability is absent from the prompt rather than described and then
+refused, so the model never reaches for a tool it cannot have, and the two halves cannot drift apart. What a plugin may
+reach for — the browser, the headless lookup browser, audio output — is declared in its manifest and handed over by
+name, so the plugin list is a true account of what is running rather than a summary somebody wrote.
+
+**Two kinds, and only one of them is code.** A theme pack is a manifest and some CSS, read by the app's own protocol
+handler; there is nothing to run, so there is nothing to consent to. Anything with an entry point runs in the main
+process with everything Node can reach, and the app will not import a line of it until you press **ALLOW AND RUN** on
+its row. Installing is not switching on — a directory that appeared in `plugins/` is not an instruction.
+
+**Themes** are chosen in INTERFACE. A theme redefines the variables on `:root` and nothing else; it arrives over the
+`wasteland-plugin://` scheme, because `style-src 'self'` on a `file://` page rejects both an inline `<style>` built
+from IPC text and a stylesheet in another directory. Scripts stay `'self'` alone — no plugin runs code in the chat
+window, which is why one that wants to play audio asks the app for the `audio` service instead of shipping a player.
+
+**Audio** is the smallest part of a music player that cannot be a plugin: an `<audio>` element, the transport bar under
+the transcript, and a scheme that serves one file with Range support so seeking works. It has no queue, no shuffle and
+no idea what "next" means — a plugin registers a transport and answers that, so two plugins can drive the same bar and
+one that plays a single notification sound does not inherit a next button it cannot honour.
+
+**An action can ask rather than guess.** A handler that returns `choices` has them drawn as buttons under its result,
+and pressing one calls back into the plugin. It is what stops a model picking blindly between five near-identical
+files, and what stops the alternative — asking someone to retype a file name.
+
+**Updating a plugin needs a restart to finish.** Node caches modules by URL for the life of the process, so replacing
+files does not replace what is running; the row says so, and the version shown is what is installed. An earlier attempt
+to defeat the cache by importing the entry point under a unique query made it worse — the query is not inherited by the
+plugin's own imports, so a new entry point linked against cached dependencies and failed outright.
+
+Writing one is documented in the [registry's README](https://github.com/alexbeatnik/wasteland-plugins#writing-one).
 
 ## Requirements
 
@@ -125,8 +158,8 @@ Stages manul-browser, then runs electron-builder. Two artifacts land in `dist/`:
 
 | File | What it is |
 |---|---|
-| `WastelandNext-0.1.0-portable.exe` | ~75 MB, single self-contained file, runs with no install |
-| `WastelandNext-0.1.0-setup.exe` | ~76 MB installer, per-user, installation directory selectable |
+| `WastelandNext-<version>-portable.exe` | ~75 MB, single self-contained file, runs with no install |
+| `WastelandNext-<version>-setup.exe` | ~76 MB installer, per-user, installation directory selectable |
 
 `dist/win-unpacked/` holds the same app as a plain directory, which is the quickest thing to debug against.
 
@@ -350,7 +383,7 @@ src/
 ## Testing
 
 ```bash
-npm test       # 413 unit tests, no Electron, no network
+npm test       # 437 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
 ```
 
@@ -361,13 +394,13 @@ custom-scheme URLs, GGUF header parsing and the context/GPU arithmetic, the comp
 collection and its budget, download speed and resume, crash-log summarising, checkout resolution, and where a
 *packaged* app looks for the engine.
 
-`npm run smoke` boots the real window offscreen — 118 checks — and covers what unit tests cannot: a renderer that throws
+`npm run smoke` boots the real window offscreen — 134 checks — and covers what unit tests cannot: a renderer that throws
 on boot, a preload that failed to expose its bridge, an IPC channel renamed on one side only, a layout that breaks at
 one screen shape, or a control that stops resetting what it should. It clicks NEW CHAT, presses Enter, attaches a
-folder and detaches one of two, switches a plugin off and checks the main process agrees, installs a theme and
-asserts the window actually repaints, plays a real audio file through the media scheme, deletes a conversation
-from the picker without opening it, opens the About box and
-checks every link in it would leave the window, resizes through seven screen shapes, and checks that a reply containing
+folder and detaches one of two, switches a plugin off and checks the main process agrees, allows a plugin that brings
+code and watches it start, installs a theme and asserts the window actually repaints, plays a real audio file through
+the media scheme, presses one of the options an action offered and checks the plugin answered, deletes a conversation
+from the picker without opening it, opens the About box and checks every link in it would leave the window, resizes through seven screen shapes, and checks that a reply containing
 `<img onerror=…>` is drawn as text rather than run.
 
 Where a fix is for something a user reported, the test reproduces *their* case rather than a tidy abstraction of it:

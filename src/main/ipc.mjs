@@ -91,6 +91,7 @@ function snapshot() {
     update: updater?.status ?? { state: 'idle' },
     plugins: plugins.list(),
     themes: plugins.themes(),
+    locales: plugins.locales(),
     audio: audio.status(),
   };
 }
@@ -99,7 +100,9 @@ export function registerIpc(windowGetter) {
   getWindow = windowGetter;
 
   agent.on('event', ({ event, ...payload }) => send(event, payload));
-  plugins.on('changed', (list) => send('plugins:changed', { plugins: list, themes: plugins.themes() }));
+  plugins.on('changed', (list) =>
+    send('plugins:changed', { plugins: list, themes: plugins.themes(), locales: plugins.locales() }),
+  );
   plugins.on('log', (line) => send('log', { text: line }));
   audio.on('state', (status) => send('audio:state', status));
   server.on('state', (status) => send('llm:state', status));
@@ -222,9 +225,25 @@ export function registerIpc(windowGetter) {
     send('config:changed', { settings: config.load() });
     return binary;
   });
-  handle('llm:load', (name) => server.load(name));
+  /**
+   * Load a model, and remember which one.
+   *
+   * Recorded here rather than in `server.mjs`, which has no business knowing
+   * about settings — and only on success, so a name that could not be loaded
+   * does not become the thing tried again on every start.
+   */
+  handle('llm:load', async (name) => {
+    const status = await server.load(name);
+    config.update({ model: name });
+    send('config:changed', { settings: config.load() });
+    return status;
+  });
   handle('llm:unload', async () => {
     await server.unload();
+    // Unloading is a decision, not a crash: bringing it back on the next start
+    // would override the thing the user just chose.
+    config.update({ model: '' });
+    send('config:changed', { settings: config.load() });
     return server.status;
   });
   handle('llm:status', () => server.status);
@@ -371,6 +390,10 @@ export function registerIpc(windowGetter) {
     await plugins.ready;
     return plugins.themes();
   });
+  handle('plugins:locales', async () => {
+    await plugins.ready;
+    return plugins.locales();
+  });
 
   /* ---------- the registry ---------- */
 
@@ -389,7 +412,11 @@ export function registerIpc(windowGetter) {
     });
     send('plugins:progress', { stage: 'done', id: installed.id });
     await plugins.refresh();
-    return installed;
+    // Replacing a plugin that has already been imported does not replace what
+    // is running: Node caches modules by URL for the life of the process. The
+    // row says so, and this is the same fact where the install happened.
+    const row = plugins.list().find((plugin) => plugin.id === installed.id);
+    return { ...installed, restartRequired: Boolean(row?.stale) };
   });
 
   handle('plugins:uninstall', async (id) => {
@@ -431,6 +458,29 @@ export function registerIpc(windowGetter) {
   // lets the window boot, and a plugin that is slow to import must not hold the
   // window back. Anything that needs the list waits on `plugins.ready`.
   plugins.load();
+  restoreModel();
+}
+
+/**
+ * Bring back the model that was loaded when the app was last closed.
+ *
+ * Unawaited, and quiet about most failures: a load takes tens of seconds and
+ * the window must not wait for it, while a model on an unplugged drive is an
+ * ordinary Tuesday rather than something to open with an error. The status bar
+ * shows the attempt through the `state` event like any other load, so nothing
+ * here has to narrate it.
+ *
+ * The name is only recorded on a successful load, so this cannot get stuck
+ * retrying something that has never worked.
+ */
+async function restoreModel() {
+  const name = String(config.get('model') ?? '').trim();
+  if (!name) return;
+  try {
+    await server.load(name);
+  } catch (err) {
+    send('log', { text: `could not reload ${name} — ${err.message}` });
+  }
 }
 
 /** Called from `before-quit`. Stops the browsers; the model is unloaded after. */

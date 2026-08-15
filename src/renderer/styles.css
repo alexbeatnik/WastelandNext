@@ -564,6 +564,25 @@ input[type='checkbox']:checked {
   font-size: 0.78em;
 }
 
+/* The model picker shares the conversation picker's shape, and gives way first
+   when the bar runs out of room: which chat is open matters more than which
+   model answers, and the topbar says the model too. */
+.model-picker {
+  margin-left: auto;
+  min-width: 0;
+  flex: 0 1 12rem;
+}
+
+.model-picker .chat-current.loaded {
+  border-color: var(--amber);
+}
+
+@media (max-width: 900px) {
+  .model-picker {
+    flex-basis: 7rem;
+  }
+}
+
 /* ============================ Choices in the transcript ============================ */
 
 .choices {
@@ -831,6 +850,16 @@ button.choice.chosen .choice-label::before {
 .plugin-item.off .plugin-desc,
 .plugin-item.off .plugin-adds {
   color: var(--amber-faint);
+}
+
+/* New on disk, old in memory: not a failure, but not finished either. */
+.plugin-item.stale {
+  border-style: dashed;
+  border-color: var(--amber-dim);
+}
+
+.plugin-item.stale .plugin-note {
+  color: var(--amber-bright);
 }
 
 /* Asked for and unable to run — the one state that has to be read. */

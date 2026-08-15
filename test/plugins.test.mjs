@@ -499,11 +499,17 @@ test('a plugin registering half of itself before throwing registers none of it',
   assert.equal(host.action('first'), null, 'half a plugin is worse than none of it');
 });
 
-test('an updated plugin runs the code that is on disk, not the code it was loaded with', async () => {
-  // Node caches ES modules by resolved URL, and an update writes over the same
-  // path. Without a distinct URL the app would go on executing the version it
-  // first imported — the row would say 1.0.1 while the behaviour stayed 1.0.0,
-  // which is worse than an update that fails outright.
+test('an updated plugin keeps running the old code, and says so', async () => {
+  // Node caches ES modules by resolved URL for the life of the process, so an
+  // update that writes over the same path does not replace what is running.
+  //
+  // An earlier version tried to defeat that by importing the entry point under
+  // a unique query, and made it worse: the query is not inherited by the
+  // plugin's own `import './library.mjs'`, which resolved without it and came
+  // back from the cache. A new entry point against old dependencies failed to
+  // link — `does not provide an export named 'readTracks'` — and a plugin that
+  // had been working was broken by being updated. Reporting the mismatch is the
+  // honest answer; a restart is what applies it.
   const root = mkdtempSync(join(tmpdir(), 'wl-update-'));
   const write = (version, answer) =>
     install(root, 'evolving', {
@@ -515,21 +521,24 @@ test('an updated plugin runs the code that is on disk, not the code it was loade
 
   write('1.0.0', 'old');
   const host = await installedHost(root, { evolving: { enabled: true, approved: true } });
-  const before = await host.action('ask').run('', { status() {}, log() {} });
-  assert.equal(before.summary, 'old');
+  assert.equal((await host.action('ask').run('', { status() {}, log() {} })).summary, 'old');
+  assert.equal(host.list().find((plugin) => plugin.id === 'evolving').stale, false);
 
   write('1.0.1', 'new');
   await host.refresh();
 
-  const after = await host.action('ask').run('', { status() {}, log() {} });
-  assert.equal(after.summary, 'new', 'the update was installed but the old module kept running');
-  assert.equal(host.list().find((plugin) => plugin.id === 'evolving').version, '1.0.1');
+  const entry = host.list().find((plugin) => plugin.id === 'evolving');
+  // The manifest is re-read, so the row shows what is installed…
+  assert.equal(entry.version, '1.0.1');
+  // …and admits that it is not what is running.
+  assert.equal(entry.stale, true, 'a replaced plugin must not claim to be the version on disk');
+  assert.equal((await host.action('ask').run('', { status() {}, log() {} })).summary, 'old');
 });
 
-test('switching a plugin off and on again does not reload it', async () => {
-  // The counterpart to the test above: every distinct import URL stays in the
-  // loader's registry for the life of the process, so a fresh instance per
-  // toggle would be a slow leak. An unchanged file must reuse its module.
+test('switching a plugin off and on again is not an update', async () => {
+  // The counterpart to the test above: nothing changed on disk, so nothing may
+  // be reported as changed. A toggle that marked a plugin stale would send
+  // people restarting the app for no reason at all.
   const root = mkdtempSync(join(tmpdir(), 'wl-toggle-'));
   install(root, 'counted', {
     manifest: { actions: ['count'] },
@@ -548,6 +557,7 @@ test('switching a plugin off and on again does not reload it', async () => {
 
   const second = await host.action('count').run('', { status() {}, log() {} });
   assert.equal(second.summary, first.summary, 'an unchanged plugin was imported twice');
+  assert.equal(host.list().find((plugin) => plugin.id === 'counted').stale, false);
 });
 
 test('a plugin cannot claim an action type a built-in already provides', async () => {

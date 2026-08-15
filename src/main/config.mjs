@@ -61,6 +61,8 @@ export const DEFAULTS = {
   pluginRegistry: '',
   /** `<plugin-id>/<theme-id>`, or empty for the app's own amber. */
   theme: '',
+  /** `<plugin-id>/<language-tag>`, or empty for the English the app ships in. */
+  locale: '',
 
   /** Audio output, shared by whichever plugin is driving it. */
   audioVolume: 0.8,

@@ -28,8 +28,10 @@ const state = {
   update: { state: 'idle' },
   /** What is installed, what the registry offers, and what is on the bar. */
   plugins: [],
+  models: [],
   store: { plugins: [], error: '', fetched: false },
   themes: [],
+  locales: [],
   audio: { source: null },
 };
 
@@ -373,6 +375,9 @@ async function refreshVault() {
   const list = $('vault-list');
   list.replaceChildren();
   refreshPartials();
+  // Same data, two places: the rail lists them with their placement, the bar
+  // above the transcript just says which one answers.
+  paintModelPicker(models, llm);
 
   if (models.length === 0) {
     list.append(el('div', 'muted', 'No models yet — search above, or [ OPEN FILE… ] to use one you already have.'));
@@ -643,6 +648,99 @@ function paintBrowser(browser) {
   engine.className = `stat ${browser.engine ? '' : 'warn'}`;
 }
 
+/* ============================ the model picker ============================ */
+
+function setModelMenu(open) {
+  const menu = $('model-menu');
+  menu.hidden = !open;
+  $('model-current').setAttribute('aria-expanded', String(open));
+}
+
+/**
+ * Which model answers, chosen where the answering happens.
+ *
+ * The vault in the left rail was the only way to load one, and that rail is
+ * closed on a narrow window and scrolled past on a tall one — so the answer to
+ * "why is it not replying" lived somewhere the person asking was not looking.
+ *
+ * An empty vault opens the search instead of showing an empty menu: there is
+ * exactly one useful thing to do next, and a list with nothing in it does not
+ * say what it is.
+ */
+function paintModelPicker(models = [], llm = {}) {
+  state.models = models;
+  const menu = $('model-menu');
+  menu.replaceChildren();
+
+  const ready = llm.state === 'ready' && llm.model;
+  const current = models.find((model) => (model.external ? model.path : model.name) === llm.model);
+  $('model-current-label').textContent = ready
+    ? current?.name ?? llm.model
+    : llm.state === 'loading'
+      ? 'loading…'
+      : models.length === 0
+        ? '— no model —'
+        : '— pick a model —';
+  $('model-current').classList.toggle('loaded', Boolean(ready));
+
+  if (models.length === 0) {
+    const find = el('div', 'chat-row');
+    const open = el('button', 'chat-pick', 'Find a model to download…');
+    open.addEventListener('click', () => {
+      setModelMenu(false);
+      openModelSearch();
+    });
+    find.append(open);
+    menu.append(find);
+    return;
+  }
+
+  for (const model of models) {
+    const key = model.external ? model.path : model.name;
+    const loaded = llm.model === key && llm.state === 'ready';
+
+    const row = el('div', `chat-row${loaded ? ' current' : ''}`);
+    const pick = el('button', 'chat-pick', `${loaded ? '▶ ' : ''}${model.name}${model.missing ? ' · missing' : ''}`);
+    pick.title = model.external ? `${model.path}\n(outside the vault)` : model.path;
+    pick.disabled = Boolean(model.missing);
+    pick.addEventListener('click', async () => {
+      setModelMenu(false);
+      if (loaded) return;
+      status(`Loading ${model.name}…`);
+      try {
+        await api.llm.load(key);
+      } catch (err) {
+        status(err.message);
+        activity(err.message, 'bad');
+      }
+      await refreshVault();
+    });
+    row.append(pick);
+    menu.append(row);
+  }
+
+  const more = el('div', 'chat-row');
+  const search = el('button', 'chat-pick', '+ find another model…');
+  search.addEventListener('click', () => {
+    setModelMenu(false);
+    openModelSearch();
+  });
+  more.append(search);
+  menu.append(more);
+}
+
+/** Open the rail on the search, and put the cursor where typing belongs. */
+function openModelSearch() {
+  const section = $('section-find');
+  section.open = true;
+  if (!state.settings.leftPanelOpen) {
+    $('workspace').classList.remove('panel-hidden');
+    saveSetting({ leftPanelOpen: true });
+  }
+  section.scrollIntoView({ block: 'nearest' });
+  $('model-search').focus();
+}
+
 /* ============================ plugins ============================ */
 
 /** A plugin's icon, or a glyph standing in for one that has none. */
@@ -774,14 +872,20 @@ function paintPlugins(list = []) {
     // The approval note outranks "switched on, but not running": both are true
     // of a plugin waiting to be allowed, and only one of them says what to do
     // about it.
+    // "Updated" outranks the rest: the row already shows the new version, and
+    // without this line the only visible difference between installed and
+    // running is behaviour nobody can attribute.
     const note = plugin.error
       ? plugin.error
-      : awaitingApproval
-        ? 'runs code from outside the app — nothing of it has been loaded yet'
-        : plugin.enabled && !plugin.active
-          ? 'switched on, but not running'
-          : '';
+      : plugin.stale
+        ? `updated on disk — restart Wasteland Next to run ${plugin.version}`
+        : awaitingApproval
+          ? 'runs code from outside the app — nothing of it has been loaded yet'
+          : plugin.enabled && !plugin.active
+            ? 'switched on, but not running'
+            : '';
     if (note) row.append(el('div', 'plugin-note', note));
+    row.classList.toggle('stale', Boolean(plugin.stale));
 
     // An update is offered rather than applied: it is the same code path as a
     // fresh install, and installing something the user did not ask for is what
@@ -919,7 +1023,7 @@ async function installPlugin(entry, button) {
   try {
     const installed = await api.plugins.install(entry);
     activity(`plugin installed: ${installed.name} ${installed.version}`);
-    await Promise.all([refreshPlugins(), refreshThemes()]);
+    await Promise.all([refreshPlugins(), refreshThemes(), refreshLocales()]);
     paintStore();
   } catch (err) {
     $('store-status').textContent = err.message;
@@ -989,6 +1093,129 @@ async function refreshStore({ quiet = false } = {}) {
   paintStore();
   // The installed rows carry the update button, so they are repainted too.
   paintPlugins(state.plugins);
+}
+
+/* ============================ language ============================ */
+
+/**
+ * Translation, keyed by the English text itself.
+ *
+ * A language pack is `{"LOCAL VAULT": "ЛОКАЛЬНЕ СХОВИЩЕ"}` and nothing else —
+ * no key names to invent, no markers to scatter through the markup, and a
+ * missing entry falls back to the English that is already on screen. Adding a
+ * language is translating a list of phrases, which is the whole point.
+ *
+ * The originals are captured once, before anything is replaced, because they
+ * are the keys: translate in place without remembering them and switching back
+ * to English becomes impossible, and switching to a second language would be
+ * looking up Ukrainian in a Ukrainian dictionary.
+ */
+let dictionary = {};
+/** `{node|element, kind, original}` — every piece of static text on the page. */
+let translatable = null;
+
+function captureTranslatable() {
+  if (translatable) return translatable;
+  translatable = [];
+
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      // Script and style contents are not prose, and neither is whitespace.
+      const tag = node.parentElement?.tagName;
+      if (tag === 'SCRIPT' || tag === 'STYLE') return NodeFilter.FILTER_REJECT;
+      return node.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    },
+  });
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    translatable.push({ node, kind: 'text', original: node.nodeValue });
+  }
+
+  // The parts a user reads that are not text nodes.
+  for (const element of document.querySelectorAll('[title], [placeholder]')) {
+    for (const kind of ['title', 'placeholder']) {
+      const original = element.getAttribute(kind);
+      if (original?.trim()) translatable.push({ node: element, kind, original });
+    }
+  }
+  return translatable;
+}
+
+/** Look a string up, falling back to the string. */
+function t(text) {
+  const key = String(text ?? '');
+  return dictionary[key] ?? dictionary[key.trim()] ?? key;
+}
+
+/**
+ * Repaint every static string on the page.
+ *
+ * Whitespace around a text node is preserved and only the trimmed middle is
+ * looked up: the markup indents, and a dictionary written by a translator
+ * should not have to contain the indentation.
+ */
+function applyDictionary() {
+  for (const item of captureTranslatable()) {
+    const trimmed = item.original.trim();
+    const replacement = dictionary[trimmed];
+    const next = replacement === undefined ? item.original : item.original.replace(trimmed, replacement);
+    if (item.kind === 'text') item.node.nodeValue = next;
+    else item.node.setAttribute(item.kind, next);
+  }
+}
+
+async function applyLocale(key) {
+  const locale = state.locales.find((item) => item.key === key);
+  if (!locale) {
+    dictionary = {};
+    applyDictionary();
+    return;
+  }
+  try {
+    // Over the plugin scheme, which is why `connect-src` names it. A pack that
+    // will not parse leaves the interface in English rather than half-translated.
+    const response = await fetch(locale.url);
+    const loaded = await response.json();
+    dictionary = loaded && typeof loaded === 'object' ? loaded : {};
+  } catch (err) {
+    dictionary = {};
+    activity(`could not load ${locale.name} — ${err.message}`, 'bad');
+  }
+  applyDictionary();
+}
+
+function paintLocales(locales = []) {
+  state.locales = locales;
+  const select = $('set-locale');
+  const current = state.settings.locale ?? '';
+
+  select.replaceChildren();
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = 'English — built in';
+  select.append(none);
+
+  for (const locale of locales) {
+    const option = document.createElement('option');
+    option.value = locale.key;
+    option.textContent = `${locale.name} — ${locale.pluginName}`;
+    select.append(option);
+  }
+  if (current && !locales.some((locale) => locale.key === current)) {
+    const missing = document.createElement('option');
+    missing.value = current;
+    missing.textContent = `${current} — unavailable`;
+    select.append(missing);
+  }
+  select.value = current;
+  applyLocale(current);
+}
+
+async function refreshLocales() {
+  try {
+    paintLocales(await api.plugins.locales());
+  } catch {
+    /* English is always there to fall back to */
+  }
 }
 
 /* ============================ themes ============================ */
@@ -1628,6 +1855,7 @@ function handleEvent(payload) {
       // Themes ride along: switching a theme pack off has to take its entry out
       // of the picker, and the two facts arrive from the same place.
       paintThemes(payload.themes ?? []);
+      paintLocales(payload.locales ?? []);
       break;
 
     case 'plugins:progress':
@@ -1772,6 +2000,16 @@ function wire() {
     if (event.key === 'Escape') setChatMenu(false);
   });
 
+  $('model-current').addEventListener('click', (event) => {
+    event.stopPropagation();
+    setModelMenu($('model-menu').hidden);
+  });
+  $('model-menu').addEventListener('click', (event) => event.stopPropagation());
+  document.addEventListener('click', () => setModelMenu(false));
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') setModelMenu(false);
+  });
+
   $('btn-delete-chat').addEventListener('click', async () => {
     if (!state.chatId) return;
     if (state.streaming) return status('A turn is running — stop it before deleting a conversation.');
@@ -1889,6 +2127,11 @@ function wire() {
     if (event.target.open) refreshStore();
   });
 
+  $('set-locale').addEventListener('change', async (event) => {
+    await applyLocale(event.target.value);
+    await saveSetting({ locale: event.target.value });
+  });
+
   $('set-theme').addEventListener('change', async (event) => {
     // Applied first, saved after: a stylesheet swap should feel instant, and
     // the write is a round trip.
@@ -1929,13 +2172,15 @@ async function boot() {
   paintPlugins(snapshot.plugins ?? []);
   // After `applySettings`, which is where the chosen theme comes from.
   paintThemes(snapshot.themes ?? []);
+  // After the originals are on screen: the dictionary is keyed by them.
+  paintLocales(snapshot.locales ?? []);
   paintPlayer(snapshot.audio ?? { source: null });
 
   // Attachments outlive a reload — they live in the main process — so the row
   // is painted from what is actually pending, not assumed empty.
   paintAttachments(await api.attach.list());
 
-  await Promise.all([refreshVault(), refreshChats(), refreshTool(), refreshPlugins(), refreshThemes()]);
+  await Promise.all([refreshVault(), refreshChats(), refreshTool(), refreshPlugins(), refreshThemes(), refreshLocales()]);
 
   if (!snapshot.engine) activity('manul-browser engine not built — run `npm run engine` for browser control.', 'bad');
   status('Ready');

@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld('wasteland', {
     pickFolder: (id, key) => call('plugins:pickFolder', id, key),
     choose: (type, choiceId) => call('plugins:choose', type, choiceId),
     themes: () => call('plugins:themes'),
+    locales: () => call('plugins:locales'),
     available: () => call('plugins:available'),
     install: (entry) => call('plugins:install', entry),
     uninstall: (id) => call('plugins:uninstall', id),
