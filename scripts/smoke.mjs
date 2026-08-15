@@ -462,9 +462,9 @@ async function checkPlugins(window) {
     }))()`);
 
   const start = await read();
-  // Four built-ins plus the theme pack the runner installed.
-  check(`every plugin is listed — ${start.rows.length}`, start.rows.length === 5, JSON.stringify(start.rows.map((r) => r.name)));
-  check(`the section says how many are running — ${start.status}`, /\d+ of \d+ active/.test(start.status), start.status);
+  // Four built-ins, the theme pack, and the code plugin awaiting approval.
+  check(`every plugin is listed — ${start.rows.length}`, start.rows.length === 6, JSON.stringify(start.rows.map((r) => r.name)));
+  check(`the section says how many are running — ${start.status}`, /^4 of 6 active$/.test(start.status), start.status);
 
   const browser = start.rows.find((row) => row.name === 'Browser control');
   const shell = start.rows.find((row) => row.name === 'Shell commands');
@@ -496,7 +496,7 @@ async function checkPlugins(window) {
   // Asserted against the number, not merely against "it changed": the first
   // version of this check passed because the handler blanked the status line it
   // had just written, and an empty string is different from anything.
-  check(`and in the count — ${off.status}`, /^3 of 5 active$/.test(off.status), `${start.status} → ${off.status}`);
+  check(`and in the count — ${off.status}`, /^3 of 6 active$/.test(off.status), `${start.status} → ${off.status}`);
 
   // The state must survive a round trip through the main process, not merely
   // live in the checkbox that was clicked.
@@ -515,6 +515,9 @@ async function checkPlugins(window) {
   })()`);
   // Painted from the event, not from a click — nothing was clicked this time.
   check('an enable from elsewhere repaints the row', back.checked === true && back.off === false, JSON.stringify(back));
+
+  await checkApproval(window);
+  await checkChoices(window);
 
   // The registry, pointed at a closed port by the runner. A boot that cannot
   // reach it must be silent — the update badges are worth a background fetch,
@@ -610,6 +613,125 @@ function silentWav(samples) {
   header.writeUInt32LE(samples, 40);
   // 8-bit PCM is unsigned, so silence is 128 rather than 0.
   return Buffer.concat([header, Buffer.alloc(samples, 128)]);
+}
+
+/**
+ * Allowing a plugin that brings code.
+ *
+ * This is the path that failed on a real machine: the plugin was installed, its
+ * settings were filled in, its checkbox looked ticked — and the host had never
+ * imported a line of it, because nothing had approved it. The model then said,
+ * accurately, that it had no audio plugin. Every part of that is invisible from
+ * the unit tests, which can see the state but not what the row shows about it.
+ */
+async function checkApproval(window) {
+  const read = () =>
+    window.webContents.executeJavaScript(`(() => {
+      const row = [...document.querySelectorAll('#plugin-list .plugin-item')]
+        .find((r) => r.querySelector('.plugin-name').textContent === 'Smoke code');
+      if (!row) return null;
+      const button = [...row.querySelectorAll('.plugin-buttons button')]
+        .find((b) => b.textContent.includes('ALLOW'));
+      return {
+        checked: row.querySelector('input[type=checkbox]').checked,
+        boxDisabled: row.querySelector('input[type=checkbox]').disabled,
+        off: row.classList.contains('off'),
+        note: row.querySelector('.plugin-note')?.textContent ?? '',
+        allow: Boolean(button),
+      };
+    })()`);
+
+  const before = await read();
+  check('a plugin bringing code is listed', Boolean(before), 'no row for it');
+  if (!before) return;
+
+  check('it is not running before it is allowed', before.checked === false && before.off === true, JSON.stringify(before));
+  // The checkbox cannot start it, so it must not look as though it could.
+  check('and its checkbox does not pretend to be the control', before.boxDisabled === true, JSON.stringify(before));
+  check(`the row says what allowing it means — "${before.note}"`, /runs code from outside the app/.test(before.note), before.note);
+  check('there is a control that can actually start it', before.allow === true, JSON.stringify(before));
+
+  await window.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('#plugin-list .plugin-item')]
+      .find((r) => r.querySelector('.plugin-name').textContent === 'Smoke code');
+    [...row.querySelectorAll('.plugin-buttons button')].find((b) => b.textContent.includes('ALLOW')).click();
+  })()`);
+  await new Promise((r) => setTimeout(r, 600));
+
+  const after = await read();
+  check('allowing it starts it', after.checked === true && after.off === false, JSON.stringify(after));
+  check('and the checkbox becomes the control from then on', after.boxDisabled === false, JSON.stringify(after));
+  check('with nothing left to explain', after.note === '' && after.allow === false, JSON.stringify(after));
+
+  // The point of all of it: the model is now told the action exists.
+  const known = await window.webContents.executeJavaScript(
+    `window.wasteland.plugins.list().then((list) => list.find((p) => p.id === 'smoke-code')?.active === true)`,
+  );
+  check('the main process agrees it is running', known === true);
+}
+
+/**
+ * Options an action put in the transcript, and a click on one.
+ *
+ * The event is synthetic — there is no model here to emit an action — but
+ * everything after it is real: the renderer draws the buttons, the click goes
+ * out over IPC, and the plugin's own `choose` answers it. What this catches is
+ * a list that renders and does nothing, which looks identical to one that works
+ * until somebody presses it.
+ */
+async function checkChoices(window) {
+  window.webContents.send('event', {
+    event: 'action:result',
+    type: 'smoke_ping',
+    ok: true,
+    summary: '2 possible matches',
+    choices: [
+      { id: 'first', label: 'First option', note: 'an artist · an album' },
+      { id: 'second', label: 'Second option', note: 'another one' },
+    ],
+  });
+  await new Promise((r) => setTimeout(r, 300));
+
+  const drawn = await window.webContents.executeJavaScript(`(() => {
+    const box = [...document.querySelectorAll('#chat-log .action-card .choices')].pop();
+    if (!box) return null;
+    return {
+      count: box.querySelectorAll('button.choice').length,
+      labels: [...box.querySelectorAll('.choice-label')].map((n) => n.textContent),
+      notes: [...box.querySelectorAll('.choice-note')].map((n) => n.textContent),
+      chosen: box.querySelectorAll('button.choice.chosen').length,
+    };
+  })()`);
+  check('choices are drawn as buttons under the result', drawn?.count === 2, JSON.stringify(drawn));
+  check(`each one carries its own second line — ${drawn?.notes.join(' | ')}`, drawn?.notes.length === 2);
+  check('none is marked as taken before anything is pressed', drawn?.chosen === 0);
+
+  // The second one is what the fixture's `choose` accepts; the first is not.
+  const taken = await window.webContents.executeJavaScript(`(async () => {
+    const box = [...document.querySelectorAll('#chat-log .action-card .choices')].pop();
+    [...box.querySelectorAll('button.choice')][1].click();
+    await new Promise((r) => setTimeout(r, 500));
+    return {
+      chosen: [...box.querySelectorAll('button.choice')].map((b) => b.classList.contains('chosen')),
+      status: document.getElementById('status-line').textContent,
+    };
+  })()`);
+  check('pressing one marks it, and only it', JSON.stringify(taken.chosen) === '[false,true]', JSON.stringify(taken));
+
+  const refused = await window.webContents.executeJavaScript(`(async () => {
+    const box = [...document.querySelectorAll('#chat-log .action-card .choices')].pop();
+    [...box.querySelectorAll('button.choice')][0].click();
+    await new Promise((r) => setTimeout(r, 500));
+    return {
+      status: document.getElementById('status-line').textContent,
+      chosen: [...box.querySelectorAll('button.choice')].map((b) => b.classList.contains('chosen')),
+      enabled: [...box.querySelectorAll('button.choice')].every((b) => !b.disabled),
+    };
+  })()`);
+  // A plugin that refuses a choice must say so rather than leave a dead button.
+  check(`a refused choice is reported — "${refused.status}"`, /no longer the current one/.test(refused.status), refused.status);
+  check('and the mark stays where it was', JSON.stringify(refused.chosen) === '[false,true]', JSON.stringify(refused));
+  check('with every option still clickable', refused.enabled === true);
 }
 
 /**
@@ -786,6 +908,41 @@ app.whenReady().then(async () => {
       }),
     );
     writeFileSync(join(themeDir, 'themes', 'green.css'), ':root { --amber: #33ff33; }\n');
+
+    // A plugin that brings code, and therefore has to be allowed before it runs.
+    // Installed but never approved is the state a real machine was found in:
+    // enabled true, approved false, a ticked checkbox beside a plugin the host
+    // had never imported, and no control left to correct it.
+    const codeDir = join(pluginsDir(), 'smoke-code');
+    mkdirSync(codeDir, { recursive: true });
+    writeFileSync(
+      join(codeDir, 'plugin.json'),
+      JSON.stringify({
+        id: 'smoke-code',
+        name: 'Smoke code',
+        version: '1.0.0',
+        apiVersion: 2,
+        description: 'Registers one action, for the smoke test.',
+        main: 'main.mjs',
+        actions: ['smoke_ping'],
+      }),
+    );
+    writeFileSync(
+      join(codeDir, 'main.mjs'),
+      `export function activate(ctx) {
+         ctx.prompt('PING — {"type":"smoke_ping","steps":""}');
+         ctx.action({
+           type: 'smoke_ping',
+           run: async () => ({ ok: true, summary: 'pong' }),
+           // Answers a click that arrives long after the turn has ended, and
+           // refuses one from a list it no longer considers current.
+           choose: async (id) => {
+             if (id !== 'second') throw new Error('that list is no longer the current one');
+             return { ok: true, summary: id };
+           },
+         });
+       }\n`,
+    );
 
     // One second of silence, so the media scheme has something real to serve.
     // A missing file would exercise the error path instead, which is not the

@@ -373,13 +373,26 @@ export class PluginHost extends EventEmitter {
         return service;
       },
 
-      /** Register an action type the model may emit. */
-      action({ type, run }) {
+      /**
+       * Register an action type the model may emit.
+       *
+       * `choose` is optional and is what makes an answer interactive: a `run`
+       * that returns `choices` has them drawn as buttons under its result, and
+       * clicking one calls `choose`. It exists because the alternative — the
+       * model guessing which of five near-identical matches was meant, or the
+       * user retyping a file name — is worse at both ends. A click arrives long
+       * after the turn has finished, so `choose` gets no abort signal: it is a
+       * user action, like pressing the player's next button.
+       */
+      action({ type, run, choose }) {
         if (!manifest.actions.includes(type)) {
           throw new Error(`action "${type}" was not declared in the manifest`);
         }
         if (typeof run !== 'function') throw new Error(`action "${type}" has no run()`);
-        contributions.actions.push({ type, run });
+        if (choose !== undefined && typeof choose !== 'function') {
+          throw new Error(`action "${type}" has a choose that is not a function`);
+        }
+        contributions.actions.push({ type, run, choose });
       },
 
       /** The slice of the system prompt that documents those actions. */
@@ -474,6 +487,20 @@ export class PluginHost extends EventEmitter {
       }
     }
     return parts.filter(Boolean).join('\n\n');
+  }
+
+  /**
+   * The user clicked one of the choices an action offered.
+   *
+   * Outside any turn, by definition — the reply finished long before. The
+   * handler is given a context with the two things that still make sense, and
+   * the answer it returns is what the status line says.
+   */
+  async choose(type, choiceId, { status = () => {}, log = () => {} } = {}) {
+    const handler = this.#actions.get(type);
+    if (!handler) throw new Error('that choice belongs to a plugin that is no longer running');
+    if (!handler.choose) throw new Error(`${handler.pluginName} does not take choices`);
+    return handler.choose(String(choiceId ?? ''), { status, log });
   }
 
   /** Run the per-turn hooks. A throwing plugin must not stop the turn. */

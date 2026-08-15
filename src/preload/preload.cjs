@@ -72,6 +72,7 @@ contextBridge.exposeInMainWorld('wasteland', {
     setEnabled: (id, enabled) => call('plugins:setEnabled', id, enabled),
     setSetting: (id, key, value) => call('plugins:setSetting', id, key, value),
     pickFolder: (id, key) => call('plugins:pickFolder', id, key),
+    choose: (type, choiceId) => call('plugins:choose', type, choiceId),
     themes: () => call('plugins:themes'),
     available: () => call('plugins:available'),
     install: (entry) => call('plugins:install', entry),

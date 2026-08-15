@@ -339,6 +339,20 @@ export function registerIpc(windowGetter) {
   handle('plugins:setSetting', (id, key, value) => plugins.setSetting(id, key, value));
 
   /**
+   * A click on one of the options an action put in the transcript.
+   *
+   * Routed by action type rather than by plugin id, because the type is what
+   * the result event already carries and what identifies the handler — and a
+   * type can only be claimed by one plugin at a time.
+   */
+  handle('plugins:choose', (type, choiceId) =>
+    plugins.choose(type, choiceId, {
+      status: (text) => send('status', { text }),
+      log: (text) => send('log', { text }),
+    }),
+  );
+
+  /**
    * A folder setting, picked through the native dialog.
    *
    * Opened here because only the main process can, and parented to the window

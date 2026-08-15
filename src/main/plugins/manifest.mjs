@@ -17,7 +17,7 @@
  * function. Bumped only when the shape of `activate(ctx)` changes in a way a
  * plugin can notice.
  */
-export const PLUGIN_API_VERSION = 2;
+export const PLUGIN_API_VERSION = 3;
 
 /**
  * Services a plugin may ask the host for.
@@ -204,14 +204,20 @@ export function mergeEnablement(stored, manifests, settings = {}) {
   const next = { ...(stored ?? {}) };
   for (const manifest of manifests) {
     const existing = next[manifest.id];
+    const approved = manifest.builtin ? true : Boolean(existing?.approved);
     next[manifest.id] = {
       // Spread first: a plugin's own settings live in here too, and rebuilding
       // the record field by field would empty them on every boot.
       ...existing,
-      enabled: existing?.enabled ?? enabledByLegacy(manifest, settings),
+      // A plugin that has not been allowed to run cannot default to on. It
+      // did, and the result was a ticked checkbox beside a plugin the host
+      // never imported — "installed" reading as "running", with nothing left to
+      // click to make it true, because the box was already ticked. Installing
+      // is not switching on.
+      enabled: existing?.enabled ?? (needsApproval(manifest) && !approved ? false : enabledByLegacy(manifest, settings)),
       // A built-in ships inside the signed application; anything else has to be
       // approved by the person whose machine is about to run it.
-      approved: manifest.builtin ? true : Boolean(existing?.approved),
+      approved,
     };
   }
   return next;

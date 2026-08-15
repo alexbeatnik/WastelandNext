@@ -564,6 +564,48 @@ input[type='checkbox']:checked {
   font-size: 0.78em;
 }
 
+/* ============================ Choices in the transcript ============================ */
+
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.35rem;
+}
+
+/* A row, not a chip: a track title needs the width, and a column of full-width
+   rows is a list you read down rather than a wrapped bag of buttons. */
+button.choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.05rem;
+  width: 100%;
+  text-align: left;
+  white-space: normal;
+  padding: 0.25rem 0.4rem;
+}
+
+.choice-label {
+  overflow-wrap: anywhere;
+}
+
+.choice-note {
+  color: var(--amber-dim);
+  font-size: 0.78em;
+}
+
+/* What was taken, kept visible: the list stays as a record of the offer. */
+button.choice.chosen {
+  border-color: var(--amber);
+  background: var(--btn-bg-hover);
+}
+
+button.choice.chosen .choice-label::before {
+  content: '▶ ';
+  color: var(--amber-bright);
+}
+
 /* ============================ Player ============================ */
 
 .player {

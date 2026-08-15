@@ -733,10 +733,19 @@ function paintPlugins(list = []) {
     row.classList.toggle('off', !plugin.active);
     row.classList.toggle('failed', Boolean(plugin.error));
 
+    // Approval is a gate, not a setting: until it is given the checkbox cannot
+    // take effect, so it neither claims to nor invites a click that does
+    // nothing. It reads `active` rather than `enabled` here for the same
+    // reason — an installed plugin arrived with `enabled` already true, and a
+    // ticked box beside something the host never imported is a lie with no
+    // control left to correct it.
+    const awaitingApproval = plugin.needsApproval && !plugin.approved;
+
     const label = el('label', 'check');
     const box = document.createElement('input');
     box.type = 'checkbox';
-    box.checked = plugin.enabled;
+    box.checked = awaitingApproval ? plugin.active : plugin.enabled;
+    box.disabled = awaitingApproval;
     box.addEventListener('change', async () => {
       box.disabled = true;
       try {
@@ -762,12 +771,15 @@ function paintPlugins(list = []) {
     if (adds.length) row.append(el('div', 'plugin-adds muted', adds.join('  ')));
     if (plugin.settings?.length) row.append(settingControls(plugin));
 
+    // The approval note outranks "switched on, but not running": both are true
+    // of a plugin waiting to be allowed, and only one of them says what to do
+    // about it.
     const note = plugin.error
       ? plugin.error
-      : plugin.enabled && !plugin.active
-        ? 'switched on, but not running'
-        : plugin.needsApproval && !plugin.approved
-          ? 'runs code from outside the app — switching it on allows that'
+      : awaitingApproval
+        ? 'runs code from outside the app — nothing of it has been loaded yet'
+        : plugin.enabled && !plugin.active
+          ? 'switched on, but not running'
           : '';
     if (note) row.append(el('div', 'plugin-note', note));
 
@@ -776,6 +788,25 @@ function paintPlugins(list = []) {
     // the approval step exists to prevent.
     const published = state.store.plugins.find((entry) => entry.id === plugin.id);
     const buttons = el('div', 'plugin-buttons');
+
+    // The one control that can start a plugin nobody has allowed yet. It exists
+    // as a button rather than as the checkbox because the checkbox may already
+    // be ticked — an installed plugin is recorded as enabled — and there is no
+    // way to click a box into a state it is already in.
+    if (awaitingApproval) {
+      const allow = el('button', '', '[ ALLOW AND RUN ]');
+      allow.title = 'Run this plugin’s code, now and on every start';
+      allow.addEventListener('click', async () => {
+        allow.disabled = true;
+        try {
+          paintPlugins(await api.plugins.setEnabled(plugin.id, true));
+        } catch (err) {
+          $('plugin-status').textContent = err.message;
+          allow.disabled = false;
+        }
+      });
+      buttons.append(allow);
+    }
     if (published && published.compatible && isNewerVersion(published.version, plugin.version)) {
       const update = el('button', '', `[ UPDATE → ${published.version} ]`);
       update.addEventListener('click', () => installPlugin(published, update));
@@ -836,6 +867,47 @@ async function refreshPlugins() {
   } catch (err) {
     $('plugin-status').textContent = err.message;
   }
+}
+
+/**
+ * The options an action offered, as things to click.
+ *
+ * A model asked to pick between five near-identical files guesses, and asking
+ * the user to retype a file name is worse. The plugin says what the options
+ * are; the app only draws them and reports which was pressed.
+ *
+ * The list stays in the transcript after a choice, with the chosen row marked:
+ * it is a record of what was offered and what was taken, and a list that
+ * vanished would leave the reply above it referring to nothing. Choosing again
+ * is allowed — hearing the wrong track is exactly when someone reaches for the
+ * next one.
+ */
+function choiceList(type, choices) {
+  const box = el('div', 'choices');
+
+  for (const choice of choices) {
+    const button = el('button', 'choice');
+    button.append(el('span', 'choice-label', choice.label ?? String(choice.id)));
+    if (choice.note) button.append(el('span', 'choice-note', choice.note));
+    button.title = choice.title ?? '';
+
+    button.addEventListener('click', async () => {
+      const wasChosen = box.querySelector('.choice.chosen');
+      button.disabled = true;
+      try {
+        await api.plugins.choose(type, choice.id);
+        if (wasChosen) wasChosen.classList.remove('chosen');
+        button.classList.add('chosen');
+      } catch (err) {
+        status(err.message);
+        activity(err.message, 'bad');
+      } finally {
+        button.disabled = false;
+      }
+    });
+    box.append(button);
+  }
+  return box;
 }
 
 /* ============================ the registry ============================ */
@@ -1475,6 +1547,7 @@ function handleEvent(payload) {
       const card = el('div', `action-card${payload.ok ? '' : ' failed'}`);
       card.append(el('span', 'kind', `${payload.ok ? '✓' : '✗'} ${payload.type}`));
       if (payload.summary) card.append(el('pre', '', payload.summary));
+      if (payload.choices?.length) card.append(choiceList(payload.type, payload.choices));
       $('chat-log').append(card);
       activity(`${payload.type} → ${payload.summary ?? ''}`, payload.ok ? 'ok' : 'bad');
       scrollChat();

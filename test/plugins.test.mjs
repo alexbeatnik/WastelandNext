@@ -128,8 +128,33 @@ test('rediscovery never overrules what the user chose', () => {
 });
 
 test('an installed plugin is never approved by being discovered', () => {
-  const merged = mergeEnablement({}, [{ id: 'music', legacy: [], enabledByDefault: true, builtin: false }], {});
+  const merged = mergeEnablement({}, [{ id: 'music', legacy: [], enabledByDefault: true, builtin: false, main: 'main.mjs' }], {});
   assert.equal(merged.music.approved, false);
+});
+
+test('a plugin that has not been allowed to run does not default to on', () => {
+  // Reported: audio-player sat at {enabled: true, approved: false} — a ticked
+  // checkbox beside a plugin the host had never imported, with nothing left to
+  // click, because the box was already in the state a click would produce. The
+  // model duly answered "I do not have access to external audio plugins", which
+  // was true. Installing is not switching on.
+  const merged = mergeEnablement({}, [{ id: 'music', legacy: [], enabledByDefault: true, builtin: false, main: 'main.mjs' }], {});
+  assert.equal(merged.music.enabled, false);
+
+  // A theme pack has no code to allow, so it is on as soon as it is there.
+  const theme = mergeEnablement({}, [{ id: 'looks', legacy: [], enabledByDefault: true, builtin: false, main: '' }], {});
+  assert.equal(theme.looks.enabled, true);
+
+  // Built-ins are approved by shipping inside the app and keep their defaults.
+  const builtin = mergeEnablement({}, [{ ...BROWSER_MANIFEST, builtin: true, main: '' }], {});
+  assert.equal(builtin['browser-control'].enabled, true);
+});
+
+test('an already-approved plugin keeps its default, and a recorded choice wins', () => {
+  const manifest = { id: 'music', legacy: [], enabledByDefault: true, builtin: false, main: 'main.mjs' };
+  assert.equal(mergeEnablement({ music: { approved: true } }, [manifest], {}).music.enabled, true);
+  // Whatever the user last chose is never overruled by rediscovery.
+  assert.equal(mergeEnablement({ music: { enabled: false, approved: true } }, [manifest], {}).music.enabled, false);
 });
 
 test('mergeEnablement does not edit the map it was given', () => {
@@ -402,6 +427,28 @@ test('an installed plugin is listed, and does not run until it is allowed', asyn
   assert.equal(entry.builtin, false);
   assert.ok(allowed.action('tick'));
   assert.match(promptFor(allowed), /"type":"tick"/);
+});
+
+test('a config left enabled-but-unapproved can still be started', async () => {
+  // The state a previous build wrote, and the one on the machine that reported
+  // this. It must remain recoverable: `setEnabled(id, true)` on a plugin that
+  // is *already* enabled has to mean "allow it", not "nothing to do".
+  const root = mkdtempSync(join(tmpdir(), 'wl-stuck-'));
+  install(root, 'stranded', {
+    manifest: { actions: ['ping'] },
+    source: `export function activate(ctx) { ctx.action({ type: 'ping', run: async () => ({ ok: true }) }); }`,
+  });
+
+  const host = await installedHost(root, { stranded: { enabled: true, approved: false } });
+  const before = host.list().find((plugin) => plugin.id === 'stranded');
+  assert.equal(before.enabled, true);
+  assert.equal(before.active, false, 'unapproved code must not run');
+  // The renderer keys its ALLOW button on exactly this pair.
+  assert.equal(before.needsApproval && !before.approved, true);
+
+  await host.setEnabled('stranded', true);
+  assert.ok(host.action('ping'), 'allowing it must actually start it');
+  assert.equal(host.list().find((plugin) => plugin.id === 'stranded').active, true);
 });
 
 test('switching an installed plugin on from the list is the consent', async () => {
@@ -864,11 +911,19 @@ test('the player finds music, queues it and drives the bar', { skip: !havePlugin
   await host.load();
 
   const turn = { status() {}, log() {}, signal: undefined };
-  const played = await host.action('play_music').run('pink moon', turn);
+
+  // Both tracks live in a folder called Pink Moon, so the query is ambiguous
+  // and the answer is the list rather than a guess.
+  const ambiguous = await host.action('play_music').run('pink moon', turn);
+  assert.equal(ambiguous.choices?.length, 2, JSON.stringify(ambiguous));
+  assert.equal(audio.loaded.length, 0, 'nothing plays while the question is open');
+
+  // A title only one file carries resolves straight to it. The cover art is
+  // not a track and never appears.
+  const played = await host.action('play_music').run('place to be', turn);
   assert.equal(played.ok, true, played.feedback);
-  // The cover art is not a track.
-  assert.match(played.feedback, /1 track\(s\) queued|2 track\(s\) queued/);
-  assert.equal(audio.loaded.at(-1).label, 'Pink Moon');
+  assert.equal(played.choices, undefined, JSON.stringify(played));
+  assert.equal(audio.loaded.at(-1).label, 'Place To Be');
   // The plugin writes the second line, and the album comes from the folder.
   assert.match(audio.loaded.at(-1).sublabel, /Pink Moon · 1 of/);
 
@@ -892,6 +947,82 @@ test('the player finds music, queues it and drives the bar', { skip: !havePlugin
   const paused = await host.action('music_control').run('pause', turn);
   assert.equal(paused.ok, true);
   assert.equal(audio.playing, false);
+});
+
+test('near-matches are offered rather than guessed between', { skip: !havePlugins }, async () => {
+  // Reported: "Elderly woman pearl jam" found only the live recording, because
+  // that file happened to carry the band in its name while the album cut did
+  // not — both sitting under a folder called Pearl Jam. And when two versions
+  // do match, picking one is not the model's call to make.
+  const library = mkdtempSync(join(tmpdir(), 'wl-choice-'));
+  mkdirSync(join(library, 'Pearl Jam', 'Vs'), { recursive: true });
+  mkdirSync(join(library, 'Pearl Jam', 'Live'), { recursive: true });
+  writeFileSync(join(library, 'Pearl Jam', 'Vs', '009 - Elderly Woman Behind the Counter in a Small Town.mp3'), 'x');
+  writeFileSync(
+    join(library, 'Pearl Jam', 'Live', 'Pearl Jam - Elderly Woman Behind The Counter In A Small Town (Live).mp3'),
+    'x',
+  );
+
+  const audio = stubAudio();
+  config.update({ plugins: { 'audio-player': { enabled: true, approved: true, settings: { library } } } });
+  const host = new PluginHost({ userDir: pluginsCheckout, services: { audio } });
+  await host.load();
+  const turn = { status() {}, log() {}, signal: undefined };
+
+  // The artist comes from the folder, so the album cut is reachable by band.
+  const offered = await host.action('play_music').run('elderly woman pearl jam', turn);
+  assert.equal(offered.choices?.length, 2, JSON.stringify(offered));
+  assert.equal(audio.loaded.length, 0, 'nothing may start playing while the question is open');
+  assert.match(offered.feedback, /do not choose\s+for them/i);
+  assert.ok(offered.choices.every((choice) => /Pearl Jam/.test(choice.note)), JSON.stringify(offered.choices));
+
+  // The click, arriving after the turn is long over.
+  const picked = await host.choose('play_music', offered.choices[1].id);
+  assert.equal(picked.ok, true);
+  assert.equal(audio.loaded.at(-1).label, offered.choices[1].label);
+  // The rest of the offer is queued behind it rather than thrown away.
+  assert.match(audio.loaded.at(-1).sublabel, /1 of 2/);
+
+  // A pasted file name — track number, extension and all — must still resolve.
+  const pasted = await host
+    .action('play_music')
+    .run('009 - Elderly Woman Behind the Counter in a Small Town.mp3', turn);
+  assert.notEqual(pasted.ok, false, JSON.stringify(pasted));
+
+  // That search replaced the list, and the first one's buttons are still on
+  // screen. With a bare index they would quietly pick from the newer list and
+  // play something nobody was shown.
+  await assert.rejects(() => host.choose('play_music', offered.choices[0].id), /no longer the current one/);
+  await assert.rejects(() => host.choose('play_music', 'nonsense'), /no longer the current one/);
+});
+
+test('a playlist is gathered without asking which one', { skip: !havePlugins }, async () => {
+  // The other half of the same request: asking which of forty tracks was meant
+  // is the wrong question when somebody asked for all forty.
+  const library = mkdtempSync(join(tmpdir(), 'wl-playlist-'));
+  mkdirSync(join(library, 'Pearl Jam', 'Ten'), { recursive: true });
+  for (const name of ['01 Once.mp3', '02 Even Flow.mp3', '03 Alive.mp3', '04 Black.mp3']) {
+    writeFileSync(join(library, 'Pearl Jam', 'Ten', name), 'x');
+  }
+
+  const audio = stubAudio();
+  config.update({ plugins: { 'audio-player': { enabled: true, approved: true, settings: { library } } } });
+  const host = new PluginHost({ userDir: pluginsCheckout, services: { audio } });
+  await host.load();
+  const turn = { status() {}, log() {}, signal: undefined };
+
+  const queued = await host.action('queue_music').run('pearl jam', turn);
+  assert.equal(queued.ok, true, queued.feedback);
+  assert.equal(queued.choices, undefined, 'a playlist is not a question');
+  assert.match(audio.loaded.at(-1).sublabel, /of 4/);
+  assert.doesNotMatch(audio.loaded.at(-1).sublabel, /shuffled/);
+
+  const shuffled = await host.action('queue_music').run('pearl jam | shuffle', turn);
+  assert.match(shuffled.summary, /shuffled/);
+  assert.match(audio.loaded.at(-1).sublabel, /shuffled/);
+
+  const missing = await host.action('queue_music').run('nobody has this', turn);
+  assert.equal(missing.ok, false);
 });
 
 test('the player says so rather than throwing when no folder is set', { skip: !havePlugins }, async () => {
