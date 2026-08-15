@@ -1254,6 +1254,14 @@ async function installPlugin(entry, button) {
     activity(`plugin installed: ${installed.name} ${installed.version}`);
     await Promise.all([refreshPlugins(), refreshThemes(), refreshLocales()]);
     paintStore();
+    // Say what happens next, where the click happened. An install that ends in
+    // silence reads as an install that finished — and for anything with code,
+    // it has not: nothing of it runs until it is allowed to.
+    $('store-status').textContent = installed.restartRequired
+      ? `${installed.name} ${installed.version} installed — restart to run it`
+      : installed.kind === 'code'
+        ? `${installed.name} installed — press ALLOW AND RUN to start it`
+        : `${installed.name} ${installed.version} installed`;
   } catch (err) {
     $('store-status').textContent = err.message;
     activity(`plugin install failed: ${err.message}`, 'bad');
@@ -1297,6 +1305,34 @@ function paintStore() {
       const update = el('button', '', `[ UPDATE → ${entry.version} ]`);
       update.addEventListener('click', () => installPlugin(entry, update));
       buttons.append(update);
+    } else if (installed.needsApproval && !installed.approved) {
+      /**
+       * Installed, and doing nothing at all.
+       *
+       * The row that says "installed (1.0.0)" and stops is where this section
+       * has now lost two people: installing is not switching on, the control
+       * that switches it on is in a different section further up, and nothing
+       * here said so. Reported as "I added it and there is no button" — which
+       * was exactly true.
+       *
+       * So the same control appears here, where the person actually is. It is
+       * still one deliberate press, and it still says what it means.
+       */
+      row.append(el('div', 'plugin-note', 'installed, but not running — it needs your permission to execute'));
+      const allow = el('button', '', '[ ALLOW AND RUN ]');
+      allow.title = 'Run this plugin’s code, now and on every start';
+      allow.addEventListener('click', async () => {
+        allow.disabled = true;
+        try {
+          paintPlugins(await api.plugins.setEnabled(entry.id, true));
+          paintStore();
+          status(`${entry.name} is running. Its settings are in PLUGINS, above.`);
+        } catch (err) {
+          $('store-status').textContent = err.message;
+          allow.disabled = false;
+        }
+      });
+      buttons.append(allow);
     } else {
       row.append(el('div', 'plugin-note', `installed (${installed.version})`));
     }

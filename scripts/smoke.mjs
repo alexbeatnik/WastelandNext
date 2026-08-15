@@ -11,6 +11,7 @@ import { app, BrowserWindow } from 'electron';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { setDataRoot, pluginStateDir, pluginsDir } from '../src/main/paths.mjs';
 import { registerSchemes } from '../src/main/plugins/protocol.mjs';
@@ -535,6 +536,14 @@ async function checkPlugins(window) {
   say('');
   say('Plugins');
 
+  // Read first, before anything in this run has touched the section. The
+  // registry points at a closed port, and a boot that cannot reach it must be
+  // silent: the update badges are worth a background fetch, an error about a
+  // list nobody asked to see is not. Pressing REFRESH is asking, and that
+  // failure is said out loud further down.
+  const quiet = await window.webContents.executeJavaScript(`document.getElementById('store-status').textContent`);
+  check(`an unreachable registry is quiet at boot — "${quiet}"`, quiet === '', quiet);
+
   const read = () =>
     window.webContents.executeJavaScript(`(() => ({
       rows: [...document.querySelectorAll('#plugin-list .plugin-item')].map((row) => ({
@@ -602,15 +611,12 @@ async function checkPlugins(window) {
   // Painted from the event, not from a click — nothing was clicked this time.
   check('an enable from elsewhere repaints the row', back.checked === true && back.off === false, JSON.stringify(back));
 
+  // Before `checkApproval`, which is what approves the code plugin: this checks
+  // the state it is in *before* that, which is the state a real machine was
+  // found in twice.
+  await checkStoreApproval(window);
   await checkApproval(window);
   await checkChoices(window);
-
-  // The registry, pointed at a closed port by the runner. A boot that cannot
-  // reach it must be silent — the update badges are worth a background fetch,
-  // an error about a list nobody asked to see is not — but pressing REFRESH is
-  // asking, and then the failure has to be said out loud.
-  const quiet = await window.webContents.executeJavaScript(`document.getElementById('store-status').textContent`);
-  check(`an unreachable registry is quiet at boot — "${quiet}"`, quiet === '', quiet);
 
   await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
   await new Promise((r) => setTimeout(r, 1500));
@@ -622,6 +628,86 @@ async function checkPlugins(window) {
   check('and lists nothing rather than something stale', asked.rows === 0, `${asked.rows} row(s)`);
 
   await checkRegistries(window);
+}
+
+/**
+ * A registry that actually answers, on loopback.
+ *
+ * Every other registry check in this run points at a closed port, because what
+ * they are checking is the failure. This one exists because the *success* path
+ * has its own failure mode, and it is the one that has now caught two people
+ * out: a plugin installs, its row says "installed (1.0.0)", and nothing runs —
+ * because installing is not switching on and the control that does it was in a
+ * different section entirely.
+ */
+function startRegistry(entries) {
+  return new Promise((resolve) => {
+    const server = createServer((request, response) => {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ schema: 1, updated: '2026-08-15', plugins: entries }));
+    });
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
+  });
+}
+
+/**
+ * What the registry row says about something installed that is not running.
+ *
+ * Run before the code plugin has been approved, which is the state a machine
+ * was found in twice: enabled false, approved false, and a row that mentioned
+ * neither.
+ */
+async function checkStoreApproval(window) {
+  const { server, port } = await startRegistry([
+    {
+      id: 'smoke-code',
+      name: 'Smoke code',
+      version: '1.0.0',
+      description: 'Registers one action, for the smoke test.',
+      author: 'the smoke runner',
+      apiVersion: 4,
+      kind: 'code',
+      url: 'https://example.test/smoke-code-1.0.0.zip',
+      sha256: 'a'.repeat(64),
+      size: 1024,
+    },
+  ]);
+
+  try {
+    await window.webContents.executeJavaScript(
+      `window.wasteland.plugins.addRegistry('http://127.0.0.1:${port}/index.json')`,
+    );
+    await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
+    await new Promise((r) => setTimeout(r, 1500));
+
+    const row = await window.webContents.executeJavaScript(`(() => {
+      const item = [...document.querySelectorAll('#store-list .plugin-item')]
+        .find((node) => node.querySelector('.plugin-name')?.textContent === 'Smoke code');
+      if (!item) return null;
+      return {
+        note: item.querySelector('.plugin-note')?.textContent ?? '',
+        buttons: [...item.querySelectorAll('.plugin-buttons button')].map((b) => b.textContent),
+        source: item.querySelector('.plugin-adds')?.textContent ?? '',
+      };
+    })()`);
+
+    check('a reachable registry lists what it published', Boolean(row), 'no row for the published plugin');
+    if (row) {
+      check(`the row says it came from elsewhere — ${row.source}`, /from 127\.0\.0\.1/.test(row.source), row.source);
+      // The two halves of the failure that was reported: the row claimed to be
+      // installed and said nothing about needing permission, and there was no
+      // control here to give it.
+      check(`an installed plugin that is not running says so — "${row.note}"`, /needs your permission/.test(row.note), row.note);
+      check('and the control that starts it is on that row', row.buttons.some((text) => text.includes('ALLOW AND RUN')), JSON.stringify(row.buttons));
+    }
+
+    await window.webContents.executeJavaScript(
+      `window.wasteland.plugins.removeRegistry('http://127.0.0.1:${port}/index.json')`,
+    );
+    await window.webContents.executeJavaScript(`window.wasteland.plugins.available().catch(() => {})`);
+  } finally {
+    server.close();
+  }
 }
 
 /**

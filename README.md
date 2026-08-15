@@ -141,7 +141,11 @@ files does not replace what is running; the row says so, and the version shown i
 to defeat the cache by importing the entry point under a unique query made it worse — the query is not inherited by the
 plugin's own imports, so a new entry point linked against cached dependencies and failed outright.
 
-Writing one is documented in the [registry's README](https://github.com/alexbeatnik/wasteland-plugins#writing-one).
+**Writing one is documented in full in [docs/PLUGIN-API.md](docs/PLUGIN-API.md)** — the manifest, every method on
+`ctx`, all five services, the rules that are not negotiable, and a checklist. It is written to be followed straight
+through by a person or by an agent. The
+[registry repository](https://github.com/alexbeatnik/wasteland-plugins) holds the published plugins and how to publish
+one.
 
 ## Requirements
 
