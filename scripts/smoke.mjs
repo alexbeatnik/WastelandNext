@@ -574,6 +574,15 @@ async function checkPlugins(window) {
   const theme = start.rows.find((row) => row.name === 'Smoke theme');
   check('an installed theme pack is active without being approved', theme?.checked === true && theme?.off === false, JSON.stringify(theme));
   check('and it says which theme it adds', /theme: Green/.test(theme?.adds ?? ''), theme?.adds);
+  // Languages were missing from this line entirely, so a language pack's row
+  // gave its name, its version and no hint whatever that it contributed a
+  // language — installed, working, and indistinguishable from a plugin that
+  // does nothing.
+  check('and which language', /language: Smokish/.test(theme?.adds ?? ''), theme?.adds);
+  // A pack does nothing by being installed: it appears in a picker, and the
+  // picker is in a collapsed section further down. Reported as "the language
+  // plugin is installed and there is no language choice anywhere".
+  check(`and where to go to use it — "${theme?.note}"`, /pick it in INTERFACE/.test(theme?.note ?? ''), theme?.note);
 
   // Switch one off through the checkbox, exactly as a user would.
   await window.webContents.executeJavaScript(`(() => {
@@ -1132,6 +1141,69 @@ async function checkThemes(window) {
 }
 
 /**
+ * The language picker.
+ *
+ * It had none of this, and a theme picker sitting beside it that had all of it —
+ * which is how a language pack came to be installed, enabled, correct on the
+ * main-process side and completely absent from the screen, with nothing failing
+ * anywhere. The dictionary is fetched over the plugin scheme like a stylesheet,
+ * so `connect-src` is in this too; the assertion is on text actually changing,
+ * because everything short of that can be true while the window is unchanged.
+ */
+async function checkLanguages(window) {
+  say('');
+  say('Languages');
+
+  const offered = await window.webContents.executeJavaScript(`(() => {
+    const select = document.getElementById('set-locale');
+    return {
+      options: [...select.options].map((option) => option.value),
+      labels: [...select.options].map((option) => option.textContent),
+      value: select.value,
+    };
+  })()`);
+  check(
+    `the picker lists the installed language — ${offered.labels.join(' | ')}`,
+    offered.options.includes('smoke-theme/xx'),
+    JSON.stringify(offered),
+  );
+  check('and starts on the English it ships in', offered.value === '', offered.value);
+
+  const before = await window.webContents.executeJavaScript(
+    `document.querySelector('.activity-head').textContent`,
+  );
+
+  await window.webContents.executeJavaScript(`(() => {
+    const select = document.getElementById('set-locale');
+    select.value = 'smoke-theme/xx';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  // A real fetch over wasteland-plugin://, so this is not instant.
+  await new Promise((r) => setTimeout(r, 800));
+
+  const applied = await window.webContents.executeJavaScript(`(() => ({
+    heading: document.querySelector('.activity-head').textContent,
+    send: document.getElementById('btn-send').title,
+  }))()`);
+  check(`the interface is actually translated — ${before} → ${applied.heading}`, applied.heading === 'SMOKE-LOG', JSON.stringify(applied));
+  // A `title` is text a user reads too, and it is captured separately from the
+  // text nodes — one working while the other does not is entirely possible.
+  check(`an attribute is translated as well — ${applied.send}`, applied.send === 'SMOKE-SEND', applied.send);
+
+  // Back to English, so everything below reads the shipped strings.
+  await window.webContents.executeJavaScript(`(() => {
+    const select = document.getElementById('set-locale');
+    select.value = '';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await new Promise((r) => setTimeout(r, 400));
+  const restored = await window.webContents.executeJavaScript(
+    `document.querySelector('.activity-head').textContent`,
+  );
+  check('choosing English puts the original text back', restored === before, `${before} → ${restored}`);
+}
+
+/**
  * The player bar, driven the way a plugin drives it.
  *
  * The audio service is poked directly from the main process here because that
@@ -1235,12 +1307,25 @@ app.whenReady().then(async () => {
         id: 'smoke-theme',
         name: 'Smoke theme',
         version: '1.0.0',
-        apiVersion: 2,
+        apiVersion: 3,
         description: 'Two colours, for the smoke test.',
         themes: [{ id: 'green', name: 'Green', file: 'themes/green.css' }],
+        // A language too, so both halves of "data a pack contributes" are
+        // exercised. They were not, and a language pack shipped that was
+        // installed, enabled and correct on the main-process side while being
+        // entirely absent from the screen.
+        locales: [{ id: 'xx', name: 'Smokish', file: 'locales/xx.json' }],
       }),
     );
     writeFileSync(join(themeDir, 'themes', 'green.css'), ':root { --amber: #33ff33; }\n');
+    mkdirSync(join(themeDir, 'locales'), { recursive: true });
+    // Two entries, deliberately of different kinds: a text node and a `title`
+    // attribute are captured separately, and one working while the other does
+    // not is entirely possible.
+    writeFileSync(
+      join(themeDir, 'locales', 'xx.json'),
+      JSON.stringify({ ACTIVITY: 'SMOKE-LOG', Send: 'SMOKE-SEND' }),
+    );
 
     // A plugin that brings code, and therefore has to be allowed before it runs.
     // Installed but never approved is the state a real machine was found in:
@@ -1529,6 +1614,7 @@ app.whenReady().then(async () => {
     await checkMarkdown(window);
     await checkPlugins(window);
     await checkThemes(window);
+    await checkLanguages(window);
     await checkPlayer(window, wavPath);
     await checkChatControls(window);
     await checkAttachments(window);

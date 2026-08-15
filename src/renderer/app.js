@@ -911,7 +911,15 @@ function paintPlugins(list = []) {
     row.append(label, el('span', 'plugin-meta', `${plugin.version} · ${plugin.builtin ? 'BUILT-IN' : 'INSTALLED'}`));
     if (plugin.description) row.append(el('div', 'plugin-desc muted', plugin.description));
 
-    const adds = [...(plugin.actions ?? []), ...(plugin.themes ?? []).map((theme) => `theme: ${theme.name}`)];
+    // Languages belong here as much as themes do. They were missing, so a
+    // language pack's row said its name, its version, and nothing whatever
+    // about what it contributed — installed, working, and indistinguishable
+    // from a plugin that does nothing.
+    const adds = [
+      ...(plugin.actions ?? []),
+      ...(plugin.themes ?? []).map((theme) => `theme: ${theme.name}`),
+      ...(plugin.locales ?? []).map((locale) => `language: ${locale.name}`),
+    ];
     if (adds.length) row.append(el('div', 'plugin-adds muted', adds.join('  ')));
     if (plugin.settings?.length) row.append(settingControls(plugin));
 
@@ -921,6 +929,19 @@ function paintPlugins(list = []) {
     // "Updated" outranks the rest: the row already shows the new version, and
     // without this line the only visible difference between installed and
     // running is behaviour nobody can attribute.
+    /**
+     * A pack whose contribution is switched on but not *chosen*.
+     *
+     * A theme or a language does nothing by being installed: it appears in a
+     * picker, and the picker is in INTERFACE, which is a collapsed section
+     * somewhere else. Reported as "the language plugin is installed and there
+     * is no language choice anywhere" — the row said the plugin was active,
+     * which was true, and never said the one thing left to do.
+     */
+    const offers = [...(plugin.themes ?? []), ...(plugin.locales ?? [])];
+    const chosen = [state.settings.theme, state.settings.locale].filter(Boolean);
+    const unchosen = plugin.active && offers.length > 0 && !offers.some((item) => chosen.includes(`${plugin.id}/${item.id}`));
+
     const note = plugin.error
       ? plugin.error
       : plugin.stale
@@ -929,7 +950,9 @@ function paintPlugins(list = []) {
           ? 'runs code from outside the app — nothing of it has been loaded yet'
           : plugin.enabled && !plugin.active
             ? 'switched on, but not running'
-            : '';
+            : unchosen
+              ? 'ready — pick it in INTERFACE, below'
+              : '';
     if (note) row.append(el('div', 'plugin-note', note));
     row.classList.toggle('stale', Boolean(plugin.stale));
 
