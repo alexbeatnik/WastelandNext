@@ -17,7 +17,7 @@
  * function. Bumped only when the shape of `activate(ctx)` changes in a way a
  * plugin can notice.
  */
-export const PLUGIN_API_VERSION = 4;
+export const PLUGIN_API_VERSION = 5;
 
 /**
  * Services a plugin may ask the host for.
@@ -26,10 +26,10 @@ export const PLUGIN_API_VERSION = 4;
  * is legible from the manifest alone rather than from reading its code. A name
  * that is not on this list is a manifest error, not a runtime `undefined`.
  */
-export const KNOWN_SERVICES = new Set(['browser', 'lookupBrowser', 'audio', 'notify']);
+export const KNOWN_SERVICES = new Set(['browser', 'lookupBrowser', 'audio', 'notify', 'mic']);
 
 /** Setting kinds the plugin row knows how to draw. */
-export const SETTING_TYPES = new Set(['folder', 'text', 'toggle']);
+export const SETTING_TYPES = new Set(['folder', 'text', 'toggle', 'select']);
 
 /**
  * An id becomes a directory name and a key in `config.plugins`, so it is
@@ -151,11 +151,35 @@ export function parseManifest(raw, { builtin = false } = {}) {
     const type = String(entry?.type ?? 'text');
     if (!/^[a-zA-Z][a-zA-Z0-9_]{0,39}$/.test(key)) return { ok: false, reason: `"${key || '(no key)'}" is not a usable setting key` };
     if (!SETTING_TYPES.has(type)) return { ok: false, reason: `setting "${key}" has an unknown type: "${type}"` };
+
+    /**
+     * A `select` is the manifest naming what the choices are.
+     *
+     * It exists because "which of these three models" is a real question a
+     * plugin has to ask and a text box is the wrong way to ask it — the answer
+     * is one of a fixed set the plugin already knows. The options are part of
+     * the manifest rather than something the plugin supplies at runtime, so the
+     * row can be drawn before a line of its code has run, and so what a plugin
+     * may be set to stays readable without reading it.
+     */
+    const options = [];
+    for (const option of Array.isArray(entry?.options) ? entry.options : []) {
+      const value = String(option?.value ?? '').trim();
+      if (!value) return { ok: false, reason: `setting "${key}" has an option with no value` };
+      options.push({ value, label: String(option.label ?? value).trim() || value });
+    }
+    // A picker with nothing to pick is a control that cannot be used, and a
+    // plugin listed as working while offering one is worse than a refusal.
+    if (type === 'select' && options.length === 0) {
+      return { ok: false, reason: `setting "${key}" is a picker with no options` };
+    }
+
     settings.push({
       key,
       type,
       label: String(entry.label ?? key).trim() || key,
       placeholder: String(entry.placeholder ?? ''),
+      options,
     });
   }
 

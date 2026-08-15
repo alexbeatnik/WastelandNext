@@ -53,6 +53,15 @@ export const pluginsDir = () => ensureDir('plugins');
  */
 export const pluginStateDir = () => ensureDir('plugin-state');
 /**
+ * A plugin's own directory for files, as opposed to its one JSON document.
+ *
+ * Outside the plugin's installed directory for the same reason `plugin-state`
+ * is: that tree is deleted and replaced on every update, and a plugin that had
+ * downloaded a 1.5 GB model into it would download it again on every version
+ * bump.
+ */
+export const pluginDataDir = (id) => ensureDir('plugin-data', id);
+/**
  * Somewhere to unpack before moving into place.
  *
  * Inside the data root rather than in the system temporary directory, because

@@ -21,6 +21,7 @@ import { PluginHost } from './plugins/host.mjs';
 import { serveProtocols } from './plugins/protocol.mjs';
 import * as registry from './plugins/registry.mjs';
 import { audio } from './audio.mjs';
+import { mic } from './mic.mjs';
 import { notify } from './notify.mjs';
 import { Agent } from './agent/agent.mjs';
 import { Updater } from './updater.mjs';
@@ -52,7 +53,7 @@ const lookupBrowser = new BrowserBridge();
  * fact readable from a manifest, and what lets the host be tested with a stub
  * browser and no Chrome anywhere.
  */
-const plugins = new PluginHost({ services: { browser, lookupBrowser, audio, notify } });
+const plugins = new PluginHost({ services: { browser, lookupBrowser, audio, notify, mic } });
 const agent = new Agent({ server, plugins });
 
 /**
@@ -94,6 +95,7 @@ function snapshot() {
     themes: plugins.themes(),
     locales: plugins.locales(),
     audio: audio.status(),
+    mic: mic.status(),
     /**
      * Anything said before the window was listening.
      *
@@ -142,7 +144,10 @@ export function registerIpc(windowGetter) {
     send('plugins:changed', { plugins: list, themes: plugins.themes(), locales: plugins.locales() }),
   );
   plugins.on('log', (line) => send('log', { text: line }));
+  // A long job on the plugin's own row, which is where it was started from.
+  plugins.on('progress', (detail) => send('plugins:working', detail));
   audio.on('state', (status) => send('audio:state', status));
+  mic.on('state', (status) => send('mic:state', status));
   notify.on('notice', (notice) => {
     send('notice', { notice });
     if (notice.desktop) showDesktopNotice(notice);
@@ -506,9 +511,11 @@ export function registerIpc(windowGetter) {
     // that cannot work.
     if (entry?.builtin) throw new Error(`${entry.name} ships with the app and cannot be removed`);
     await registry.uninstall(id);
-    // Its own document goes with it. Leaving it behind would mean reinstalling a
-    // plugin brought back reminders the user had removed along with it.
-    plugins.forgetState(id);
+    // Its document and its data directory go with it. Leaving them behind would
+    // mean reinstalling brought back reminders the user removed along with the
+    // plugin — and would leave a gigabyte of speech model with nothing on screen
+    // to explain what it belongs to.
+    plugins.forgetData(id);
     await plugins.refresh();
     return plugins.list();
   });
@@ -526,6 +533,21 @@ export function registerIpc(windowGetter) {
   /** The renderer reporting what only it can know. */
   handle('audio:ended', () => audio.command('ended'));
   handle('audio:failed', (message) => audio.fail(message));
+
+  /* ---------- dictation ---------- */
+
+  handle('mic:status', () => mic.status());
+  /** The stream is open, or shut. Only the renderer holds it, so only it knows. */
+  handle('mic:listening', (on) => mic.setListening(on));
+  /**
+   * A finished recording, as a 16 kHz mono WAV.
+   *
+   * The bytes are the whole of it: the renderer captured and encoded them, and
+   * what comes back is the text. Nothing is stored — `hear` deletes the file it
+   * writes whether the engine succeeded or not.
+   */
+  handle('mic:transcribe', (bytes) => mic.hear(bytes));
+  handle('mic:failed', (message) => mic.fail(message));
 
   /* ---------- browser ---------- */
   handle('browser:status', () => browser.status);

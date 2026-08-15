@@ -833,6 +833,88 @@ async function checkApproval(window) {
   const statePath = join(pluginStateDir(), 'smoke-code.json');
   const kept = existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) : null;
   check('a plugin keeps a document of its own, outside its directory', Number(kept?.starts) >= 1, JSON.stringify(kept));
+
+  // The picker is drawn from the manifest, so it exists before a line of the
+  // plugin's code has run — and a `select` that rendered as a text box would
+  // pass every assertion about the value while being unusable.
+  const picker = await window.webContents.executeJavaScript(`(() => {
+    const row = document.querySelector('#plugin-list .plugin-item[data-plugin="smoke-code"]');
+    const select = row?.querySelector('.plugin-setting select');
+    return {
+      there: Boolean(select),
+      options: select ? [...select.options].map((o) => o.value) : [],
+      chosen: select?.value ?? null,
+    };
+  })()`);
+  check('a picker setting is drawn as one', picker.there === true, JSON.stringify(picker));
+  // The blank leads, because an unset value reading as the first option would
+  // claim a decision nobody made.
+  check(`the choices come from the manifest — ${picker.options.join(',')}`, picker.options.join(',') === ',small,large', JSON.stringify(picker));
+
+  const stored = await window.webContents.executeJavaScript(`(async () => {
+    const list = await window.wasteland.plugins.setSetting('smoke-code', 'size', 'large');
+    let refused = '';
+    try { await window.wasteland.plugins.setSetting('smoke-code', 'size', 'enormous'); }
+    catch (err) { refused = err.message; }
+    return { value: list.find((p) => p.id === 'smoke-code').settings[0].value, refused };
+  })()`);
+  check('choosing one stores it', stored.value === 'large', JSON.stringify(stored));
+  check('and a value it never offered is refused', /not one of the choices/.test(stored.refused), stored.refused);
+}
+
+/**
+ * Dictation, without a microphone.
+ *
+ * Nothing here records anything — an offscreen window has no device and no
+ * permission — but everything on either side of the recording is real: the
+ * button appears because a plugin registered a transcriber, the bytes cross IPC,
+ * the plugin answers, and the words land in the composer. That is the seam worth
+ * checking; whisper.cpp is the plugin's business and is tested there.
+ */
+async function checkDictation(window) {
+  say('');
+  say('Dictation');
+
+  // The reported status comes along so a mismatch names both halves: the button
+  // once said "Dictate" while the main process reported the right label the
+  // whole time, and only having both told us which side was wrong.
+  const button = await window.webContents.executeJavaScript(`(async () => {
+    const node = document.getElementById('btn-mic');
+    return {
+      display: getComputedStyle(node).display,
+      glyph: node.textContent,
+      title: node.title,
+      reported: await window.wasteland.mic.status(),
+    };
+  })()`);
+  // Asserted on the computed style, never on the attribute: `hidden` is only
+  // the UA rule, and this button carries an author-level `display` that outranks
+  // it — the drop veil shipped visible for exactly this reason.
+  check('the microphone is offered once a plugin can hear', button.display !== 'none', JSON.stringify(button));
+  check(`and it says whose ears they are — ${button.title}`, /Smoke ears/.test(button.title), JSON.stringify(button));
+
+  // A WAV that is not a recording of anything: the stub answers regardless, and
+  // what is under test is that the bytes reach it and the words come back.
+  const heard = await window.webContents.executeJavaScript(`(async () => {
+    const bytes = new Uint8Array(1024);
+    const text = await window.wasteland.mic.transcribe(bytes.buffer);
+    const input = document.getElementById('input');
+    input.value = '';
+    return { text };
+  })()`);
+  check(`a recording comes back as words — "${heard.text}"`, heard.text === 'open the browser', JSON.stringify(heard));
+
+  // Switching the plugin off has to take the button with it, or the control
+  // outlives the only thing that could answer it.
+  await window.webContents.executeJavaScript(`window.wasteland.plugins.setEnabled('smoke-code', false)`);
+  await new Promise((r) => setTimeout(r, 500));
+  const gone = await window.webContents.executeJavaScript(
+    `getComputedStyle(document.getElementById('btn-mic')).display`,
+  );
+  check('switching the plugin off takes the button away', gone === 'none', gone);
+
+  await window.webContents.executeJavaScript(`window.wasteland.plugins.setEnabled('smoke-code', true)`);
+  await new Promise((r) => setTimeout(r, 500));
 }
 
 /**
@@ -1092,13 +1174,25 @@ app.whenReady().then(async () => {
         actions: ['smoke_ping'],
         // Asked for, so the whole chain is exercised from a manifest: declared
         // here, handed over by name, and used to put something on screen.
-        services: ['notify'],
+        services: ['notify', 'mic'],
+        settings: [
+          { key: 'size', type: 'select', label: 'Size', options: [{ value: 'small', label: 'Small' }, { value: 'large', label: 'Large' }] },
+        ],
       }),
     );
     writeFileSync(
       join(codeDir, 'main.mjs'),
       `export function activate(ctx) {
          const notify = ctx.service('notify');
+         // Dictation, with no microphone anywhere near it: the app captures and
+         // encodes, a plugin turns the bytes into words, and this one has the
+         // words ready. It is the seam that is being checked, not whisper.
+         ctx.service('mic').setTranscriber({
+           pluginId: ctx.id,
+           label: 'Smoke ears',
+           ready: true,
+           transcribe: async () => 'open the browser',
+         });
          // A plugin's own document: undeclared, unread by the app, and the only
          // place a count like this can live across a restart. Touched during
          // activation so that a store which cannot be written fails the row
@@ -1353,6 +1447,7 @@ app.whenReady().then(async () => {
     await checkChatControls(window);
     await checkAttachments(window);
     await checkNotices(window);
+    await checkDictation(window);
     await checkContextControls(window);
     await checkLayouts(window);
   } catch (err) {

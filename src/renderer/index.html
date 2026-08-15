@@ -276,6 +276,10 @@
           <textarea id="input" rows="2" placeholder="Ask, or tell it what to open…  (Enter sends · Shift+Enter newline)"></textarea>
           <div class="composer-buttons">
             <button id="btn-expand" class="ghost" title="Expand the composer">⤡</button>
+            <!-- Drawn only when a plugin has a working transcriber: a
+                 microphone that records into nothing is a dead control, and
+                 getting a model is done on that plugin's own row. -->
+            <button id="btn-mic" class="mic" title="Dictate" hidden>●</button>
             <button id="btn-send" class="send" title="Send">▶</button>
           </div>
         </div>

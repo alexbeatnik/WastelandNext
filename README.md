@@ -104,6 +104,13 @@ one that plays a single notification sound does not inherit a next button it can
 and pressing one calls back into the plugin. It is what stops a model picking blindly between five near-identical
 files, and what stops the alternative — asking someone to retype a file name.
 
+**A plugin can listen.** The `mic` service is the mirror of `audio`: the app owns the microphone button beside Send,
+the recording and the encoding to 16 kHz mono, because `getUserMedia` only exists in the window and no plugin runs code
+there — and a plugin owns turning the sound into words. The button appears only once something can actually
+transcribe, dictated text lands in the composer rather than being sent, and the recording is deleted the moment it has
+been read, whether or not the engine worked. The [voice input](https://github.com/alexbeatnik/wasteland-plugins)
+plugin runs whisper.cpp locally: pick small, medium or large, it is downloaded once, and no audio leaves the machine.
+
 **A plugin can say something without being asked.** Everything else in the transcript is an answer to something you
 typed; a reminder coming due is not. The `notify` service puts a card in the transcript *and* raises an operating
 system notification, because neither is enough alone — the first is invisible to somebody in another window, the second

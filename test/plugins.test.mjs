@@ -1274,3 +1274,155 @@ test('a time the plugin cannot read sets nothing and says what it takes', { skip
   assert.equal(empty.ok, false);
   assert.match(empty.feedback, /nothing to remind/i);
 });
+
+/* ============================ pickers, progress, a directory ============================ */
+
+test('a select names its choices in the manifest, and refuses an empty one', () => {
+  // The options are in the manifest so the row can be drawn before a line of the
+  // plugin's code has run — and so what a plugin may be set to stays readable
+  // without reading it.
+  const good = parseManifest({
+    ...GOOD,
+    settings: [{ key: 'model', type: 'select', label: 'Model', options: [{ value: 'small', label: 'Small' }, { value: 'large' }] }],
+  });
+  assert.equal(good.ok, true, good.reason);
+  assert.deepEqual(good.manifest.settings[0].options, [
+    { value: 'small', label: 'Small' },
+    // A missing label falls back to the value, which is always something.
+    { value: 'large', label: 'large' },
+  ]);
+
+  // A picker with nothing to pick is a control that cannot be used, and a
+  // plugin listed as working while offering one is worse than a refusal.
+  assert.equal(parseManifest({ ...GOOD, settings: [{ key: 'model', type: 'select' }] }).ok, false);
+  assert.match(
+    parseManifest({ ...GOOD, settings: [{ key: 'model', type: 'select', options: [{ label: 'no value' }] }] }).reason,
+    /option with no value/,
+  );
+});
+
+test('mic is a service a manifest can ask for', () => {
+  assert.ok(KNOWN_SERVICES.has('mic'));
+  assert.equal(parseManifest({ ...GOOD, services: ['mic'] }).ok, true);
+});
+
+test('a picker can only be set to something it offered', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-select-'));
+  install(root, 'picky', {
+    manifest: {
+      actions: [],
+      settings: [{ key: 'size', type: 'select', label: 'Size', options: [{ value: 'small' }, { value: 'large' }] }],
+    },
+    source: `export function activate() {}`,
+  });
+  const host = await installedHost(root, { picky: { enabled: true, approved: true } });
+
+  await host.setSetting('picky', 'size', 'large');
+  assert.equal(host.list().find((p) => p.id === 'picky').settings[0].value, 'large');
+
+  // Anything else is a row displaying a state the plugin has no code for, and
+  // the plugin reading it back would be entitled to assume otherwise.
+  await assert.rejects(() => host.setSetting('picky', 'size', 'enormous'), /not one of the choices/);
+});
+
+test('a plugin reports a long job on its own row, and gets a directory of its own', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-progress-'));
+  install(root, 'fetcher', {
+    manifest: { actions: ['fetch_it'] },
+    source: `export function activate(ctx) {
+      ctx.action({ type: 'fetch_it', run: async () => {
+        ctx.progress('fetching something', { received: 5, total: 10 });
+        ctx.progress('');
+        return { ok: true, summary: ctx.dataDir() };
+      } });
+    }`,
+  });
+
+  const host = await installedHost(root, { fetcher: { enabled: true, approved: true } });
+  const seen = [];
+  host.on('progress', (detail) => seen.push(detail));
+
+  const result = await host.action('fetch_it').run('', { status() {}, log() {} });
+  assert.deepEqual(seen, [
+    { id: 'fetcher', text: 'fetching something', received: 5, total: 10 },
+    // An empty text is what takes the line away, so a finished job stops
+    // claiming to be running.
+    { id: 'fetcher', text: '', received: 0, total: 0 },
+  ]);
+
+  // Outside the plugin's installed tree, which is deleted and replaced on every
+  // update — a model downloaded into that tree would be downloaded again on
+  // every version bump.
+  assert.ok(existsSync(result.summary));
+  assert.equal(result.summary.startsWith(root), false, result.summary);
+});
+
+test('uninstalling takes the plugin’s document and its files with it', async () => {
+  const { pluginDataDir } = await import('../src/main/paths.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'wl-forget-all-'));
+  install(root, 'hoarder', {
+    manifest: { actions: [] },
+    source: `export function activate(ctx) { ctx.state.set({ kept: true }); ctx.dataDir(); }`,
+  });
+  const host = await installedHost(root, { hoarder: { enabled: true, approved: true } });
+
+  const dir = pluginDataDir('hoarder');
+  writeFileSync(join(dir, 'model.bin'), 'pretend this is 1.5 GB');
+  assert.ok(existsSync(join(dir, 'model.bin')));
+
+  host.forgetData('hoarder');
+  // A gigabyte of speech model outliving the plugin it belongs to is the
+  // largest thing in the data directory with nothing on screen to explain it.
+  assert.equal(existsSync(join(dir, 'model.bin')), false);
+});
+
+/* ============================ the voice input plugin ============================ */
+
+/** A mic service that records what it was told rather than opening anything. */
+function stubMic() {
+  return {
+    transcriber: null,
+    setTranscriber(transcriber) {
+      this.transcriber = transcriber;
+    },
+    setReady(pluginId, ready) {
+      if (this.transcriber?.pluginId === pluginId) this.transcriber.ready = ready;
+    },
+    releasePlugin() {
+      this.transcriber = null;
+    },
+  };
+}
+
+const haveVoice = existsSync(join(pluginsCheckout, 'voice-input', 'plugin.json'));
+
+test('voice input drives the button and tells the model nothing', { skip: !haveVoice }, async () => {
+  const mic = stubMic();
+  // Built-ins off, so what is left in the prompt is this plugin's or nothing.
+  const plugins = { 'voice-input': { enabled: true, approved: true, settings: {} } };
+  for (const id of ALL_BUILTINS) plugins[id] = { enabled: false, approved: true };
+  config.update({ plugins });
+
+  const host = new PluginHost({ userDir: pluginsCheckout, services: { mic } });
+  await host.load();
+
+  const row = host.list().find((plugin) => plugin.id === 'voice-input');
+  assert.equal(row.active, true, row.error);
+  assert.equal(mic.transcriber?.pluginId, 'voice-input');
+
+  // No model chosen, so the button must not be drawn: a microphone that records
+  // into nothing is a dead control, and the row is where a model is obtained.
+  assert.equal(mic.transcriber.ready, false);
+
+  // The one that is easy to get wrong. Nothing the model can do changes —
+  // dictated text arrives in the composer exactly as if it had been typed — so
+  // telling it about a microphone it cannot operate would spend context on a
+  // fact it can never act on, and invite it to offer to "listen".
+  assert.deepEqual(host.promptFragments(), []);
+  assert.deepEqual(row.actions, []);
+
+  // The picker is drawn from the manifest, before any of its code has run.
+  const models = row.settings.find((setting) => setting.key === 'model');
+  assert.equal(models.type, 'select');
+  assert.deepEqual(models.options.map((option) => option.value), ['small', 'medium', 'large']);
+});

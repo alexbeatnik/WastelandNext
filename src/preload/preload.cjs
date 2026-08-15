@@ -85,6 +85,14 @@ contextBridge.exposeInMainWorld('wasteland', {
     removeRegistry: (url) => call('plugins:removeRegistry', url),
   },
 
+  mic: {
+    status: () => call('mic:status'),
+    listening: (on) => call('mic:listening', on),
+    /** A 16 kHz mono WAV, in; the words, out. Nothing is kept on either side. */
+    transcribe: (bytes) => call('mic:transcribe', bytes),
+    failed: (message) => call('mic:failed', message),
+  },
+
   audio: {
     status: () => call('audio:status'),
     command: (name) => call('audio:command', name),

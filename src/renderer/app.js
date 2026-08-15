@@ -37,6 +37,10 @@ const state = {
   themes: [],
   locales: [],
   audio: { source: null },
+  /** Whether anything can transcribe, and whether it is doing so right now. */
+  mic: { available: false, listening: false, working: false },
+  /** `id → {text, received, total}` for a plugin that is fetching something. */
+  pluginProgress: {},
   /**
    * Notices already drawn, by id.
    *
@@ -804,6 +808,28 @@ function settingControls(plugin) {
         }
       });
       row.append(value, pick);
+    } else if (setting.type === 'select') {
+      // The manifest names the choices, so the control can be drawn before a
+      // line of the plugin's code has run — and what a plugin may be set to
+      // stays readable without reading it.
+      const select = document.createElement('select');
+      for (const option of setting.options ?? []) {
+        const node = document.createElement('option');
+        node.value = option.value;
+        node.textContent = option.label;
+        select.append(node);
+      }
+      // An empty stored value shows as nothing chosen rather than silently
+      // reading as the first option, which would claim a decision nobody made.
+      if (!setting.value) {
+        const blank = document.createElement('option');
+        blank.value = '';
+        blank.textContent = '— not chosen —';
+        select.prepend(blank);
+      }
+      select.value = setting.value ?? '';
+      select.addEventListener('change', () => saveSetting$(plugin.id, setting.key, select.value));
+      row.append(select);
     } else {
       const input = document.createElement('input');
       input.type = 'text';
@@ -845,6 +871,9 @@ function paintPlugins(list = []) {
 
   for (const plugin of list) {
     const row = el('div', 'plugin-item');
+    // How a progress line finds its way back to the right row after the list
+    // has been repainted out from under it.
+    row.dataset.plugin = plugin.id;
     row.classList.toggle('off', !plugin.active);
     row.classList.toggle('failed', Boolean(plugin.error));
 
@@ -949,12 +978,57 @@ function paintPlugins(list = []) {
       buttons.append(remove);
     }
     if (buttons.childElementCount) row.append(buttons);
+    // Redrawn from state rather than left in the DOM: this function replaces
+    // every row, and a download that lost its meter because a setting was saved
+    // mid-fetch would look like a download that had stopped.
+    drawProgress(row, state.pluginProgress[plugin.id]);
 
     host.append(row);
   }
 
   const active = list.filter((plugin) => plugin.active).length;
   $('plugin-status').textContent = list.length ? `${active} of ${list.length} active` : 'No plugins found.';
+}
+
+/**
+ * A long job on a plugin's own row.
+ *
+ * The activity log is the wrong place for a 1.5 GB download: it scrolls, the
+ * narrow layout hides that column entirely, and a percentage that has to be
+ * hunted for is one nobody watches. This draws where the thing being waited for
+ * was started — under the setting that started it.
+ */
+function drawProgress(row, detail) {
+  const existing = row.querySelector('.plugin-progress');
+  if (!detail?.text) {
+    existing?.remove();
+    return;
+  }
+
+  const box = existing ?? el('div', 'plugin-progress');
+  box.replaceChildren();
+  const percent = detail.total ? Math.min(100, (detail.received / detail.total) * 100) : 0;
+  box.append(el('div', 'muted', detail.total ? `${detail.text} — ${percent.toFixed(0)}%` : detail.text));
+
+  if (detail.total) {
+    const meter = el('div', 'meter');
+    const bar = document.createElement('i');
+    bar.style.width = `${percent}%`;
+    meter.append(bar);
+    box.append(meter);
+  }
+  if (!existing) row.append(box);
+}
+
+function paintPluginProgress(detail = {}) {
+  if (!detail.id) return;
+  // Held in state, not only in the DOM: `paintPlugins` rebuilds every row, and
+  // it runs for reasons that have nothing to do with the download.
+  if (detail.text) state.pluginProgress[detail.id] = detail;
+  else delete state.pluginProgress[detail.id];
+
+  const row = $('plugin-list').querySelector(`.plugin-item[data-plugin="${CSS.escape(detail.id)}"]`);
+  if (row) drawProgress(row, state.pluginProgress[detail.id]);
 }
 
 /**
@@ -1341,11 +1415,30 @@ function t(text) {
  */
 function applyDictionary() {
   for (const item of captureTranslatable()) {
+    const current = item.kind === 'text' ? item.node.nodeValue : item.node.getAttribute(item.kind);
+
+    /**
+     * Anything the app has since rewritten is no longer ours.
+     *
+     * This walks markup captured at boot, and some of that markup is written to
+     * later by code — the microphone button's tooltip gains the name of
+     * whichever plugin is listening, the status line says what is happening.
+     * Writing the captured original back over those is not a translation, it is
+     * an erasure: the button spent a run saying "Dictate" instead of
+     * "Dictate — Whisper small", with the main process reporting the right
+     * answer the whole time.
+     *
+     * A node is skipped when what it holds is neither the string captured nor
+     * the one last written here. Both are ours; anything else has an owner.
+     */
+    if (current !== item.original && current !== item.applied) continue;
+
     const trimmed = item.original.trim();
     const replacement = dictionary[trimmed];
     const next = replacement === undefined ? item.original : item.original.replace(trimmed, replacement);
     if (item.kind === 'text') item.node.nodeValue = next;
     else item.node.setAttribute(item.kind, next);
+    item.applied = next;
   }
 }
 
@@ -1559,6 +1652,183 @@ function wirePlayer() {
   });
   $('player-volume').addEventListener('change', (event) => {
     api.audio.volume(Number(event.target.value) / 100).then(paintPlayer).catch(() => {});
+  });
+}
+
+/* ============================ dictation ============================ */
+
+/**
+ * Speaking instead of typing.
+ *
+ * Capture lives here because `getUserMedia` lives here and nowhere else — the
+ * main process has no microphone and a plugin runs no code in this window. So
+ * the app takes the sound and a plugin turns it into words, the mirror image of
+ * the audio bar, where the app makes the sound and a plugin decides what to
+ * play.
+ *
+ * What crosses to the main process is a finished 16 kHz mono WAV, which is what
+ * every speech engine takes. The conversion is done here rather than there for
+ * the same reason the recording is: the decoder and the resampler are in the
+ * browser, and shipping raw Opus to a plugin would make every plugin solve this
+ * again.
+ */
+let recorder = null;
+let recorderStop = null;
+
+/** The transcriber's own limit, restated: a recording nobody stopped. */
+const MAX_RECORDING_MS = 120_000;
+
+function paintMic(status = {}) {
+  state.mic = status;
+  const button = $('btn-mic');
+  // `hidden` alone is not enough for anything with an author-level `display`,
+  // and this button has one — see the rule in styles.css. The attribute is what
+  // the rule keys on.
+  button.hidden = !status.available;
+
+  button.classList.toggle('listening', Boolean(status.listening));
+  button.classList.toggle('working', Boolean(status.working));
+  // Recording is a state you leave by pressing the same control, so the glyph
+  // is what it will do rather than what it is doing.
+  button.textContent = status.working ? '…' : status.listening ? '■' : '●';
+  button.disabled = Boolean(status.working);
+  // Through `t`, because these are written after the page was captured for
+  // translation and so are never reached by `applyDictionary`.
+  button.title = status.working
+    ? t('Transcribing…')
+    : status.listening
+      ? t('Stop and transcribe')
+      : `${t('Dictate')}${status.label ? ` — ${status.label}` : ''}`;
+}
+
+/** Float samples to a 16-bit PCM WAV, which is what a speech engine reads. */
+function encodeWav(samples, rate) {
+  const bytes = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(bytes);
+  const ascii = (at, text) => {
+    for (let i = 0; i < text.length; i += 1) view.setUint8(at + i, text.charCodeAt(i));
+  };
+
+  ascii(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  ascii(8, 'WAVE');
+  ascii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  ascii(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+
+  for (let i = 0; i < samples.length; i += 1) {
+    // Clamped before scaling: a sample past ±1 wraps to the opposite sign as an
+    // int16, which is heard as a click rather than as clipping.
+    const sample = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(44 + i * 2, Math.round(sample * 32767), true);
+  }
+  return bytes;
+}
+
+/**
+ * Whatever the recorder produced, as 16 kHz mono.
+ *
+ * `MediaRecorder` gives Opus in a WebM container at whatever rate the device
+ * runs at, and no speech engine takes that. Decoding and resampling through an
+ * `OfflineAudioContext` is the browser doing both properly — a hand-written
+ * decimator would alias, which sounds like a worse microphone.
+ */
+async function toWav(blob) {
+  const context = new AudioContext();
+  try {
+    const decoded = await context.decodeAudioData(await blob.arrayBuffer());
+    const frames = Math.ceil(decoded.duration * 16000);
+    if (frames <= 0) throw new Error('nothing was recorded');
+
+    const offline = new OfflineAudioContext(1, frames, 16000);
+    const source = offline.createBufferSource();
+    source.buffer = decoded;
+    source.connect(offline.destination);
+    source.start();
+    const resampled = await offline.startRendering();
+    return encodeWav(resampled.getChannelData(0), 16000);
+  } finally {
+    // Closed either way: an AudioContext left open holds the audio device, and
+    // a handful of them is a machine whose speakers stay busy.
+    context.close().catch(() => {});
+  }
+}
+
+async function startDictation() {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (err) {
+    // Refused, or there is no microphone. Both are the user's to fix, and
+    // neither is worth a thrown error in the console.
+    const reason = err.name === 'NotAllowedError' ? 'the microphone was not allowed' : err.message;
+    paintMic(await api.mic.failed(reason));
+    status(reason);
+    return;
+  }
+
+  const chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.addEventListener('dataavailable', (event) => {
+    if (event.data.size) chunks.push(event.data);
+  });
+
+  recorder.addEventListener('stop', async () => {
+    // Released the moment recording ends, not when the transcript comes back:
+    // the operating system's recording indicator stays lit until every track is
+    // stopped, and a microphone that appears to still be listening while a model
+    // runs is alarming and untrue.
+    for (const track of stream.getTracks()) track.stop();
+    recorder = null;
+    clearTimeout(recorderStop);
+    paintMic(await api.mic.listening(false).catch(() => state.mic));
+
+    try {
+      const wav = await toWav(new Blob(chunks, { type: chunks[0]?.type || 'audio/webm' }));
+      const text = await api.mic.transcribe(wav);
+      if (!text) {
+        status(t('Nothing was heard.'));
+        return;
+      }
+      // Into the composer, never straight out: what a model heard is exactly
+      // the thing worth reading before it is sent.
+      const input = $('input');
+      input.value = input.value ? `${input.value.replace(/\s*$/, '')} ${text}` : text;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      status('Ready');
+    } catch (err) {
+      status(err.message);
+      activity(`dictation failed — ${err.message}`, 'bad');
+    }
+  });
+
+  recorder.start();
+  // A recording nobody stopped is always the expensive kind.
+  recorderStop = setTimeout(() => stopDictation(), MAX_RECORDING_MS);
+  paintMic(await api.mic.listening(true));
+  status(t('Listening — press again to transcribe.'));
+}
+
+function stopDictation() {
+  clearTimeout(recorderStop);
+  if (recorder && recorder.state !== 'inactive') recorder.stop();
+}
+
+function wireMic() {
+  $('btn-mic').addEventListener('click', () => {
+    if (state.mic?.working) return;
+    if (recorder) stopDictation();
+    else startDictation();
   });
 }
 
@@ -2080,6 +2350,16 @@ function handleEvent(payload) {
       paintPlayer(payload);
       break;
 
+    // A plugin appearing, going away, or finishing a download is what makes the
+    // microphone button come and go — the app never decides that itself.
+    case 'mic:state':
+      paintMic(payload);
+      break;
+
+    case 'plugins:working':
+      paintPluginProgress(payload);
+      break;
+
     case 'config:changed':
       applySettings(payload.settings);
       // Setting a remote endpoint makes the local binary irrelevant, and
@@ -2360,6 +2640,7 @@ function wire() {
   });
 
   wirePlayer();
+  wireMic();
 
   $('set-crt').addEventListener('change', (event) => document.body.classList.toggle('no-crt', !event.target.checked));
 }
@@ -2395,6 +2676,7 @@ async function boot() {
   // After the originals are on screen: the dictionary is keyed by them.
   paintLocales(snapshot.locales ?? []);
   paintPlayer(snapshot.audio ?? { source: null });
+  paintMic(snapshot.mic ?? { available: false });
 
   // Attachments outlive a reload — they live in the main process — so the row
   // is painted from what is actually pending, not assumed empty.

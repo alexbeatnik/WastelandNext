@@ -130,6 +130,45 @@ theme picker with one entry, both truthfully.
 **`#broken` carries every field `list()` reads.** A plugin that could not be understood is still a row on screen, and a
 row that throws while being drawn takes the whole list with it.
 
+**The `mic` service is the mirror of `audio`, and must stay as small.** Capture has to happen in the renderer, because
+`getUserMedia` exists there and nowhere else, and no plugin runs code in that window — so the app owns the button, the
+recording and the encoding to 16 kHz mono, and a plugin owns turning sound into words. It knows whether it is
+listening, whether something is being transcribed, and who to hand the audio to; which model, which language and how
+the words are extracted are the plugin's, which is what lets a second plugin drive the same button with a different
+engine.
+
+**The mic button is drawn only when a transcriber says it is `ready`.** Registered and ready are different facts:
+the first means "this plugin drives dictation", the second means "there is a model on disk". A microphone that records
+into nothing is a dead control, and the explanation belongs on the plugin's row, where a model can actually be
+obtained.
+
+**`hear()` deletes the recording in a `finally`, on every path.** This is a recording of somebody's voice. Leaving it
+in a scratch directory because the engine threw is not litter; it is a recording of somebody's voice left on their
+disk. The renderer stops every track the moment recording ends rather than when the transcript comes back, for the
+same reason in a different register: the operating system's recording indicator stays lit until it does, and a
+microphone that appears to still be listening while a model runs is alarming and untrue.
+
+**Dictated text goes into the composer, never straight out.** What a speech model heard is exactly the thing worth
+reading before it is sent. Voice input also contributes *nothing* to the system prompt — nothing the model can do
+changes, since the text arrives as if typed, and describing a microphone it cannot operate would invite it to offer to
+"listen".
+
+**A `select` setting names its options in the manifest.** So the row can be drawn before a line of the plugin's code
+has run, and so what a plugin may be set to stays readable without reading it. `setSetting` refuses a value that was
+not offered: a row displaying a state the plugin has no code for is worse than a refused click, and the plugin reading
+it back would be entitled to assume otherwise.
+
+**`ctx.progress` draws on the plugin's own row, and the renderer keeps it in `state`.** The activity log is the wrong
+place for a 1.5 GB download — it scrolls, the narrow layout hides that column, and a percentage that has to be hunted
+for is one nobody watches. It is held in `state.pluginProgress` rather than left in the DOM because `paintPlugins`
+rebuilds every row for reasons that have nothing to do with the download, and a meter that vanished because a setting
+was saved mid-fetch looks like a download that stopped.
+
+**`ctx.dataDir()` is outside the installed tree, like `ctx.state`.** That tree is deleted and replaced on every update,
+so a speech model downloaded into it would be downloaded again on every version bump. `forgetData` removes both on
+uninstall: a gigabyte of model outliving the plugin it belongs to is the largest thing in the data directory with
+nothing on screen to explain it.
+
 **`ctx.store` is the user's answers; `ctx.state` is the plugin's own.** Every `store` key is declared in the manifest
 because every one of them is a control drawn on the plugin's row — a music folder, an endpoint. A list of reminders is
 neither: nobody declares it, nobody types it into a field, and there is no row to draw it on. So a plugin also gets one
@@ -264,6 +303,14 @@ field confidently displaying the wrong number is worse than one that fails.
 **Every link in the About box needs `target="_blank"`.** That is what routes it through `setWindowOpenHandler` into
 `shell.openExternal`. Without it the chat window itself navigates to GitHub, and there is no way back — no address bar,
 no back button. The smoke check asserts it on every anchor in the dialog, not just the first.
+
+**`applyDictionary` must not write over text the app has since rewritten.** It walks markup captured at boot, and some
+of that markup is written to later by code — the mic button's tooltip gains the name of whichever plugin is listening.
+Putting the captured original back is not a translation, it is an erasure: the button spent a whole run saying
+`Dictate` instead of `Dictate — Smoke ears`, with the main process reporting the right answer the entire time. A node
+is skipped when what it holds is neither the string captured nor the one this function last wrote — both of those are
+ours, anything else has an owner. Anything written dynamically therefore goes through `t()` instead, which is what the
+function is for.
 
 **The `hidden` attribute loses to any author-level `display`.** `hidden` is nothing but the UA rule
 `[hidden] { display: none }`, and the weakest author declaration outranks the whole UA sheet — so `.drop-veil

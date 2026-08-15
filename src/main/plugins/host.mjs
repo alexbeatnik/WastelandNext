@@ -18,11 +18,11 @@
  * contributions down and leaves the rest of the app alone.
  */
 import { EventEmitter } from 'node:events';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as config from '../config.mjs';
-import { pluginStateDir, pluginsDir } from '../paths.mjs';
+import { pluginDataDir, pluginStateDir, pluginsDir } from '../paths.mjs';
 import { PluginStateStore } from './state.mjs';
 import { PLUGIN_API_VERSION, mergeEnablement, needsApproval, parseManifest } from './manifest.mjs';
 import { pluginAssetUrl } from '../../shared/schemes.mjs';
@@ -496,7 +496,35 @@ export class PluginHost extends EventEmitter {
         set: (value) => this.#states().write(manifest.id, value),
       },
 
+      /**
+       * A directory of its own, for what does not fit in a JSON document.
+       *
+       * A function rather than a field, so a plugin that never wants one never
+       * causes an empty directory to be created. It sits outside the plugin's
+       * installed tree, which is deleted and rewritten on every update — a
+       * speech model downloaded into that tree would be downloaded again on
+       * every version bump.
+       */
+      dataDir: () => pluginDataDir(manifest.id),
+
       log: (text) => this.emit('log', `${manifest.id}: ${text}`),
+
+      /**
+       * A long job, reported on the plugin's own row.
+       *
+       * The activity log is the wrong place for a 1.5 GB download: it scrolls,
+       * it is a column the narrow layout hides, and a percentage that has to be
+       * hunted for is one nobody watches. This draws where the thing being
+       * waited for was started. An empty text takes the line away, which is how
+       * a finished job stops claiming to be running.
+       */
+      progress: (text, { received = 0, total = 0 } = {}) =>
+        this.emit('progress', {
+          id: manifest.id,
+          text: String(text ?? ''),
+          received: Number(received) || 0,
+          total: Number(total) || 0,
+        }),
     };
   }
 
@@ -658,6 +686,12 @@ export class PluginHost extends EventEmitter {
     if (!declared) throw new Error(`"${id}" has no setting called "${key}"`);
 
     const next = declared.type === 'toggle' ? Boolean(value) : String(value ?? '');
+    // A picker can only hold one of the things it offered. Anything else is a
+    // row displaying a state the plugin has no code for, and the plugin reading
+    // it back would be entitled to assume otherwise.
+    if (declared.type === 'select' && next && !declared.options.some((option) => option.value === next)) {
+      throw new Error(`"${next}" is not one of the choices for "${key}"`);
+    }
     const plugins = { ...(config.get('plugins') ?? {}) };
     const state = plugins[id] ?? { enabled: false, approved: entry.manifest.builtin };
     plugins[id] = { ...state, settings: { ...(state.settings ?? {}), [key]: next } };
@@ -676,14 +710,24 @@ export class PluginHost extends EventEmitter {
   }
 
   /**
-   * Throw away a plugin's own document, on uninstall.
+   * Throw away everything a plugin kept, on uninstall.
+   *
+   * Its document and its data directory both, and the second matters more than
+   * it looks: a speech model is over a gigabyte, and leaving one behind means an
+   * uninstalled plugin is still the largest thing in the data directory with
+   * nothing on screen to explain it.
    *
    * Called by the uninstall path rather than done inside it, because deleting
-   * the directory and deleting the document are two different questions and only
-   * this object knows the answer to the second.
+   * the installed directory and deleting what the plugin wrote are two different
+   * questions and only this object knows the answer to the second.
    */
-  forgetState(id) {
+  forgetData(id) {
     this.#states().forget(id);
+    try {
+      rmSync(pluginDataDir(id), { recursive: true, force: true });
+    } catch (err) {
+      this.emit('log', `${id}: its data directory could not be removed — ${err.message}`);
+    }
   }
 
   /** Rediscover after an install or a removal, keeping every recorded decision. */

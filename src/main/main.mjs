@@ -47,6 +47,22 @@ function createWindow() {
     },
   });
 
+  /**
+   * Exactly one permission, and only when it was asked for.
+   *
+   * Electron grants everything by default, which for a window that never wanted
+   * geolocation, notifications or a camera is a wider surface than the app uses.
+   * Dictation needs `media` and nothing else needs anything — so the list is a
+   * list of one, and adding to it is a deliberate act rather than the default
+   * quietly covering something new.
+   *
+   * The microphone still has to be allowed at the operating system level as
+   * well; this only decides whether the page may ask.
+   */
+  window.webContents.session.setPermissionRequestHandler((_contents, permission, callback) => {
+    callback(permission === 'media');
+  });
+
   window.once('ready-to-show', () => window.show());
   window.loadFile(join(repoRoot, 'src', 'renderer', 'index.html'));
 

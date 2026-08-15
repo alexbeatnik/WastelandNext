@@ -774,6 +774,16 @@ button.choice.chosen .choice-label::before {
   padding: 0.1rem 0.35rem;
 }
 
+/* A long job under the row that started it — a model being downloaded, most
+   likely. Full width, because the label is a filename and a percentage. */
+.plugin-progress {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-top: 0.2rem;
+}
+
 .plugin-settings {
   grid-column: 1 / -1;
   display: flex;
@@ -1471,6 +1481,36 @@ button.choice.chosen .choice-label::before {
 button.send {
   min-width: 2.6rem;
   font-size: 1.05em;
+}
+
+/* The microphone, beside Send and only when something can transcribe. */
+button.mic {
+  display: block;
+  min-width: 2.6rem;
+  font-size: 1.05em;
+}
+
+/* Not optional. `hidden` is nothing but the UA rule `[hidden] {display:none}`,
+   and the author-level `display: block` above outranks the whole UA sheet — the
+   drop veil shipped visible for exactly this reason. */
+button.mic[hidden] {
+  display: none;
+}
+
+button.mic.listening {
+  color: var(--warn);
+  border-color: var(--warn);
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+
+button.mic.working {
+  color: var(--amber-dim);
+}
+
+@keyframes mic-pulse {
+  50% {
+    opacity: 0.45;
+  }
 }
 
 button.send.stop {
