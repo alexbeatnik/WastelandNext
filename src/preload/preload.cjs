@@ -77,7 +77,12 @@ contextBridge.exposeInMainWorld('wasteland', {
     locales: () => call('plugins:locales'),
     available: () => call('plugins:available'),
     install: (entry) => call('plugins:install', entry),
+    /** Opens a file dialog in the main process; the renderer names no paths. */
+    installFile: () => call('plugins:installFile'),
     uninstall: (id) => call('plugins:uninstall', id),
+    registries: () => call('plugins:registries'),
+    addRegistry: (url) => call('plugins:addRegistry', url),
+    removeRegistry: (url) => call('plugins:removeRegistry', url),
   },
 
   audio: {

@@ -285,16 +285,32 @@ export function formatAttachment(item, budgetTokens = Infinity) {
 }
 
 /**
- * The attachments waiting to go with the next message.
+ * What the user has attached, and which conversations have already seen it.
  *
- * Pending, not persistent: at send time they are folded into the transcript as
- * one message and the list is emptied. Holding them outside the transcript and
- * re-sending every turn would put the same folder in the prompt five times over
- * — and would sit outside compaction, which is the one thing that can shrink it
- * once the conversation grows.
+ * Two rules that sound contradictory and are not.
+ *
+ * An attachment **stays attached until the user detaches it**. The first version
+ * emptied the list at send time, and a chip that vanished the moment a question
+ * was asked read as the app having thrown the folder away — the user then
+ * re-attached it to ask a second question about the same project. What they were
+ * telling the app was "this is what I am working on", which does not stop being
+ * true after one message. Nothing is removed here except by `remove` or
+ * `clear`, both of which are buttons.
+ *
+ * An attachment is nevertheless **folded into a conversation exactly once**.
+ * Re-sending it every turn would put the same folder in the prompt five times in
+ * five turns, and would keep it outside compaction — the one thing that can
+ * shrink it once the conversation grows. Once it is in the transcript the model
+ * can already see it; sending it again buys nothing and costs the window.
+ *
+ * So what is remembered is not "has this been used up" but "has this chat seen
+ * it". A folder attached once and asked about in two conversations goes into
+ * both — which is why the record is per chat rather than a single flag.
  */
 export class Attachments {
   #items = [];
+  /** `attachment id → Set(chat id)`: where each one has already been folded in. */
+  #included = new Map();
 
   /** Attach a path. Returns the stored item, or throws with a reason to show. */
   async add(path) {
@@ -308,6 +324,11 @@ export class Attachments {
     return this.summary(item);
   }
 
+  #chatsFor(id) {
+    if (!this.#included.has(id)) this.#included.set(id, new Set());
+    return this.#included.get(id);
+  }
+
   /** What the composer draws: no file bodies, so the IPC reply stays small. */
   summary(item) {
     return {
@@ -317,6 +338,14 @@ export class Attachments {
       path: item.path,
       files: item.files.length,
       bytes: item.bytes,
+      /**
+       * The chats this one is already part of.
+       *
+       * Sent as a list rather than resolved here against "the current chat",
+       * because the main process does not have one — the renderer knows which
+       * conversation is on screen, and it is the only thing that does.
+       */
+      includedIn: [...this.#chatsFor(item.id)],
     };
   }
 
@@ -330,26 +359,36 @@ export class Attachments {
 
   remove(id) {
     this.#items = this.#items.filter((item) => item.id !== id);
+    this.#included.delete(id);
     return this.list();
   }
 
   clear() {
     this.#items = [];
+    this.#included.clear();
     return [];
   }
 
   /**
-   * Render everything pending into one message, and forget it.
+   * Render whatever this chat has not seen yet into one message.
+   *
+   * The list is left alone — see the note above — but every attachment rendered
+   * here is marked as having reached this conversation, so the next turn in it
+   * sends nothing. Returns '' when there is nothing new, which is the ordinary
+   * case for every turn after the first.
    *
    * `budgetTokens` is shared out evenly rather than first-come: three folders
    * where the first eats the whole budget is not what dropping three folders
    * asked for.
    */
-  take(budgetTokens = Infinity) {
-    if (this.#items.length === 0) return '';
-    const share = Number.isFinite(budgetTokens) ? Math.floor(budgetTokens / this.#items.length) : Infinity;
-    const text = this.#items.map((item) => formatAttachment(item, share)).join('\n\n');
-    this.clear();
+  take(chatId, budgetTokens = Infinity) {
+    const chat = String(chatId ?? '');
+    const pending = this.#items.filter((item) => !this.#chatsFor(item.id).has(chat));
+    if (pending.length === 0) return '';
+
+    const share = Number.isFinite(budgetTokens) ? Math.floor(budgetTokens / pending.length) : Infinity;
+    const text = pending.map((item) => formatAttachment(item, share)).join('\n\n');
+    for (const item of pending) this.#chatsFor(item.id).add(chat);
     return text;
   }
 }

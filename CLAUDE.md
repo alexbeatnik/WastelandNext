@@ -130,6 +130,49 @@ theme picker with one entry, both truthfully.
 **`#broken` carries every field `list()` reads.** A plugin that could not be understood is still a row on screen, and a
 row that throws while being drawn takes the whole list with it.
 
+**`ctx.store` is the user's answers; `ctx.state` is the plugin's own.** Every `store` key is declared in the manifest
+because every one of them is a control drawn on the plugin's row — a music folder, an endpoint. A list of reminders is
+neither: nobody declares it, nobody types it into a field, and there is no row to draw it on. So a plugin also gets one
+JSON document keyed by id, under `plugin-state/` rather than inside the plugin directory — that whole tree is deleted
+and replaced on every update, which would make updating a plugin the thing that loses your reminders. It is written to
+a temporary file and renamed over the target: a truncated JSON file reads back as `{}`, which is every reminder gone
+with nothing anywhere saying so.
+
+**A notice is the one message with no question in front of it.** Everything else this app says is an answer — the user
+typed, a turn ran, a reply came back — and there was nowhere for a reminder to go: the transcript belongs to a
+conversation, the status bar is overwritten by the next thing, and a plugin cannot reach the window. `notify.show`
+goes two places at once, a card in the transcript and an OS notification, because neither is enough alone. It is
+drawn as its own element rather than as an assistant turn: it did not come from the model, and dressing it as a reply
+makes the model responsible for words it never wrote.
+
+**Recent notices are kept, because one can be raised before the window is listening.** The plugin host starts before the
+renderer has subscribed, and a reminder coming due during boot is exactly the case the feature exists for. They arrive
+twice on purpose — in the snapshot and again on the stream — and the renderer skips an id it has already drawn.
+`pluginName` is deliberately *not* on the notice: the name is resolved from the id where it is drawn, so a plugin
+cannot sign a message with a name other than the one on its own row.
+
+**A registry list is a widening of trust, and looks like one.** Adding one is a URL typed in and a button pressed;
+nothing a page or a plugin can arrange. An index must be https — it is a list of URLs and checksums deciding what gets
+downloaded and unpacked, and anything on the path could rewrite it — with loopback excepted, since there is no path to
+sit on. Two registries publishing the same id is a fork or a mirror rather than an error, so the newest wins; what
+makes that safe is that it is not silent, and the source label travels with the entry to the row.
+
+**One registry failing must not empty the list, and *all* of them failing must not hide which were asked.** `fetchIndex`
+reports per source and never throws: it returns `error` only when nothing answered, because throwing lost exactly the
+thing worth showing in that state. Removing the broken registry is how the user gets the list back, and they cannot
+remove a row that was never drawn. The boot fetch stays silent about a failure — the update badges are worth a
+background request, an error about a list nobody asked to see is not — while the rows still say what happened.
+
+**Installing from a local archive has no checksum, and that is not a gap.** A digest ties a download to the index that
+offered it; a file picked in a dialog was offered by nobody, and the choice is the consent — the same distinction
+`attach.mjs` draws between a path a model named and a path a person picked. Every other check still runs, including
+`assertSafeArchive` and the manifest, and the code still cannot run until it is approved. The digest is computed and
+handed back anyway, so somebody who *does* have a published hash can compare.
+
+**Staging happens inside the data root, not in `tmpdir()`.** The last step of an install is a rename onto the data
+root, and a rename across volumes fails with `EXDEV`. On a machine whose `TEMP` is on another drive that made every
+install fail at the very end — after the download, the checksum and the unpacking had all worked.
+
 **`paintPlugins` owns the section's status line.** It writes the active count, which is also how a previous error
 message goes away; the first version of the toggle handler cleared the line immediately afterwards and blanked the
 count it had just written. The smoke check asserts the number, not that the text changed — an empty string is
@@ -365,11 +408,18 @@ picker rewritten back into a `<select>` would fail there first.
 a guess. The full path is the tooltip — a chip wide enough to show it would fit one item. The chips row wraps rather
 than scrolling sideways, because an attachment scrolled out of view is one the user cannot see to remove.
 
-**An attachment is folded into the transcript once, not re-sent every turn.** `Attachments` is a pending list that
-`send()` empties into one `tool` message ahead of the user's words. Held outside the transcript and prepended to every
-prompt instead, the same folder would go over the wire five times in five turns — and would sit outside compaction,
-which is the only thing that can shrink it once the conversation grows. Half the prompt budget is the attachment's; the
-other half has to hold the conversation it is for.
+**An attachment is folded into a conversation once, and stays attached until the user detaches it.** Those sound
+contradictory and are not. `take(chatId)` renders whatever *that chat* has not seen into one `tool` message ahead of
+the user's words and records where it went; it returns `''` on every turn after the first, so re-sending cannot happen.
+Prepended to every prompt instead, the same folder would go over the wire five times in five turns — and would sit
+outside compaction, which is the only thing that can shrink it once the conversation grows. Half the prompt budget is
+the attachment's; the other half has to hold the conversation it is for.
+
+The list itself is emptied only by `remove` or `clear`, both of which are buttons. The first version emptied it at send
+time, and a chip that vanished the moment a question was asked read as the app having thrown the folder away — the user
+then re-attached the same project to ask a second question about it. What is remembered is therefore not "has this been
+used up" but "has this chat seen it", which is also what lets one folder reach two conversations. `includedIn` is sent
+as a list rather than resolved against "the current chat", because the main process does not have one.
 
 **Attachment paths are not confined to the home directory, and `readfile.mjs` paths still are.** The difference is who
 named the path: a model naming one is a request to be vetted, a person picking one through a file dialog or dropping it

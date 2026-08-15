@@ -139,9 +139,24 @@
           <div class="section-body">
             <div class="row">
               <button id="btn-store-refresh">[ REFRESH ]</button>
+              <!-- For a plugin that was never published, or a machine that
+                   cannot reach a registry at all. -->
+              <button id="btn-store-file">[ FROM FILE… ]</button>
               <span id="store-status" class="muted"></span>
             </div>
             <div id="store-list" class="plugin-list"></div>
+
+            <!-- Where the list above comes from. Adding one widens what the app
+                 will offer to download, so it is a URL typed in and a button
+                 pressed — never something a page or a plugin can arrange. -->
+            <div class="field">
+              <span>REGISTRIES</span>
+              <div id="registry-list" class="registry-list"></div>
+              <div class="row">
+                <input id="registry-url" type="text" placeholder="https://github.com/owner/repo" />
+                <button id="btn-registry-add">[ ADD ]</button>
+              </div>
+            </div>
           </div>
         </details>
 

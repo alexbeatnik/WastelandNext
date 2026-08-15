@@ -44,4 +44,22 @@ export const toolsDir = () => ensureDir('tools');
 export const logsDir = () => ensureDir('logs');
 /** Installed plugins, one directory each. Built-ins ship inside the app. */
 export const pluginsDir = () => ensureDir('plugins');
+/**
+ * A plugin's own document, one JSON file each.
+ *
+ * Deliberately not inside the plugin's directory: that whole tree is deleted and
+ * replaced on every update, which would make an update the thing that loses your
+ * reminders.
+ */
+export const pluginStateDir = () => ensureDir('plugin-state');
+/**
+ * Somewhere to unpack before moving into place.
+ *
+ * Inside the data root rather than in the system temporary directory, because
+ * the last step of an install is a rename onto the data root — and a rename
+ * across volumes fails with `EXDEV`. On a machine whose `TEMP` is on a different
+ * drive from `%LOCALAPPDATA%`, staging in `tmpdir()` makes every install fail at
+ * the very end, after the download, the checksum and the unpacking all worked.
+ */
+export const scratchDir = () => ensureDir('scratch');
 export const configPath = () => join(dataRoot(), 'config.json');

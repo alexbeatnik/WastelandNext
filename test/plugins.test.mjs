@@ -14,11 +14,12 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setDataRoot } from '../src/main/paths.mjs';
 import {
+  KNOWN_SERVICES,
   PLUGIN_API_VERSION,
   enabledByLegacy,
   isContainedPath,
@@ -1067,4 +1068,209 @@ test('pageMapContext flattens a map into quoted labels', () => {
 test('pageMapContext is empty when there is nothing to describe', () => {
   assert.equal(pageMapContext(null), '');
   assert.equal(pageMapContext({ url: 'https://a.test', groups: [] }), '');
+});
+
+/* ============================ a plugin's own state ============================ */
+
+test('a plugin keeps its own document, and it survives being switched off', async () => {
+  // `store` is the user's answers to the manifest's questions and every key in
+  // it is a control on the plugin's row. A list of reminders is neither, which
+  // is what `state` is for — undeclared, unread by the app, and persistent.
+  const root = mkdtempSync(join(tmpdir(), 'wl-state-'));
+  const stateDir = mkdtempSync(join(tmpdir(), 'wl-state-dir-'));
+  install(root, 'keeper', {
+    manifest: { actions: ['keep'] },
+    source: `export function activate(ctx) {
+      ctx.action({ type: 'keep', run: async (steps) => {
+        const held = ctx.state.get();
+        const kept = [...(held.kept ?? []), steps];
+        ctx.state.set({ kept });
+        return { ok: true, summary: kept.join(',') };
+      } });
+    }`,
+  });
+
+  const start = async () => {
+    config.update({ plugins: { keeper: { enabled: true, approved: true } } });
+    const host = new PluginHost({ userDir: root, stateDir, services: {} });
+    await host.load();
+    return host;
+  };
+
+  const first = await start();
+  await first.action('keep').run('one', { status() {}, log() {} });
+  const again = await first.action('keep').run('two', { status() {}, log() {} });
+  assert.equal(again.summary, 'one,two');
+
+  // A second host over the same directory is what a restart looks like.
+  const restarted = await start();
+  const third = await restarted.action('keep').run('three', { status() {}, log() {} });
+  assert.equal(third.summary, 'one,two,three', 'the document must outlive the process');
+});
+
+test('a plugin state store survives a file it cannot read', async () => {
+  const { PluginStateStore } = await import('../src/main/plugins/state.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'wl-statefile-'));
+  const store = new PluginStateStore(dir);
+
+  assert.deepEqual(store.read('absent'), {}, 'never written is an empty document');
+
+  store.write('thing', { a: 1 });
+  assert.deepEqual(new PluginStateStore(dir).read('thing'), { a: 1 });
+
+  // Half a JSON file is what a process dying mid-write used to leave. It must
+  // read back as empty rather than take the plugin down with it — a plugin that
+  // cannot activate because of its own scratch file is one the user cannot
+  // switch off from the inside.
+  writeFileSync(join(dir, 'broken.json'), '{"reminders": [');
+  assert.deepEqual(new PluginStateStore(dir).read('broken'), {});
+
+  // And it is not a general-purpose disk.
+  assert.throws(() => store.write('thing', { big: 'x'.repeat(2 * 1024 * 1024) }), /more state than/);
+  assert.throws(() => store.write('thing', [1, 2, 3]), /must be an object/);
+  assert.throws(() => store.write('../escape', {}), /not a plugin id/);
+});
+
+test('uninstalling a plugin takes its document with it', async () => {
+  const { PluginStateStore } = await import('../src/main/plugins/state.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'wl-forget-'));
+  const store = new PluginStateStore(dir);
+  store.write('leaver', { reminders: [1] });
+  store.forget('leaver');
+  // Reinstalling must not bring back reminders the user removed along with the
+  // plugin that held them.
+  assert.deepEqual(new PluginStateStore(dir).read('leaver'), {});
+});
+
+test('notify is a service a manifest can ask for', () => {
+  // It is what a plugin with nothing to answer uses to say something at all.
+  assert.ok(KNOWN_SERVICES.has('notify'));
+  assert.equal(parseManifest({ ...GOOD, services: ['notify'] }).ok, true);
+});
+
+/* ============================ the reminders plugin ============================ */
+
+/** A notify service that records rather than interrupts. */
+function stubNotify() {
+  return {
+    shown: [],
+    show(notice) {
+      this.shown.push(notice);
+      return notice;
+    },
+    releasePlugin() {},
+  };
+}
+
+/** The real plugin, over a state directory of its own. */
+async function remindersHost(stateDir, notify) {
+  config.update({ plugins: { reminders: { enabled: true, approved: true } } });
+  const host = new PluginHost({ userDir: pluginsCheckout, stateDir, services: { notify } });
+  await host.load();
+  return host;
+}
+
+const haveReminders = existsSync(join(pluginsCheckout, 'reminders', 'plugin.json'));
+
+test('the reminders plugin loads and says the refusal it prevents', { skip: !haveReminders }, async () => {
+  const host = await remindersHost(mkdtempSync(join(tmpdir(), 'wl-rem-')), stubNotify());
+
+  const row = host.list().find((plugin) => plugin.id === 'reminders');
+  assert.equal(row.active, true, row.error);
+  assert.ok(host.action('remind'));
+  assert.ok(host.action('reminders'));
+
+  // The same lesson the audio player learned the hard way: describing the action
+  // accurately is not enough, because a local model will explain what an
+  // assistant cannot do while holding the thing that does it.
+  const prompt = buildSystemPrompt({ fragments: host.promptFragments() });
+  assert.match(prompt, /You CAN set reminders in this session/i);
+  assert.match(prompt, /can't set\s+reminders/i);
+  assert.match(prompt, /you would need a calendar/i);
+});
+
+test('a reminder is set, listed and survives a restart', { skip: !haveReminders }, async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'wl-rem-state-'));
+  const turn = { status() {}, log() {} };
+
+  const first = await remindersHost(stateDir, stubNotify());
+  const set = await first.action('remind').run('+2h | watch the series', turn);
+  assert.equal(set.ok, true, set.summary);
+  assert.match(set.feedback, /watch the series/);
+
+  // A second host over the same directory is what a restart looks like — and
+  // losing a reminder to one is the failure the whole plugin exists to avoid.
+  const restarted = await remindersHost(stateDir, stubNotify());
+  const listed = await restarted.action('reminders').run('list', turn);
+  assert.match(listed.feedback, /watch the series/);
+
+  // The time is in the context every turn, because "in half an hour" is
+  // unanswerable without it.
+  const context = await restarted.context();
+  assert.match(context, /\[REMINDERS\] Local time is now /);
+  assert.match(context, /watch the series/);
+});
+
+test('a reminder that came due while the app was closed is reported, once', { skip: !haveReminders }, async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'wl-rem-missed-'));
+  const turn = { status() {}, log() {} };
+
+  const before = await remindersHost(stateDir, stubNotify());
+  await before.action('remind').run('+2h | call the dentist', turn);
+
+  // Rewrite the stored moment to one that has passed, which is exactly what
+  // being closed for three hours does.
+  const statePath = join(stateDir, 'reminders.json');
+  const stored = JSON.parse(readFileSync(statePath, 'utf8'));
+  stored.reminders[0].at = Date.now() - 60_000;
+  writeFileSync(statePath, JSON.stringify(stored));
+
+  const notify = stubNotify();
+  const after = await remindersHost(stateDir, notify);
+  assert.equal(notify.shown.length, 1, JSON.stringify(notify.shown));
+  assert.match(notify.shown[0].title, /missed/i);
+  assert.match(notify.shown[0].body, /call the dentist/);
+  // No desktop notification for this one: it lands as the window is opening,
+  // and a system toast for something already on screen is noise.
+  assert.equal(notify.shown[0].desktop, false);
+
+  // And it is gone rather than waiting to be reported again on the next start.
+  const listed = await after.action('reminders').run('list', turn);
+  assert.match(listed.summary, /nothing is set/);
+});
+
+test('cancelling something ambiguous offers the choice instead of guessing', { skip: !haveReminders }, async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'wl-rem-cancel-'));
+  const turn = { status() {}, log() {} };
+  const host = await remindersHost(stateDir, stubNotify());
+
+  await host.action('remind').run('+1h | call mum', turn);
+  await host.action('remind').run('+2h | call the dentist', turn);
+
+  const ambiguous = await host.action('reminders').run('cancel call', turn);
+  assert.equal(ambiguous.choices.length, 2, 'cancelling is not undoable, so the user picks');
+
+  // A stale list must not quietly pick from a newer one — the same token rule
+  // the audio player needed, and for the same reason.
+  await assert.rejects(() => host.choose('reminders', 'c99:0'), /no longer the current one/);
+
+  await host.choose('reminders', ambiguous.choices[0].id);
+  const left = await host.action('reminders').run('list', turn);
+  assert.equal(/call mum/.test(left.feedback) && /call the dentist/.test(left.feedback), false);
+  assert.match(left.summary, /1 set/);
+});
+
+test('a time the plugin cannot read sets nothing and says what it takes', { skip: !haveReminders }, async () => {
+  const host = await remindersHost(mkdtempSync(join(tmpdir(), 'wl-rem-bad-')), stubNotify());
+  const turn = { status() {}, log() {} };
+
+  const vague = await host.action('remind').run('sometime after lunch | stretch', turn);
+  assert.equal(vague.ok, false);
+  // The reason names the formats, so the model can correct itself rather than
+  // hand the problem back to the user.
+  assert.match(vague.feedback, /daily 07:30/);
+
+  const empty = await host.action('remind').run('18:45', turn);
+  assert.equal(empty.ok, false);
+  assert.match(empty.feedback, /nothing to remind/i);
 });

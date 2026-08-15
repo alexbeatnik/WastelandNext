@@ -264,10 +264,18 @@ export class Agent extends EventEmitter {
       // exactly the machinery that handles everything else, instead of being a
       // second kind of context with its own rules. Half the prompt budget is
       // theirs — the other half has to hold the conversation they are for.
-      const attached = this.attachments.take(Math.floor(promptBudget(this.#window()) / 2));
+      //
+      // Per chat, and only once each: they stay attached until the user detaches
+      // them, but a conversation that already holds a folder does not need it
+      // again — the model can see it. `take` answers '' on every turn after the
+      // first, which is why this costs nothing to ask on all of them.
+      const attached = this.attachments.take(chat.id, Math.floor(promptBudget(this.#window()) / 2));
       if (attached) {
         chat = chats.append(chat.id, { role: 'tool', content: attached });
-        this.#say('attach:consumed', {});
+        // Carries the list, because the chips do not go away any more: what
+        // changed is that they now belong to this conversation, and the row has
+        // to say so.
+        this.#say('attach:consumed', { items: this.attachments.list() });
       }
 
       chat = chats.append(chat.id, { role: 'user', content: prompt });

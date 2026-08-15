@@ -6,7 +6,7 @@
  * `{event, ...payload}`. One channel rather than twenty keeps the preload
  * surface small and means a new event type needs no changes here or there.
  */
-import { dialog, ipcMain } from 'electron';
+import { Notification, dialog, ipcMain } from 'electron';
 import { readFileSync } from 'node:fs';
 import * as chats from './chats.mjs';
 import * as config from './config.mjs';
@@ -21,6 +21,7 @@ import { PluginHost } from './plugins/host.mjs';
 import { serveProtocols } from './plugins/protocol.mjs';
 import * as registry from './plugins/registry.mjs';
 import { audio } from './audio.mjs';
+import { notify } from './notify.mjs';
 import { Agent } from './agent/agent.mjs';
 import { Updater } from './updater.mjs';
 
@@ -51,7 +52,7 @@ const lookupBrowser = new BrowserBridge();
  * fact readable from a manifest, and what lets the host be tested with a stub
  * browser and no Chrome anywhere.
  */
-const plugins = new PluginHost({ services: { browser, lookupBrowser, audio } });
+const plugins = new PluginHost({ services: { browser, lookupBrowser, audio, notify } });
 const agent = new Agent({ server, plugins });
 
 /**
@@ -93,7 +94,44 @@ function snapshot() {
     themes: plugins.themes(),
     locales: plugins.locales(),
     audio: audio.status(),
+    /**
+     * Anything said before the window was listening.
+     *
+     * A reminder can come due during boot — the plugin host starts before the
+     * renderer has subscribed — and that is the exact case this whole path
+     * exists for: the app was closed, something was missed, say so on the way
+     * in. Each notice carries an id so one that arrived both ways is drawn once.
+     */
+    notices: notify.recent(),
   };
+}
+
+/**
+ * Raise an operating system notification.
+ *
+ * The card in the transcript is what survives; this is what arrives. Somebody
+ * looking at another window sees nothing at all otherwise, which for a reminder
+ * is the only case that matters.
+ *
+ * Failing to show one is not worth reporting: a Linux desktop with no
+ * notification daemon, or Windows with them switched off for this app, is a
+ * setting rather than a fault, and the card has already been drawn.
+ */
+function showDesktopNotice(notice) {
+  try {
+    if (!Notification.isSupported()) return;
+    const toast = new Notification({ title: notice.title, body: notice.body, silent: false });
+    toast.on('click', () => {
+      const window = getWindow();
+      if (!window || window.isDestroyed()) return;
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+    });
+    toast.show();
+  } catch {
+    /* no notification service on this machine */
+  }
 }
 
 export function registerIpc(windowGetter) {
@@ -105,6 +143,11 @@ export function registerIpc(windowGetter) {
   );
   plugins.on('log', (line) => send('log', { text: line }));
   audio.on('state', (status) => send('audio:state', status));
+  notify.on('notice', (notice) => {
+    send('notice', { notice });
+    if (notice.desktop) showDesktopNotice(notice);
+  });
+  notify.on('log', (line) => send('log', { text: line }));
   server.on('state', (status) => send('llm:state', status));
   server.on('log', (line) => send('llm:log', { line }));
   server.on('tool', (progress) => send('tool:progress', progress));
@@ -400,16 +443,25 @@ export function registerIpc(windowGetter) {
   handle('plugins:available', () => registry.fetchIndex());
 
   /**
+   * The registries themselves.
+   *
+   * Adding one widens what the app will offer to download, so it is a typed URL
+   * and an explicit button rather than anything a page or a plugin can do. The
+   * list is returned from all three so the section repaints from what was
+   * actually stored, never from what the click assumed.
+   */
+  handle('plugins:registries', () => registry.registries());
+  handle('plugins:addRegistry', (url) => registry.addRegistry(url));
+  handle('plugins:removeRegistry', (url) => registry.removeRegistry(url));
+
+  /**
    * Install or update — the same operation, because an update is an install
    * over the top of one that is already there. The plugin keeps whatever the
    * user had decided about it: `mergeEnablement` never overrules a record that
    * already exists, so a plugin switched on stays on across an update and one
    * that was never allowed to run does not become allowed by being newer.
    */
-  handle('plugins:install', async (entry) => {
-    const installed = await registry.install(entry, {
-      onProgress: (progress) => send('plugins:progress', progress),
-    });
+  const afterInstall = async (installed) => {
     send('plugins:progress', { stage: 'done', id: installed.id });
     await plugins.refresh();
     // Replacing a plugin that has already been imported does not replace what
@@ -417,6 +469,35 @@ export function registerIpc(windowGetter) {
     // row says so, and this is the same fact where the install happened.
     const row = plugins.list().find((plugin) => plugin.id === installed.id);
     return { ...installed, restartRequired: Boolean(row?.stale) };
+  };
+
+  handle('plugins:install', async (entry) =>
+    afterInstall(await registry.install(entry, { onProgress: (progress) => send('plugins:progress', progress) })),
+  );
+
+  /**
+   * Install from an archive on this machine.
+   *
+   * The dialog is opened here because only the main process can, and because it
+   * is what makes the file a *choice*: the renderer never names a path, it asks
+   * for the picker and is told what came back. Same reason as `models:addFile`.
+   */
+  handle('plugins:installFile', async () => {
+    const result = await dialog.showOpenDialog(getWindow() ?? undefined, {
+      title: 'Choose a plugin archive',
+      properties: ['openFile', 'dontAddToRecent'],
+      filters: [
+        { name: 'Plugin archives', extensions: ['zip'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true };
+
+    return afterInstall(
+      await registry.installArchive(result.filePaths[0], {
+        onProgress: (progress) => send('plugins:progress', progress),
+      }),
+    );
   });
 
   handle('plugins:uninstall', async (id) => {
@@ -425,6 +506,9 @@ export function registerIpc(windowGetter) {
     // that cannot work.
     if (entry?.builtin) throw new Error(`${entry.name} ships with the app and cannot be removed`);
     await registry.uninstall(id);
+    // Its own document goes with it. Leaving it behind would mean reinstalling a
+    // plugin brought back reminders the user had removed along with it.
+    plugins.forgetState(id);
     await plugins.refresh();
     return plugins.list();
   });

@@ -59,6 +59,14 @@ export const DEFAULTS = {
   plugins: {},
   /** Where GET PLUGINS looks. A setting so a developer can point it elsewhere. */
   pluginRegistry: '',
+  /**
+   * Further indexes to ask, added by the user.
+   *
+   * Separate from `pluginRegistry` because they answer different questions:
+   * that one *replaces* the registry the app ships with, these are asked as
+   * well as it. Both are URLs of an `index.json`.
+   */
+  pluginRegistries: [],
   /** `<plugin-id>/<theme-id>`, or empty for the app's own amber. */
   theme: '',
   /** `<plugin-id>/<language-tag>`, or empty for the English the app ships in. */

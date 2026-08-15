@@ -22,7 +22,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as config from '../config.mjs';
-import { pluginsDir } from '../paths.mjs';
+import { pluginStateDir, pluginsDir } from '../paths.mjs';
+import { PluginStateStore } from './state.mjs';
 import { PLUGIN_API_VERSION, mergeEnablement, needsApproval, parseManifest } from './manifest.mjs';
 import { pluginAssetUrl } from '../../shared/schemes.mjs';
 import { BUILTIN_PLUGINS } from '../../plugins/index.mjs';
@@ -61,16 +62,31 @@ export class PluginHost extends EventEmitter {
    * the whole point is to remember what an earlier discovery loaded.
    */
   #loadedStamps = new Map();
+  /** Each plugin's own JSON document. Created on first use, so tests can inject. */
+  #stateDir;
+  #state = null;
   #ready = null;
 
   /**
    * @param services  named objects plugins may ask for — see `KNOWN_SERVICES`
    * @param userDir   where installed plugins live; defaults to the data root
+   * @param stateDir  where their own documents live; defaults to the data root
    */
-  constructor({ services = {}, userDir = null } = {}) {
+  constructor({ services = {}, userDir = null, stateDir = null } = {}) {
     super();
     this.#services = services;
     this.#userDir = userDir;
+    this.#stateDir = stateDir;
+  }
+
+  /**
+   * Resolved late rather than in the constructor: `pluginStateDir()` creates the
+   * directory, and the host is constructed at import time — before `main.mjs`
+   * has told `paths.mjs` where the data root is.
+   */
+  #states() {
+    if (!this.#state) this.#state = new PluginStateStore(this.#stateDir ?? pluginStateDir());
+    return this.#state;
   }
 
   /** Resolves once the first load has finished. Awaited before a turn runs. */
@@ -465,6 +481,21 @@ export class PluginHost extends EventEmitter {
         if (typeof fn === 'function') contributions.settingsHooks.push(fn);
       },
 
+      /**
+       * The plugin's own document, for what nobody declares.
+       *
+       * `store` is the user's answers to the manifest's questions, and every key
+       * in it is a control on the plugin's row. A list of reminders is neither:
+       * it is written by the plugin, read by the plugin, and has no business
+       * being drawn as a settings field or living in `config.json`. Undeclared
+       * by design — the manifest describes what a plugin can *reach*, and this
+       * reaches nothing but itself.
+       */
+      state: {
+        get: () => this.#states().read(manifest.id),
+        set: (value) => this.#states().write(manifest.id, value),
+      },
+
       log: (text) => this.emit('log', `${manifest.id}: ${text}`),
     };
   }
@@ -642,6 +673,17 @@ export class PluginHost extends EventEmitter {
 
     this.emit('changed', this.list());
     return this.list();
+  }
+
+  /**
+   * Throw away a plugin's own document, on uninstall.
+   *
+   * Called by the uninstall path rather than done inside it, because deleting
+   * the directory and deleting the document are two different questions and only
+   * this object knows the answer to the second.
+   */
+  forgetState(id) {
+    this.#states().forget(id);
   }
 
   /** Rediscover after an install or a removal, keeping every recorded decision. */

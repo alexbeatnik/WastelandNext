@@ -17,7 +17,7 @@
  * function. Bumped only when the shape of `activate(ctx)` changes in a way a
  * plugin can notice.
  */
-export const PLUGIN_API_VERSION = 3;
+export const PLUGIN_API_VERSION = 4;
 
 /**
  * Services a plugin may ask the host for.
@@ -26,7 +26,7 @@ export const PLUGIN_API_VERSION = 3;
  * is legible from the manifest alone rather than from reading its code. A name
  * that is not on this list is a manifest error, not a runtime `undefined`.
  */
-export const KNOWN_SERVICES = new Set(['browser', 'lookupBrowser', 'audio']);
+export const KNOWN_SERVICES = new Set(['browser', 'lookupBrowser', 'audio', 'notify']);
 
 /** Setting kinds the plugin row knows how to draw. */
 export const SETTING_TYPES = new Set(['folder', 'text', 'toggle']);

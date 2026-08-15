@@ -10,9 +10,9 @@
 import { app, BrowserWindow } from 'electron';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { setDataRoot, pluginsDir } from '../src/main/paths.mjs';
+import { setDataRoot, pluginStateDir, pluginsDir } from '../src/main/paths.mjs';
 import { registerSchemes } from '../src/main/plugins/protocol.mjs';
 import { registerIpc, serveAssets } from '../src/main/ipc.mjs';
 
@@ -384,6 +384,92 @@ async function checkAttachments(window) {
     return document.querySelectorAll('#chat-log .turn.attachment').length;
   })()`);
   check('an attachment turn has its own shape in the transcript', folded === 1);
+
+  /**
+   * Sending a message does not detach anything.
+   *
+   * The chip used to vanish the moment a question was asked, which read as the
+   * app having thrown the folder away — so the user attached it again to ask a
+   * second question about the same project. Driven through the real event
+   * channel rather than by calling a renderer function, because what is under
+   * test is exactly the handler that used to blank the row.
+   */
+  await window.webContents.executeJavaScript(`window.wasteland.attach.add([${JSON.stringify(process.cwd())}])`);
+  await new Promise((r) => setTimeout(r, 200));
+
+  const pendingMark = await window.webContents.executeJavaScript(
+    `document.querySelector('#attach-chips .chip-state')?.textContent ?? ''`,
+  );
+  check('an attachment not yet sent is marked as still to go — +', pendingMark === '+', pendingMark);
+
+  const items = await window.webContents.executeJavaScript(`window.wasteland.attach.list()`);
+  window.webContents.send('event', {
+    event: 'attach:consumed',
+    items: items.map((item) => ({ ...item, includedIn: [''] })),
+  });
+  await new Promise((r) => setTimeout(r, 200));
+
+  const afterSend = await window.webContents.executeJavaScript(`(() => ({
+    count: document.querySelectorAll('#attach-chips .chip').length,
+    mark: document.querySelector('#attach-chips .chip-state')?.textContent ?? '',
+    title: document.querySelector('#attach-chips .chip')?.title ?? '',
+  }))()`);
+  check('the chip survives the message it went with', afterSend.count === 1, JSON.stringify(afterSend));
+  check('and says the conversation now holds it — ✓', afterSend.mark === '✓', JSON.stringify(afterSend));
+  check('the tooltip says so too', afterSend.title.includes('Already in this conversation'), afterSend.title);
+
+  await window.webContents.executeJavaScript(`window.wasteland.attach.clear()`);
+}
+
+/**
+ * A message with no question in front of it.
+ *
+ * Driven over the real `event` channel, which is the only way in: a reminder
+ * coming due is a main-process timer talking to a window that never asked for
+ * anything. What is being checked is that it lands somewhere the user will see
+ * it and that it lands exactly once — the same notice arrives twice by design,
+ * through the boot snapshot and again on the stream.
+ */
+async function checkNotices(window) {
+  say('');
+  say('Notices');
+
+  await window.webContents.executeJavaScript(`document.getElementById('chat-log').replaceChildren()`);
+
+  const notice = { id: 'smoke-notice-1', title: 'Watch the series', body: 'Due at 18:45', pluginId: 'reminders', at: Date.now() };
+  window.webContents.send('event', { event: 'notice', notice });
+  await new Promise((r) => setTimeout(r, 200));
+
+  const drawn = await window.webContents.executeJavaScript(`(() => {
+    const card = document.querySelector('#chat-log .notice');
+    return {
+      count: document.querySelectorAll('#chat-log .notice').length,
+      title: card?.querySelector('.notice-title')?.textContent ?? '',
+      body: card?.querySelector('.notice-body')?.textContent ?? '',
+      display: card ? getComputedStyle(card).display : 'none',
+      logged: document.getElementById('activity-log').textContent.includes('Watch the series'),
+    };
+  })()`);
+  check('a notice reaches the transcript', drawn.count === 1, JSON.stringify(drawn));
+  check(`the notice says what it is for — ${drawn.title}`, drawn.title === 'Watch the series');
+  check('and when it was due', drawn.body.includes('18:45'), drawn.body);
+  // Asserted on the computed style rather than on the element existing: a card
+  // in the DOM that nothing draws is the failure this app has already shipped
+  // once, with the drop veil.
+  check('the notice is actually on screen', drawn.display !== 'none', drawn.display);
+  check('and it reaches the activity log', drawn.logged === true);
+
+  // The same notice arrives twice by design — once in the boot snapshot, once
+  // on the stream — and drawing a reminder twice is worse than the race that
+  // makes it arrive twice.
+  window.webContents.send('event', { event: 'notice', notice });
+  await new Promise((r) => setTimeout(r, 150));
+  const again = await window.webContents.executeJavaScript(
+    `document.querySelectorAll('#chat-log .notice').length`,
+  );
+  check('the same notice is not drawn twice', again === 1, `${again} card(s)`);
+
+  await window.webContents.executeJavaScript(`document.getElementById('chat-log').replaceChildren()`);
 }
 
 /**
@@ -534,6 +620,77 @@ async function checkPlugins(window) {
   }))()`);
   check(`asking for it out loud reports the failure — "${asked.status}"`, /registry/i.test(asked.status), JSON.stringify(asked));
   check('and lists nothing rather than something stale', asked.rows === 0, `${asked.rows} row(s)`);
+
+  await checkRegistries(window);
+}
+
+/**
+ * Where the plugin list is fetched from.
+ *
+ * Every URL here is loopback on a closed port, so each one fails in
+ * milliseconds rather than waiting out the fetch timeout — the run has a
+ * watchdog, and a check that spends twenty seconds proving a name does not
+ * resolve is a check that eventually kills the suite.
+ */
+async function checkRegistries(window) {
+  say('');
+  say('Registries');
+
+  const read = () =>
+    window.webContents.executeJavaScript(`(() => ({
+      rows: [...document.querySelectorAll('#registry-list .registry-item')].map((row) => ({
+        name: row.querySelector('.registry-name').textContent,
+        removable: Boolean(row.querySelector('button')),
+        failed: row.classList.contains('failed'),
+      })),
+      status: document.getElementById('store-status').textContent,
+    }))()`);
+
+  const start = await read();
+  check(`the registry being asked is on screen — ${start.rows.length}`, start.rows.length === 1, JSON.stringify(start.rows));
+  // The app's own has no remove button: a list with nothing in it and no way
+  // back to the default is a plugin section repairable only by editing
+  // config.json.
+  check('the app’s own registry cannot be removed', start.rows[0]?.removable === false, JSON.stringify(start.rows[0]));
+  check('a registry that did not answer says so on its own row', start.rows[0]?.failed === true, JSON.stringify(start.rows[0]));
+
+  // Refused before it is stored: an index over plain http is a list of URLs and
+  // checksums that anything on the path can rewrite.
+  await window.webContents.executeJavaScript(`(() => {
+    document.getElementById('registry-url').value = 'http://plugins.example/index.json';
+    document.getElementById('btn-registry-add').click();
+  })()`);
+  await new Promise((r) => setTimeout(r, 400));
+  const refused = await read();
+  check('a registry that is not over https is refused', refused.rows.length === 1, JSON.stringify(refused.rows));
+  check(`and the reason is where the user is looking — "${refused.status}"`, /https/.test(refused.status), refused.status);
+
+  await window.webContents.executeJavaScript(`(() => {
+    document.getElementById('registry-url').value = 'http://127.0.0.1:1/index.json';
+    document.getElementById('btn-registry-add').click();
+  })()`);
+  await new Promise((r) => setTimeout(r, 1500));
+  const added = await read();
+  check(`a second registry is added and asked — ${added.rows.length}`, added.rows.length === 2, JSON.stringify(added.rows));
+  check('and it is the one that can be removed', added.rows[1]?.removable === true, JSON.stringify(added.rows[1]));
+  const cleared = await window.webContents.executeJavaScript(
+    `document.getElementById('registry-url').value`,
+  );
+  check('the box is emptied once it has been taken', cleared === '', cleared);
+
+  // Removing is a click on the row, not a settings edit.
+  await window.webContents.executeJavaScript(
+    `document.querySelectorAll('#registry-list .registry-item')[1].querySelector('button').click()`,
+  );
+  await new Promise((r) => setTimeout(r, 1500));
+  const removed = await read();
+  check('removing one leaves the app’s own behind', removed.rows.length === 1, JSON.stringify(removed.rows));
+
+  const fromFile = await window.webContents.executeJavaScript(`(() => {
+    const button = document.getElementById('btn-store-file');
+    return { there: Boolean(button), shown: button ? getComputedStyle(button).display !== 'none' : false };
+  })()`);
+  check('installing from an archive on disk is offered', fromFile.there && fromFile.shown, JSON.stringify(fromFile));
 }
 
 /**
@@ -668,6 +825,14 @@ async function checkApproval(window) {
     `window.wasteland.plugins.list().then((list) => list.find((p) => p.id === 'smoke-code')?.active === true)`,
   );
   check('the main process agrees it is running', known === true);
+
+  // It wrote to its own document during activation, which is the only proof
+  // from out here that `ctx.state` reached it at all — a service or a store
+  // that threw would have failed the row above with a reason, but a store that
+  // silently wrote nowhere would not.
+  const statePath = join(pluginStateDir(), 'smoke-code.json');
+  const kept = existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) : null;
+  check('a plugin keeps a document of its own, outside its directory', Number(kept?.starts) >= 1, JSON.stringify(kept));
 }
 
 /**
@@ -921,19 +1086,31 @@ app.whenReady().then(async () => {
         id: 'smoke-code',
         name: 'Smoke code',
         version: '1.0.0',
-        apiVersion: 2,
+        apiVersion: 4,
         description: 'Registers one action, for the smoke test.',
         main: 'main.mjs',
         actions: ['smoke_ping'],
+        // Asked for, so the whole chain is exercised from a manifest: declared
+        // here, handed over by name, and used to put something on screen.
+        services: ['notify'],
       }),
     );
     writeFileSync(
       join(codeDir, 'main.mjs'),
       `export function activate(ctx) {
+         const notify = ctx.service('notify');
+         // A plugin's own document: undeclared, unread by the app, and the only
+         // place a count like this can live across a restart. Touched during
+         // activation so that a store which cannot be written fails the row
+         // rather than waiting for somebody to run the action.
+         ctx.state.set({ starts: (ctx.state.get().starts ?? 0) + 1 });
          ctx.prompt('PING — {"type":"smoke_ping","steps":""}');
          ctx.action({
            type: 'smoke_ping',
-           run: async () => ({ ok: true, summary: 'pong' }),
+           run: async () => {
+             notify.show({ title: 'Smoke ping', body: 'the plugin said so', desktop: false });
+             return { ok: true, summary: 'pong' };
+           },
            // Answers a click that arrives long after the turn has ended, and
            // refuses one from a list it no longer considers current.
            choose: async (id) => {
@@ -1175,6 +1352,7 @@ app.whenReady().then(async () => {
     await checkPlayer(window, wavPath);
     await checkChatControls(window);
     await checkAttachments(window);
+    await checkNotices(window);
     await checkContextControls(window);
     await checkLayouts(window);
   } catch (err) {

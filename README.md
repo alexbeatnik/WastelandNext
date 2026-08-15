@@ -58,9 +58,15 @@ model shown the tree can ask for a file by name. File bodies fill whatever budge
 then shallow before deep and small before large — and whatever did not fit is named as not having fitted, so the model
 can tell "there is no more" from "there is more I have not seen".
 
-Attachments go into the transcript **once**, as a message ahead of the words they came with, and are drawn folded there
-— a dropped project is thousands of lines, and a transcript with the reply somewhere underneath is unusable. One click
-opens it, because what was sent to the model is what you should be able to check.
+An attachment goes into the transcript **once per conversation**, as a message ahead of the words it came with, and is
+drawn folded there — a dropped project is thousands of lines, and a transcript with the reply somewhere underneath is
+unusable. One click opens it, because what was sent to the model is what you should be able to check.
+
+**It stays attached until you detach it.** The chip does not disappear when you send: it changes from `+` to `✓`,
+meaning this conversation now holds it. Asking a second question about the same project costs nothing, because the
+model can already see it — re-sending it every turn would put the same folder in the prompt five times over, outside
+the compaction that is the only thing able to shrink it later. Start a new conversation with the chip still there and
+it goes into that one too, which is what makes "here is my project" worth saying once.
 
 Unlike `read_file`, an attachment is not confined to your home directory: a model naming a path is a request to be
 vetted, but you picking one through a dialog have already decided, and a checkout on another drive is ordinary. The
@@ -97,6 +103,31 @@ one that plays a single notification sound does not inherit a next button it can
 **An action can ask rather than guess.** A handler that returns `choices` has them drawn as buttons under its result,
 and pressing one calls back into the plugin. It is what stops a model picking blindly between five near-identical
 files, and what stops the alternative — asking someone to retype a file name.
+
+**A plugin can say something without being asked.** Everything else in the transcript is an answer to something you
+typed; a reminder coming due is not. The `notify` service puts a card in the transcript *and* raises an operating
+system notification, because neither is enough alone — the first is invisible to somebody in another window, the second
+is gone the moment it is dismissed. Notices raised before the window was listening are kept and shown on the way in,
+which is how a reminder that came due while the app was closed still reaches you.
+
+**A plugin keeps its own state.** Settings are the questions its manifest asked you and each one is a control on its
+row; a list of reminders is neither of those, so a plugin also gets one JSON document of its own under `plugin-state/`,
+which the app never reads the inside of. It is written whole and renamed into place, because a half-written file reads
+back as empty — which would be every reminder you had set, gone, with nothing saying so.
+
+**More than one registry, and archives off your own disk.** GET PLUGINS lists the registries it asks; paste a
+repository URL — `https://github.com/owner/repo` is expanded to the index inside it — and press ADD. An index has to be
+served over https, since it is a list of URLs and checksums deciding what gets downloaded and unpacked; loopback is the
+exception, for anyone serving their own. One registry being unreachable does not empty the list, and the failure sits
+on that registry's row where removing it is the fix. Where a plugin came from travels with it to the screen, so two
+registries publishing the same id is visible rather than silent.
+
+**`[ FROM FILE… ]`** installs from a `.zip` you pick yourself — a plugin that was never published, a build handed over
+on a stick, or a machine that cannot reach a registry at all. There is no published checksum to compare against,
+because there is no index making a claim about the bytes; what is trusted is that you chose the file, the same
+distinction the app draws between a path a model names and a path a person picks. Every other check still runs: the
+archive is refused if any entry would unpack outside its own directory, the manifest has to be one this build can use,
+and the code does not run until you press ALLOW AND RUN.
 
 **Updating a plugin needs a restart to finish.** Node caches modules by URL for the life of the process, so replacing
 files does not replace what is running; the row says so, and the version shown is what is installed. An earlier attempt

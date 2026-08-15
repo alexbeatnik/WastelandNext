@@ -29,10 +29,23 @@ const state = {
   /** What is installed, what the registry offers, and what is on the bar. */
   plugins: [],
   models: [],
-  store: { plugins: [], error: '', fetched: false },
+  store: { plugins: [], error: '', fetched: false, sources: [] },
+  /** Every index being asked, including the app's own. */
+  registries: [],
+  /** Attached files and folders. They outlive a message; only × removes one. */
+  attachments: [],
   themes: [],
   locales: [],
   audio: { source: null },
+  /**
+   * Notices already drawn, by id.
+   *
+   * One can arrive twice — through the boot snapshot and again on the event
+   * stream — because the main process keeps the recent ones for a renderer that
+   * was not listening yet. Drawing a reminder twice is worse than the race it
+   * protects against.
+   */
+  notices: new Set(),
 };
 
 /* ============================ small helpers ============================ */
@@ -222,6 +235,10 @@ async function loadChat(id) {
 
   const seq = (chatLoadSeq += 1);
   state.chatId = id ?? '';
+  // An attachment belongs to the composer, not to a conversation, so it stays
+  // across a switch — but whether *this* chat already holds it changes with the
+  // chat, and that is what the chips say.
+  paintAttachments(state.attachments);
   $('chat-log').replaceChildren();
   if (state.chatId) {
     const chat = await api.chats.read(state.chatId);
@@ -1014,7 +1031,145 @@ function choiceList(type, choices) {
   return box;
 }
 
+/**
+ * Something the app said without being asked.
+ *
+ * Every other line in the transcript is an answer to something the user typed.
+ * A reminder is the one message with no question in front of it, so it is drawn
+ * as its own thing rather than as an assistant turn — it did not come from the
+ * model, and dressing it as a reply would make the model responsible for words
+ * it never wrote.
+ *
+ * The card is the half that persists; an operating system notification, raised
+ * in the main process, is the half that arrives while the user is elsewhere.
+ * Neither is enough alone.
+ */
+function showNotice(notice) {
+  // The same notice can arrive twice — once in the boot snapshot, once on the
+  // event stream — because the main process holds recent ones for a renderer
+  // that had not subscribed yet.
+  if (!notice?.id || state.notices.has(notice.id)) return;
+  state.notices.add(notice.id);
+
+  const card = el('div', 'notice');
+  const head = el('div', 'notice-head');
+  head.append(el('span', 'notice-mark', '◆'), el('span', 'notice-title', notice.title));
+
+  const when = new Date(notice.at || Date.now());
+  head.append(el('span', 'notice-when muted', when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })));
+  card.append(head);
+
+  if (notice.body) card.append(el('div', 'notice-body', notice.body));
+
+  // Resolved from the id rather than read off the notice: what a plugin is
+  // called is what its own row says, not what its message claims.
+  const from = state.plugins.find((plugin) => plugin.id === notice.pluginId);
+  if (from) card.append(el('div', 'notice-from muted', from.name));
+
+  $('chat-log').append(card);
+  activity(`${notice.title}${notice.body ? ` — ${notice.body}` : ''}`);
+  scrollChat();
+}
+
 /* ============================ the registry ============================ */
+
+/**
+ * The indexes being asked, one row each.
+ *
+ * The app's own has no remove button: a list with nothing in it and no way back
+ * to the default would be a plugin section repairable only by editing
+ * `config.json`. Everything else the user added, they can take away.
+ */
+function paintRegistries(list = []) {
+  state.registries = list;
+  const host = $('registry-list');
+  host.replaceChildren();
+
+  for (const source of list) {
+    const row = el('div', 'registry-item');
+    row.title = source.url;
+
+    // What happened last time this one was asked. A registry that failed is the
+    // reason the list is short, and saying so on its own row is the difference
+    // between "there are no plugins" and "one of three registries is down".
+    const reached = state.store.sources?.find((entry) => entry.url === source.url);
+    if (reached && !reached.ok) row.classList.add('failed');
+
+    row.append(el('span', 'registry-name', source.label));
+    if (reached) {
+      row.append(el('span', 'muted', reached.ok ? `${reached.count} plugin(s)` : reached.error));
+    }
+
+    if (!source.primary) {
+      const remove = el('button', 'ghost danger', '×');
+      remove.title = `Stop asking ${source.url}`;
+      remove.addEventListener('click', async () => {
+        remove.disabled = true;
+        try {
+          paintRegistries(await api.plugins.removeRegistry(source.url));
+          await refreshStore();
+        } catch (err) {
+          $('store-status').textContent = err.message;
+          remove.disabled = false;
+        }
+      });
+      row.append(remove);
+    }
+    host.append(row);
+  }
+}
+
+/** Add whatever was typed into the box, then ask it what it has. */
+async function addRegistry$() {
+  const input = $('registry-url');
+  const url = input.value.trim();
+  if (!url) return;
+
+  const button = $('btn-registry-add');
+  button.disabled = true;
+  try {
+    paintRegistries(await api.plugins.addRegistry(url));
+    input.value = '';
+    await refreshStore();
+  } catch (err) {
+    // The reason is the useful part — "it has to be https", "already in the
+    // list" — so it goes where the user is looking rather than into the log.
+    $('store-status').textContent = err.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/**
+ * Install from an archive the user picks off their own disk.
+ *
+ * No registry, no checksum to compare against, and no network: for a plugin
+ * that was never published, or a machine that cannot reach one. What is being
+ * trusted is the person at the keyboard, which is why the file arrives through
+ * a dialog the main process opened rather than a path typed anywhere.
+ */
+async function installFromFile$() {
+  const button = $('btn-store-file');
+  button.disabled = true;
+  $('store-status').textContent = 'Reading the archive…';
+  try {
+    const installed = await api.plugins.installFile();
+    if (installed.canceled) {
+      $('store-status').textContent = '';
+    } else {
+      activity(`plugin installed from file: ${installed.name} ${installed.version}`);
+      $('store-status').textContent = installed.restartRequired
+        ? `${installed.name} ${installed.version} installed — restart to run it`
+        : `${installed.name} ${installed.version} installed — switch it on above`;
+      await Promise.all([refreshPlugins(), refreshThemes(), refreshLocales()]);
+    }
+  } catch (err) {
+    $('store-status').textContent = err.message;
+    activity(`plugin install failed: ${err.message}`, 'bad');
+  } finally {
+    button.disabled = false;
+  }
+}
 
 async function installPlugin(entry, button) {
   const label = button.textContent;
@@ -1047,7 +1202,15 @@ function paintStore() {
     head.append(pluginIcon(entry), el('span', 'plugin-name', entry.name));
     row.append(head, el('span', 'plugin-meta', `${entry.version} · ${entry.kind === 'theme' ? 'THEME' : 'PLUGIN'}`));
     if (entry.description) row.append(el('div', 'plugin-desc muted', entry.description));
-    if (entry.author) row.append(el('div', 'plugin-adds muted', `by ${entry.author}`));
+
+    // Where it came from, whenever that is not the registry the app ships with.
+    // Two indexes can publish the same id — a fork, a mirror, somebody's own
+    // build — and the newest wins; which is fine as long as it is not silent.
+    const primary = state.store.sources?.[0]?.url ?? '';
+    const origin = [entry.author ? `by ${entry.author}` : '', entry.source && entry.source !== primary ? `from ${entry.sourceLabel}` : '']
+      .filter(Boolean)
+      .join(' · ');
+    if (origin) row.append(el('div', 'plugin-adds muted', origin));
 
     const buttons = el('div', 'plugin-buttons');
     if (!entry.compatible) {
@@ -1081,15 +1244,38 @@ function paintStore() {
  * rows come from this, which is why it runs at boot at all rather than waiting
  * for the section to be opened.
  */
+async function refreshRegistries() {
+  try {
+    paintRegistries(await api.plugins.registries());
+  } catch {
+    /* the section is still usable without the list of where it looked */
+  }
+}
+
 async function refreshStore({ quiet = false } = {}) {
   if (!quiet) $('store-status').textContent = 'Asking the registry…';
   try {
     const index = await api.plugins.available();
-    state.store = { plugins: index.plugins ?? [], error: '', fetched: true };
+    // A registry that did not answer is a failure on its own row, not on the
+    // section; `error` is set only when none of them did.
+    state.store = { plugins: index.plugins ?? [], error: index.error ?? '', fetched: true, sources: index.sources ?? [] };
   } catch (err) {
-    state.store = { plugins: [], error: quiet ? '' : err.message, fetched: true };
-    if (quiet) return;
+    // The call itself failed, which is the main process rather than a registry.
+    state.store = { plugins: [], error: err.message, fetched: true, sources: [] };
   }
+
+  // Painted from `sources` when there is one: it is the same list of registries
+  // plus what each of them just answered, which is the only place that status
+  // exists — and the case where *nothing* answered is exactly when knowing
+  // which ones were asked is worth most.
+  if (state.store.sources.length) paintRegistries(state.store.sources);
+  else await refreshRegistries();
+
+  // A machine with no network must not open with a complaint about a list
+  // nobody asked to see. The rows above still say what happened; the section's
+  // own line stays empty until somebody asks out loud.
+  if (quiet && state.store.error) return;
+
   paintStore();
   // The installed rows carry the update button, so they are repainted too.
   paintPlugins(state.plugins);
@@ -1416,17 +1602,35 @@ function shortPath(path) {
   return parts.slice(-2).join('/');
 }
 
-/** The chips above the composer: what will go with the next message. */
+/**
+ * The chips above the composer: what the model has been given, and what it is
+ * about to be.
+ *
+ * They no longer disappear when a message is sent. A chip that vanished the
+ * moment a question was asked read as the app having discarded the folder, and
+ * the answer was to attach it again for the second question — so it stays until
+ * the × beside it is pressed. What changes on sending is the mark: ✓ for an
+ * attachment this conversation already holds, + for one still to go. Both are
+ * worth showing, because they are different facts and only one of them will
+ * cost anything on the next turn.
+ */
 function paintAttachments(items = []) {
+  // Kept, because switching conversations repaints these without asking the
+  // main process again — only the ✓ changes, and it changes here.
+  state.attachments = items;
   const chips = $('attach-chips');
   chips.replaceChildren();
 
   for (const item of items) {
-    const chip = el('div', 'chip');
+    const here = Boolean(item.includedIn?.includes(state.chatId));
+    const chip = el('div', `chip${here ? ' included' : ''}`);
     // The whole path stays on hover. The chip says which one, the tooltip says
     // exactly where — a chip wide enough for the second would fit one item.
-    chip.title = `${item.path}\n${item.files} file(s), ${formatSize(item.bytes)}`;
+    chip.title =
+      `${item.path}\n${item.files} file(s), ${formatSize(item.bytes)}\n` +
+      (here ? 'Already in this conversation' : 'Goes with the next message');
 
+    chip.append(el('span', 'chip-state', here ? '✓' : '+'));
     chip.append(el('span', 'chip-kind', item.kind === 'dir' ? 'DIR' : 'FILE'));
     chip.append(el('span', 'chip-name', shortPath(item.path)));
     chip.append(
@@ -1694,6 +1898,11 @@ function handleEvent(payload) {
       activity(payload.text);
       break;
 
+    // A plugin with something to say and no turn to say it in.
+    case 'notice':
+      showNotice(payload.notice);
+      break;
+
     // Kept in `state` as well as painted: the button has to know whether it is
     // offering a check or a restart, and the box may be shut when this lands.
     case 'update:status':
@@ -1705,10 +1914,11 @@ function handleEvent(payload) {
       paintAttachments(payload.items ?? []);
       break;
 
-    // The attachments went into the transcript, so the composer no longer owes
-    // them: the main process says when, because it is what decided.
+    // The attachments reached the transcript. They stay on the row — the user
+    // is the only one who detaches anything — but this conversation now holds
+    // them, and the chips say which.
     case 'attach:consumed':
-      paintAttachments([]);
+      paintAttachments(payload.items ?? state.attachments);
       break;
 
     case 'turn:start':
@@ -2118,6 +2328,16 @@ function wire() {
   bindCheck('set-crt', 'crtEffects');
 
   $('btn-store-refresh').addEventListener('click', () => refreshStore());
+  $('btn-store-file').addEventListener('click', () => installFromFile$());
+  $('btn-registry-add').addEventListener('click', () => addRegistry$());
+  $('registry-url').addEventListener('keydown', (event) => {
+    // Enter in the box is the same as pressing ADD: the alternative is typing a
+    // URL and then hunting for a button beside it.
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      addRegistry$();
+    }
+  });
 
   // Opening the section is asking what is available, so it asks. The boot fetch
   // is one moment in time and the answer it got can be minutes old by the time
@@ -2180,7 +2400,21 @@ async function boot() {
   // is painted from what is actually pending, not assumed empty.
   paintAttachments(await api.attach.list());
 
-  await Promise.all([refreshVault(), refreshChats(), refreshTool(), refreshPlugins(), refreshThemes(), refreshLocales()]);
+  await Promise.all([
+    refreshVault(),
+    refreshChats(),
+    refreshTool(),
+    refreshPlugins(),
+    refreshThemes(),
+    refreshLocales(),
+    refreshRegistries(),
+  ]);
+
+  // After `refreshPlugins`, because a notice is signed with the name on the
+  // plugin's own row and that list is where the name comes from. These are the
+  // ones raised before the window was listening — a reminder that came due while
+  // the app was closed is reported during boot, which is earlier than this.
+  for (const notice of snapshot.notices ?? []) showNotice(notice);
 
   if (!snapshot.engine) activity('manul-browser engine not built — run `npm run engine` for browser control.', 'bad');
   status('Ready');

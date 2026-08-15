@@ -871,6 +871,42 @@ button.choice.chosen .choice-label::before {
   color: var(--warn);
 }
 
+/* Where the plugin list is fetched from. One row per index, and the row says
+   what that index last answered — a registry that is down is the reason the
+   list is short, and that belongs beside the registry rather than on the
+   section. */
+.registry-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin: 0.2rem 0;
+}
+
+.registry-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  border: 1px solid var(--amber-faint);
+  padding: 0.1rem 0.3rem;
+  font-size: 0.85em;
+}
+
+.registry-item .registry-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.registry-item.failed {
+  border-color: var(--warn);
+}
+
+.registry-item.failed .muted {
+  color: var(--warn);
+}
+
 .vault-item,
 .chat-item {
   display: flex;
@@ -1133,6 +1169,50 @@ button.choice.chosen .choice-label::before {
   color: var(--amber-dim);
 }
 
+/* A message with no question in front of it — a reminder coming due. Brighter
+   than an action card and marked down the left edge, because it has to be
+   findable in a transcript somebody has scrolled back into. */
+.notice {
+  border: 1px solid var(--amber-bright);
+  border-left-width: 3px;
+  padding: 0.35rem 0.5rem;
+  background: #14100a;
+}
+
+.notice-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.notice-mark {
+  color: var(--amber-bright);
+}
+
+.notice-title {
+  color: var(--amber-bright);
+  letter-spacing: 0.04em;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.notice-when {
+  flex: 0 0 auto;
+  font-size: 0.85em;
+}
+
+.notice-body {
+  margin-top: 0.2rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.notice-from {
+  margin-top: 0.2rem;
+  font-size: 0.8em;
+  letter-spacing: 0.06em;
+}
+
 /* ============================ Context + composer ============================ */
 
 /* The conversation picker, above the transcript it belongs to. */
@@ -1292,6 +1372,20 @@ button.choice.chosen .choice-label::before {
   color: var(--amber-dim);
   font-size: 0.85em;
   white-space: nowrap;
+}
+
+/* ✓ once this conversation holds it, + while it is still to go. The chip stays
+   either way: only the × detaches anything. */
+.chip .chip-state {
+  color: var(--amber-bright);
+}
+
+.chip.included {
+  border-color: var(--amber-dim);
+}
+
+.chip.included .chip-state {
+  color: var(--ok);
 }
 
 .chip .chip-name {
