@@ -452,6 +452,57 @@ test('a plugin registering half of itself before throwing registers none of it',
   assert.equal(host.action('first'), null, 'half a plugin is worse than none of it');
 });
 
+test('an updated plugin runs the code that is on disk, not the code it was loaded with', async () => {
+  // Node caches ES modules by resolved URL, and an update writes over the same
+  // path. Without a distinct URL the app would go on executing the version it
+  // first imported — the row would say 1.0.1 while the behaviour stayed 1.0.0,
+  // which is worse than an update that fails outright.
+  const root = mkdtempSync(join(tmpdir(), 'wl-update-'));
+  const write = (version, answer) =>
+    install(root, 'evolving', {
+      manifest: { version, actions: ['ask'] },
+      source: `export function activate(ctx) {
+        ctx.action({ type: 'ask', run: async () => ({ ok: true, summary: '${answer}' }) });
+      }`,
+    });
+
+  write('1.0.0', 'old');
+  const host = await installedHost(root, { evolving: { enabled: true, approved: true } });
+  const before = await host.action('ask').run('', { status() {}, log() {} });
+  assert.equal(before.summary, 'old');
+
+  write('1.0.1', 'new');
+  await host.refresh();
+
+  const after = await host.action('ask').run('', { status() {}, log() {} });
+  assert.equal(after.summary, 'new', 'the update was installed but the old module kept running');
+  assert.equal(host.list().find((plugin) => plugin.id === 'evolving').version, '1.0.1');
+});
+
+test('switching a plugin off and on again does not reload it', async () => {
+  // The counterpart to the test above: every distinct import URL stays in the
+  // loader's registry for the life of the process, so a fresh instance per
+  // toggle would be a slow leak. An unchanged file must reuse its module.
+  const root = mkdtempSync(join(tmpdir(), 'wl-toggle-'));
+  install(root, 'counted', {
+    manifest: { actions: ['count'] },
+    source: `let loads = (globalThis.__loads ?? 0) + 1;
+    globalThis.__loads = loads;
+    export function activate(ctx) {
+      ctx.action({ type: 'count', run: async () => ({ ok: true, summary: String(loads) }) });
+    }`,
+  });
+
+  const host = await installedHost(root, { counted: { enabled: true, approved: true } });
+  const first = await host.action('count').run('', { status() {}, log() {} });
+
+  await host.setEnabled('counted', false);
+  await host.setEnabled('counted', true);
+
+  const second = await host.action('count').run('', { status() {}, log() {} });
+  assert.equal(second.summary, first.summary, 'an unchanged plugin was imported twice');
+});
+
 test('a plugin cannot claim an action type a built-in already provides', async () => {
   // Quietly letting a newcomer shadow `system_shell` is how an action stops
   // meaning what the prompt says it means.

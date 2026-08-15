@@ -18,7 +18,7 @@
  * contributions down and leaves the rest of the app alone.
  */
 import { EventEmitter } from 'node:events';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as config from '../config.mjs';
@@ -321,10 +321,33 @@ export class PluginHost extends EventEmitter {
     }
   }
 
+  /**
+   * Import a plugin's entry point, seeing the file that is on disk *now*.
+   *
+   * Node caches ES modules by resolved URL, and an update writes over the same
+   * path — so a plugin updated while the app is running would go on executing
+   * the code it was first loaded with, silently, until a restart. That is worse
+   * than an update that fails: the version on the row says 1.0.1 and the
+   * behaviour is 1.0.0's.
+   *
+   * The query makes it a different module for the loader. It is keyed on the
+   * version and the file's modification time rather than on the clock, so
+   * switching a plugin off and on again reuses the cached module and only a
+   * genuinely changed file costs a new one — every distinct URL stays in the
+   * loader's registry for the life of the process, and a fresh instance per
+   * toggle would be a leak.
+   */
   async #import(entry) {
     const target = join(entry.dir, entry.manifest.main);
     if (!existsSync(target)) throw new Error(`${entry.manifest.main} is missing`);
-    return import(pathToFileURL(target).href);
+
+    let stamp = entry.manifest.version;
+    try {
+      stamp += `-${statSync(target).mtimeMs}`;
+    } catch {
+      /* the version alone still distinguishes an update */
+    }
+    return import(`${pathToFileURL(target).href}?v=${encodeURIComponent(stamp)}`);
   }
 
   /** The object a plugin's `activate` is handed. */
