@@ -6,7 +6,7 @@
  * reload of this window can never leave the two disagreeing about whether a
  * turn is running.
  */
-import { formatDuration, formatSize, splitThinking, stripActionBlocks } from '../shared/render.mjs';
+import { describePlacement, formatDuration, formatSize, splitThinking, stripActionBlocks } from '../shared/render.mjs';
 import { describeUpdate, isBusy, isReady } from '../shared/updates.mjs';
 import { parseMarkdown } from '../shared/markdown.mjs';
 import { formatTime } from '../shared/media.mjs';
@@ -596,6 +596,10 @@ function paintLlm(llm) {
  * same branch, so the badge read `RUN: GPU` for a model running wholly on the
  * processor. `RUN: ?` is the honest reading when llama.cpp said nothing we
  * recognise; a request is not an outcome, and the badge is about the outcome.
+ *
+ * The wording is `describePlacement`'s, not this file's. It used to be written
+ * out again here, and the copy went stale the moment the reader learned that
+ * every layer being on the card does not mean every byte is.
  */
 function paintCompute(llm) {
   state.llmReady = llm?.state === 'ready';
@@ -614,15 +618,7 @@ function paintCompute(llm) {
       ? 'asked for every layer on the GPU'
       : `asked for ${auto.layers} layer(s) on the GPU`;
 
-  const text = !real
-    ? 'RUN: ?'
-    : real.where === 'cpu'
-      ? 'RUN: CPU'
-      : real.where === 'gpu'
-        ? 'RUN: GPU'
-        : real.blocks
-          ? `RUN: GPU ${real.layers}/${real.blocks} LAYERS + CPU`
-          : 'RUN: GPU + CPU';
+  const text = describePlacement(real);
 
   // The evidence goes in the tooltip rather than the badge: if the reading is
   // ever wrong, the line it was read from is what makes that visible instead of

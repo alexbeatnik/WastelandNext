@@ -101,6 +101,8 @@ export const MIN_TRADED_CONTEXT = 8192;
 export function contextForFullOffload({
   fileSize = 0,
   kvBytesPerToken = 0,
+  /** KV cost that does not scale with context — sliding-window layers. */
+  kvFixedBytes = 0,
   vramBytes = 0,
   maxContext = 0,
   floor = MIN_TRADED_CONTEXT,
@@ -109,7 +111,7 @@ export function contextForFullOffload({
 } = {}) {
   if (!vramBytes || !fileSize || !kvBytesPerToken || !maxContext) return 0;
 
-  const spare = vramBytes * share - overheadBytes - fileSize;
+  const spare = vramBytes * share - overheadBytes - fileSize - kvFixedBytes;
   if (spare <= 0) return 0; // the weights alone do not fit; nothing to trade
 
   const affordable = Math.floor(spare / kvBytesPerToken / 512) * 512;
@@ -131,6 +133,8 @@ export function recommendGpuLayers({
   fileSize = 0,
   contextTokens = 0,
   kvBytesPerToken = 0,
+  /** KV cost that does not scale with context — sliding-window layers. */
+  kvFixedBytes = 0,
   vramBytes = 0,
   share = GPU_SHARE,
   overheadBytes = GPU_OVERHEAD_BYTES,
@@ -140,7 +144,7 @@ export function recommendGpuLayers({
   if (!vramBytes) return { layers: full, reason: 'VRAM unknown — offloading everything' };
   if (!layers || !fileSize) return { layers: full, reason: 'model shape unknown — offloading everything' };
 
-  const kv = contextTokens * kvBytesPerToken;
+  const kv = contextTokens * kvBytesPerToken + kvFixedBytes;
   const budget = vramBytes * share - kv - overheadBytes;
   const perLayer = fileSize / layers;
 

@@ -11,7 +11,7 @@
  */
 import { stat } from 'node:fs/promises';
 import { totalmem } from 'node:os';
-import { kvBytesPerToken, readGgufMetadata, recommendContext } from '../llm/gguf.mjs';
+import { kvBudget, readGgufMetadata, recommendContext } from '../llm/gguf.mjs';
 import { detectVram, recommendGpuLayers } from '../llm/gpu.mjs';
 
 const cache = new Map();
@@ -47,11 +47,13 @@ export async function planFor(path) {
   const { meta, fileSize } = entry;
   const context = recommendContext({ meta, fileSize, totalMemory: totalmem() });
   const vramBytes = detectVram();
+  const kvCost = kvBudget(meta) ?? { perToken: 0, fixedBytes: 0 };
   const gpu = recommendGpuLayers({
     meta,
     fileSize,
     contextTokens: context.context,
-    kvBytesPerToken: kvBytesPerToken(meta) ?? 0,
+    kvBytesPerToken: kvCost.perToken,
+    kvFixedBytes: kvCost.fixedBytes,
     vramBytes: vramBytes ?? 0,
   });
 

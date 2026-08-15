@@ -13,7 +13,7 @@ import { stat } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { totalmem } from 'node:os';
 import { join } from 'node:path';
-import { kvBytesPerToken, readGgufMetadata, recommendContext } from './gguf.mjs';
+import { kvBudget, readGgufMetadata, recommendContext } from './gguf.mjs';
 import { contextForFullOffload, detectVram, recommendGpuLayers } from './gpu.mjs';
 import { explainCrash, summariseFailure } from './failure.mjs';
 import { PlacementReader } from './offload.mjs';
@@ -32,6 +32,60 @@ const LOG_TAIL = 60;
 const PROBE_TIMEOUT_MS = 10_000;
 
 const EXE = process.platform === 'win32' ? 'llama-server.exe' : 'llama-server';
+
+/** llama.cpp's timestamp and severity field: `0.01.369.125 I load_tensors: …`. */
+const PREFIXED_LINE = /^\d[\d.]*\s+[EWID]\s/;
+/** The two severities it uses for things that are merely going to plan. */
+const ROUTINE_LINE = /^\d[\d.]*\s+[ID]\s/;
+/** Something is wrong, whatever the line above it was. */
+const COMPLAINT_LINE = /\b(?:error|failed|assert|abort|out of memory|unsupported)\b/i;
+
+/**
+ * Decides which of llama-server's lines are worth a person's attention.
+ *
+ * Trace output is asked for because placement is only stated there, and
+ * llama.cpp answers with that and with everything else it knows: 246 lines for
+ * a load, half of them every key-value pair in the GGUF header, and 38 more on
+ * every turn describing slots and sampler chains. The activity log is where the
+ * user watches the browser and the agent work, and burying that under a
+ * per-turn dump of sampler parameters would trade one complaint for another.
+ *
+ * So the two audiences are split. The placement reader and the failure tail see
+ * every line; the log sees what this keeps. The test is llama.cpp's own
+ * severity field — the one `failure.mjs` already trusts — rather than a list of
+ * which internals are dull, because that list is precisely what goes stale:
+ * this filter exists because the lines it reads moved once already.
+ *
+ * The lifecycle lines it hides (`loading model`, `model loaded`, `listening
+ * on`) are not lost. The status bar is already saying each of them, in the
+ * user's own words, off the `state` event.
+ *
+ * One filter per stream: a wrapped line continues within its own.
+ */
+export function logFilter() {
+  let shown = true;
+  let prefixed = false;
+  return (line) => {
+    if (PREFIXED_LINE.test(line)) {
+      prefixed = true;
+      shown = !ROUTINE_LINE.test(line);
+    } else if (!prefixed) {
+      // Nothing so far has carried a severity field, so this build does not
+      // print one and there is nothing to filter on. Older ones do not.
+      shown = true;
+    } else if (COMPLAINT_LINE.test(line)) {
+      // A failed GGML_ASSERT prints bare and aborts on the spot. Reading it as
+      // a continuation of whatever routine line preceded it would hide the one
+      // line worth seeing.
+      shown = true;
+    }
+    // Anything else is the line above, wrapped — llama.cpp continues both
+    // indented (the sampler parameters) and at column 0 (the chat template it
+    // echoes back) — and a continuation shown without its heading is worse than
+    // one not shown at all. So it shares that line's fate, whichever it was.
+    return shown;
+  };
+}
 
 /**
  * Find `llama-server`: an explicit setting, then our own tools cache, then
@@ -249,6 +303,19 @@ export class LlamaServer extends EventEmitter {
       '-c', String(plan.context),
       '-ngl', String(plan.gpuLayers),
       '--no-webui',
+      // Where the weights went is printed at llama.cpp's `trace` threshold, and
+      // the default threshold is one below it. A current build (10405) loads a
+      // model in seventeen lines, none of which mention a device, so the badge
+      // read `RUN: ?` on a machine running every layer on the GPU — the reading
+      // was honest and the evidence had simply stopped arriving. The log is the
+      // only place it is stated: /props, /v1/models and /slots were all checked
+      // and none of them mentions a device.
+      //
+      // Level 4 exactly. 5 is llama.cpp's debug level and holds nothing
+      // placement needs, and what 4 costs — 246 lines a load, 38 a turn — is
+      // already more than the activity log wants, which is what `logFilter` is
+      // for.
+      '-lv', '4',
       // Thinking is asked for, or asked against, in two ways because neither
       // works everywhere: the budget is a hard stop llama.cpp applies itself,
       // while `enable_thinking` is what Qwen-style chat templates read. Models
@@ -320,13 +387,16 @@ export class LlamaServer extends EventEmitter {
     const placement = new PlacementReader();
     const relay = (stream) => {
       let buffer = '';
+      const worthShowing = logFilter();
       const take = (line) => {
         if (!line.trim()) return;
-        this.emit('log', line.trim());
+        // Read and kept whatever it is — where the weights went, and why a
+        // server died, are both questions the dullest line might answer.
         placement.feed(line);
         this.#placement = placement.placement;
         this.#logTail.push(line.trim());
         if (this.#logTail.length > LOG_TAIL) this.#logTail.shift();
+        if (worthShowing(line)) this.emit('log', line.trim());
       };
       stream.setEncoding('utf8');
       stream.on('data', (chunk) => {
@@ -437,6 +507,7 @@ export class LlamaServer extends EventEmitter {
 
     if (settings.autoGpuLayers) {
       const vramBytes = detectVram();
+      const kvCost = kvBudget(meta) ?? { perToken: 0, fixedBytes: 0 };
 
       // With both AUTOs on, the context is traded down to whatever keeps every
       // layer on the card. A layer left on the CPU is paid on every token, so
@@ -444,10 +515,10 @@ export class LlamaServer extends EventEmitter {
       // context with a third of the model on the processor. Only ever a
       // reduction: `maxContext` is the ceiling already decided above.
       if (settings.autoContext && vramBytes) {
-        const kv = kvBytesPerToken(meta) ?? 0;
         const fitted = contextForFullOffload({
           fileSize,
-          kvBytesPerToken: kv,
+          kvBytesPerToken: kvCost.perToken,
+          kvFixedBytes: kvCost.fixedBytes,
           vramBytes,
           maxContext: plan.context,
         });
@@ -455,7 +526,7 @@ export class LlamaServer extends EventEmitter {
           this.emit(
             'log',
             `context ${plan.context} → ${fitted} so the whole model stays on the GPU ` +
-              `(KV ${(kv / 1024).toFixed(1)} KB/token)`,
+              `(KV ${(kvCost.perToken / 1024).toFixed(1)} KB/token)`,
           );
           plan.context = fitted;
           this.#autoContext = {
@@ -470,7 +541,8 @@ export class LlamaServer extends EventEmitter {
         meta,
         fileSize,
         contextTokens: plan.context,
-        kvBytesPerToken: kvBytesPerToken(meta) ?? 0,
+        kvBytesPerToken: kvCost.perToken,
+        kvFixedBytes: kvCost.fixedBytes,
         vramBytes: vramBytes ?? 0,
       });
       this.#autoGpu = { ...choice, vramBytes };

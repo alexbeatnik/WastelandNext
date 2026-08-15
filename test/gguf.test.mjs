@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { kvBytesPerToken, parseGgufHeader, readGgufMetadata, recommendContext } from '../src/main/llm/gguf.mjs';
+import { kvBudget, kvBytesPerToken, parseGgufHeader, readGgufMetadata, recommendContext } from '../src/main/llm/gguf.mjs';
 
 /* ============================ fixture writer ============================ */
 
@@ -56,6 +56,17 @@ function stringArray(key, items) {
 /** A fixed-width array, which the parser skips in one jump. */
 function u32Array(key, items) {
   return Buffer.concat([str(key), u32(TYPE.ARRAY), u32(TYPE.UINT32), u64(items.length), ...items.map(u32)]);
+}
+
+/** A bool array — the sliding-window pattern is the one the parser reads. */
+function boolArray(key, items) {
+  return Buffer.concat([
+    str(key),
+    u32(TYPE.ARRAY),
+    u32(TYPE.BOOL),
+    u64(items.length),
+    Buffer.from(items.map((v) => (v ? 1 : 0))),
+  ]);
 }
 
 function buildGguf(entries, { version = 3, tensors = 0 } = {}) {
@@ -190,6 +201,83 @@ test('a model without GQA costs several times more per token', () => {
 test('KV cost is null when the header lacked what it needs', () => {
   assert.equal(kvBytesPerToken({ blockCount: 32 }), null);
   assert.equal(kvBytesPerToken(null), null);
+});
+
+test('an ordinary model has no fixed part, so the rate is the whole cost', () => {
+  const budget = kvBudget(parseGgufHeader(qwenLike()));
+  assert.equal(budget.perToken, 57344);
+  assert.equal(budget.fixedBytes, 0);
+});
+
+/*
+ * gemma-4-E4B, verbatim from the header of the file that reported this, and
+ * checked against what llama.cpp then allocated:
+ *
+ *   llama_kv_cache: size = 248.00 MiB (15872 cells,  4 layers)   ← full
+ *   llama_kv_cache: size = 100.00 MiB ( 2560 cells, 20 layers)   ← windowed
+ *
+ * The old formula answered 107520 bytes a token — 1.6 GB at that context, near
+ * five times the truth. That surplus comes off the VRAM budget before layers
+ * are placed, and caps the context: this model was being given 15872 tokens on
+ * a card that holds 32768.
+ */
+function gemma4Like() {
+  // 5 windowed layers to 1 full, which over the first 24 gives 20 and 4.
+  const pattern = Array.from({ length: 42 }, (_, i) => i % 6 !== 5);
+  return buildGguf([
+    entry('general.architecture', TYPE.STRING, 'gemma4'),
+    entry('gemma4.block_count', TYPE.UINT32, 42),
+    entry('gemma4.context_length', TYPE.UINT32, 131072),
+    entry('gemma4.embedding_length', TYPE.UINT32, 2560),
+    entry('gemma4.attention.head_count', TYPE.UINT32, 8),
+    entry('gemma4.attention.head_count_kv', TYPE.UINT32, 2),
+    entry('gemma4.attention.key_length', TYPE.UINT32, 512),
+    entry('gemma4.attention.value_length', TYPE.UINT32, 512),
+    entry('gemma4.attention.key_length_swa', TYPE.UINT32, 256),
+    entry('gemma4.attention.value_length_swa', TYPE.UINT32, 256),
+    entry('gemma4.attention.sliding_window', TYPE.UINT32, 512),
+    entry('gemma4.attention.shared_kv_layers', TYPE.UINT32, 18),
+    boolArray('gemma4.attention.sliding_window_pattern', pattern),
+  ]);
+}
+
+test('the header states its own head width, and 2560/8 is not it', () => {
+  const meta = parseGgufHeader(gemma4Like());
+  assert.equal(meta.keyLength, 512);
+  assert.equal(meta.valueLength, 512);
+  assert.equal(meta.keyLengthSwa, 256);
+  assert.equal(meta.slidingWindow, 512);
+  assert.equal(meta.sharedKvLayers, 18);
+  assert.equal(meta.slidingWindowPattern.length, 42);
+});
+
+test('layers that share a cache and layers that window one are both cheaper', () => {
+  const budget = kvBudget(parseGgufHeader(gemma4Like()));
+
+  // 4 full layers × (512 + 512) × 2 kv heads × 2 bytes.
+  assert.equal(budget.perToken, 4 * (512 + 512) * 2 * 2);
+  assert.equal(budget.perToken, 16384);
+  // What llama.cpp allocated for those layers at 15872 tokens: 248 MiB.
+  assert.equal((budget.perToken * 15872) / 1024 ** 2, 248);
+
+  // 20 windowed layers × (256 + 256) × 2 × 2, over a 512-token window plus the
+  // batch in flight — 2560 cells, and 100 MiB, which is what it allocated.
+  assert.equal(budget.fixedBytes / 1024 ** 2, 100);
+
+  // And the number this replaces, for the size of the error.
+  assert.ok(budget.perToken * 15872 + budget.fixedBytes < 107520 * 15872 / 4);
+});
+
+test('a windowed model is no longer told it cannot afford its own context', () => {
+  // 12 GB of system RAM and the 7.07 GB file that reported this. Under the old
+  // reading the KV cache priced it out at 15872 tokens.
+  const choice = recommendContext({
+    meta: parseGgufHeader(gemma4Like()),
+    fileSize: 7_074_929_792,
+    totalMemory: 12 * GB,
+  });
+  assert.equal(choice.context, 32768);
+  assert.equal(choice.reason, 'limited by ceiling');
 });
 
 /* ============================ recommendation ============================ */
