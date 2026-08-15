@@ -329,7 +329,13 @@ export class PluginHost extends EventEmitter {
 
       // Registered only once the whole activation succeeded: a plugin that
       // registers two actions and throws between them would otherwise leave
-      // half of itself running, which is worse than none of it.
+      // half of itself running, which is worse than none of it. Every conflict
+      // is looked for *before* anything is committed, for the same reason —
+      // finding one on the second action after the first had already gone into
+      // the map would recreate exactly the half-registered state this block
+      // exists to prevent: a dispatchable action whose prompt fragment never
+      // arrived.
+      const claimed = new Set();
       for (const action of contributions.actions) {
         const taken = this.#actions.get(action.type);
         if (taken) {
@@ -339,6 +345,12 @@ export class PluginHost extends EventEmitter {
           // prompt says it means.
           throw new Error(`action "${action.type}" is already provided by ${taken.pluginId}`);
         }
+        if (claimed.has(action.type)) {
+          throw new Error(`action "${action.type}" is registered twice`);
+        }
+        claimed.add(action.type);
+      }
+      for (const action of contributions.actions) {
         this.#actions.set(action.type, { ...action, pluginId: manifest.id, pluginName: manifest.name });
       }
       this.#fragments.push(...contributions.fragments);

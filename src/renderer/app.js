@@ -42,14 +42,20 @@ const state = {
   /** `id → {text, received, total}` for a plugin that is fetching something. */
   pluginProgress: {},
   /**
-   * Notices already drawn, by id.
+   * Notices already shown, `id → notice`.
    *
    * One can arrive twice — through the boot snapshot and again on the event
    * stream — because the main process keeps the recent ones for a renderer that
    * was not listening yet. Drawing a reminder twice is worse than the race it
    * protects against.
+   *
+   * The notice itself is kept, not just the id: a notice belongs to no
+   * conversation, but its card lives in the transcript, and `loadChat` clears
+   * the transcript wholesale. The cards are redrawn from here after a switch —
+   * remembering only the id would make switching chats the thing that silently
+   * deletes a reminder.
    */
-  notices: new Set(),
+  notices: new Map(),
 };
 
 /* ============================ small helpers ============================ */
@@ -249,6 +255,10 @@ async function loadChat(id) {
     if (seq !== chatLoadSeq) return;
     for (const message of chat?.messages ?? []) renderMessage(message);
   }
+  // Notices belong to no conversation, so they survive every switch: the
+  // transcript was just cleared wholesale, and the dedup map would otherwise
+  // refuse to ever draw them again.
+  for (const notice of state.notices.values()) drawNotice(notice);
   scrollChat();
 
   // The meter is otherwise only written mid-turn, so it would keep showing the
@@ -1146,8 +1156,19 @@ function showNotice(notice) {
   // event stream — because the main process holds recent ones for a renderer
   // that had not subscribed yet.
   if (!notice?.id || state.notices.has(notice.id)) return;
-  state.notices.add(notice.id);
+  state.notices.set(notice.id, notice);
 
+  drawNotice(notice);
+  activity(`${notice.title}${notice.body ? ` — ${notice.body}` : ''}`);
+  scrollChat();
+}
+
+/**
+ * The card alone, so `loadChat` can put every notice back after it has cleared
+ * the transcript — a notice belongs to no conversation, and losing it to a
+ * chat switch would delete a reminder the dedup set then refuses to redraw.
+ */
+function drawNotice(notice) {
   const card = el('div', 'notice');
   const head = el('div', 'notice-head');
   head.append(el('span', 'notice-mark', '◆'), el('span', 'notice-title', notice.title));
@@ -1164,8 +1185,6 @@ function showNotice(notice) {
   if (from) card.append(el('div', 'notice-from muted', from.name));
 
   $('chat-log').append(card);
-  activity(`${notice.title}${notice.body ? ` — ${notice.body}` : ''}`);
-  scrollChat();
 }
 
 /* ============================ the registry ============================ */
@@ -1501,23 +1520,40 @@ function applyDictionary() {
   }
 }
 
+/**
+ * Which locale load is current — the same guard `loadChat` carries, for the
+ * same reason. The fetch is a round trip, and picking twice quickly leaves two
+ * in flight; the slower answer landing second would dress the window in the
+ * language the user just left.
+ */
+let localeLoadSeq = 0;
+
 async function applyLocale(key) {
+  const seq = (localeLoadSeq += 1);
   const locale = state.locales.find((item) => item.key === key);
   if (!locale) {
     dictionary = {};
     applyDictionary();
     return;
   }
+
+  let loaded = {};
+  let failed = null;
   try {
     // Over the plugin scheme, which is why `connect-src` names it. A pack that
     // will not parse leaves the interface in English rather than half-translated.
     const response = await fetch(locale.url);
-    const loaded = await response.json();
-    dictionary = loaded && typeof loaded === 'object' ? loaded : {};
+    const parsed = await response.json();
+    if (parsed && typeof parsed === 'object') loaded = parsed;
   } catch (err) {
-    dictionary = {};
-    activity(`could not load ${locale.name} — ${err.message}`, 'bad');
+    failed = err;
   }
+
+  // Checked after the await, on the failing path too: a stale fetch that broke
+  // must not blank the dictionary of the language that superseded it.
+  if (seq !== localeLoadSeq) return;
+  if (failed) activity(`could not load ${locale.name} — ${failed.message}`, 'bad');
+  dictionary = loaded;
   applyDictionary();
 }
 

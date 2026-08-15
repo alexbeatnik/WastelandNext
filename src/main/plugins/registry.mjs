@@ -468,8 +468,30 @@ async function place(archive, staging, { expectId = '' } = {}) {
   }
 
   const target = join(pluginsDir(), parsed.manifest.id);
-  await rm(target, { recursive: true, force: true });
-  await rename(root, target);
+  // An existing installation is replaced by two renames with a restore between
+  // them, never by a delete followed by hope: a failure after the `rm` and
+  // before the `rename` would leave neither the old plugin nor the new one.
+  // The old directory is moved aside into the scratch tree the staging already
+  // lives in — the same volume, so the rename cannot hit `EXDEV`, and outside
+  // `plugins/`, so a crash right here is not discovered on the next boot as a
+  // broken plugin the user never installed.
+  const retired = `${staging}-retired`;
+  let hadPrevious = false;
+  try {
+    await rename(target, retired);
+    hadPrevious = true;
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  try {
+    await rename(root, target);
+  } catch (err) {
+    // Put the old installation back, and report the error that stopped the
+    // install rather than anything the restore itself has to say.
+    if (hadPrevious) await rename(retired, target).catch(() => {});
+    throw err;
+  }
+  if (hadPrevious) await rm(retired, { recursive: true, force: true }).catch(() => {});
 
   return {
     id: parsed.manifest.id,
