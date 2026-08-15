@@ -1808,6 +1808,14 @@ function wire() {
 
   $('btn-store-refresh').addEventListener('click', () => refreshStore());
 
+  // Opening the section is asking what is available, so it asks. The boot fetch
+  // is one moment in time and the answer it got can be minutes old by the time
+  // anybody looks — which is exactly how a published update went unseen until
+  // the app was restarted.
+  $('section-store').addEventListener('toggle', (event) => {
+    if (event.target.open) refreshStore();
+  });
+
   $('set-theme').addEventListener('change', async (event) => {
     // Applied first, saved after: a stylesheet swap should feel instant, and
     // the write is a round trip.

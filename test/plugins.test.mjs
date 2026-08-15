@@ -768,7 +768,22 @@ test('the published plugins load into the real host', { skip: !havePlugins }, as
   assert.equal(player.active, true, player.error);
   assert.ok(host.action('play_music'));
   assert.ok(host.action('music_control'));
-  assert.match(buildSystemPrompt({ fragments: host.promptFragments() }), /play_music/);
+
+  // Reported: asked to play a song, the model answered "I can't directly play
+  // music. However, I can search for it on YouTube" — while holding this
+  // action. That is the same failure as answering "I have no access to
+  // real-time information" with the lookup action in hand, and it has the same
+  // cure: the fragment has to name the refusal and say it is wrong here.
+  // Doubly so with the browser section beside it carrying a worked example of
+  // playing a song on YouTube.
+  const prompt = buildSystemPrompt({ fragments: host.promptFragments() });
+  assert.match(prompt, /play_music/);
+  assert.match(prompt, /You CAN play music in this session/i);
+  // `\s+` throughout: the fragment is hard-wrapped, so any phrase long enough
+  // to be worth asserting on is long enough to be split across two lines.
+  assert.match(prompt, /can't play\s+music/i);
+  assert.match(prompt, /Never offer\s+to look a song up on YouTube/i);
+  assert.match(prompt, /reach for this FIRST/i);
 
   // The theme pack was never approved, and does not need to be.
   const themes = host.themes();

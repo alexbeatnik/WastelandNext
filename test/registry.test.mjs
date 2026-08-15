@@ -14,7 +14,7 @@ import { setDataRoot } from '../src/main/paths.mjs';
 
 setDataRoot(mkdtempSync(join(tmpdir(), 'wl-registry-')));
 
-const { DEFAULT_REGISTRY, compareVersions, isNewer, parseEntry, registryUrl } = await import(
+const { DEFAULT_REGISTRY, cacheBusted, compareVersions, fetchIndex, isNewer, parseEntry, registryUrl } = await import(
   '../src/main/plugins/registry.mjs'
 );
 
@@ -95,6 +95,49 @@ test('an update is only offered when there is one', () => {
   // Garbage on either side must not produce a phantom update.
   assert.equal(isNewer('', '1.0.0'), false);
   assert.equal(isNewer(undefined, undefined), false);
+});
+
+test('the index is fetched past the CDN, not from it', () => {
+  // The published index is served with max-age=300, so a check inside five
+  // minutes of a release is answered with the previous one — which is how a
+  // freshly published 1.0.1 went unnoticed until the app was restarted.
+  const first = cacheBusted('https://raw.githubusercontent.com/a/b/main/index.json');
+  assert.match(first, /[?&]_=/);
+  assert.ok(first.startsWith('https://raw.githubusercontent.com/a/b/main/index.json?'));
+
+  // A registry URL that already carries a query keeps it.
+  const withQuery = cacheBusted('https://example.test/index.json?token=abc');
+  assert.match(withQuery, /token=abc/);
+  assert.match(withQuery, /[?&]_=/);
+
+  // Nonsense is passed through rather than thrown on: the fetch that follows
+  // produces a better message than a URL parser would.
+  assert.equal(cacheBusted('not a url'), 'not a url');
+});
+
+test('fetchIndex asks for a fresh copy and reports the clean URL', async () => {
+  const asked = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    asked.push({ url: String(url), headers: options?.headers ?? {} });
+    return new Response(JSON.stringify({ plugins: [GOOD] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const index = await fetchIndex();
+    assert.match(asked[0].url, /[?&]_=/);
+    assert.equal(asked[0].headers['Cache-Control'], 'no-cache');
+    // What is reported back is the registry the user configured, not the
+    // one-off URL used to get past a cache.
+    assert.equal(index.url, registryUrl());
+    assert.doesNotMatch(index.url, /[?&]_=/);
+    assert.equal(index.plugins.length, 1);
+  } finally {
+    globalThis.fetch = original;
+  }
 });
 
 test('the registry defaults to the published one and can be pointed elsewhere', async () => {

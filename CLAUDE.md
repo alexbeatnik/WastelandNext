@@ -24,6 +24,13 @@ services it named in its manifest and the host handed it by name.
 that will not dispatch, and `plugins.test.mjs` asserts the two sets are equal against the real built-ins. This is what
 the whole indirection is for; do not add an action type to `prompts.mjs`.
 
+**A prompt fragment must name the refusal it exists to prevent.** Describing the action accurately is not enough:
+`audio-player`'s first fragment did exactly that and never said "I can't play music" was false, and the first request
+to play a song got "I can't directly play music. However, I can search for it on YouTube" — from a model holding
+`play_music`. That is the same failure as answering "I have no access to real-time information" with `web_lookup` in
+hand, and the same cure applies. It is worse inside this app than most, because `BROWSER` is long, prescriptive and
+carries a worked example of playing a song on YouTube; a fragment that does not push back is competing with that.
+
 **Built-ins are imported statically from `src/plugins/index.mjs`, never discovered on disk.** They are part of the
 build, so there is nothing to discover — and a packaged app keeps `src/` inside `app.asar`, where whether a dynamic
 import resolves is a question worth not having to answer. Only installed plugins, which live on the ordinary

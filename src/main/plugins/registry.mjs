@@ -122,12 +122,38 @@ async function fetchWithTimeout(url, options = {}) {
   }
 }
 
+/**
+ * A URL the CDN in front of the registry cannot answer from yesterday.
+ *
+ * The published index is served with `Cache-Control: max-age=300`, so a check
+ * made in the five minutes after a release is answered from an edge still
+ * holding the previous one — and the update does not exist as far as the app is
+ * concerned. That is not a hypothetical: it is how a freshly published 1.0.1
+ * went unnoticed. A unique query is a different cache key, and the request
+ * headers say the same thing to anything that reads them instead.
+ *
+ * The clean URL is what gets reported back; this one is only for the wire.
+ */
+export function cacheBusted(url) {
+  try {
+    const target = new URL(url);
+    target.searchParams.set('_', Date.now().toString(36));
+    return target.toString();
+  } catch {
+    // A URL that will not parse is about to fail the fetch anyway, and failing
+    // there produces a better message than failing here.
+    return url;
+  }
+}
+
 /** The published index. Throws with a sentence worth showing on failure. */
 export async function fetchIndex() {
   const url = registryUrl();
   let response;
   try {
-    response = await fetchWithTimeout(url, { headers: { Accept: 'application/json' } });
+    response = await fetchWithTimeout(cacheBusted(url), {
+      headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+    });
   } catch (err) {
     throw new Error(`could not reach the plugin registry — ${err.name === 'AbortError' ? 'it did not answer' : err.message}`);
   }
