@@ -125,9 +125,12 @@ back as empty — which would be every reminder you had set, gone, with nothing 
 **More than one registry, and archives off your own disk.** GET PLUGINS lists the registries it asks; paste a
 repository URL — `https://github.com/owner/repo` is expanded to the index inside it — and press ADD. An index has to be
 served over https, since it is a list of URLs and checksums deciding what gets downloaded and unpacked; loopback is the
-exception, for anyone serving their own. One registry being unreachable does not empty the list, and the failure sits
-on that registry's row where removing it is the fix. Where a plugin came from travels with it to the screen, so two
-registries publishing the same id is visible rather than silent.
+exception, for anyone serving their own. More than one index ships with the app — something large enough to have its
+own release cycle is reasonably published from its own repository, and asking you to paste a URL to find a plugin the
+app already knows exists is a worse answer than listing it. Those rows carry no remove button, because they are part
+of the build and would be back at the next launch. One registry being unreachable does not empty the list, and the
+failure sits on that registry's row, where removing it is the fix for one you added yourself. Where a plugin came from
+travels with it to the screen, so two registries publishing the same id is visible rather than silent.
 
 **`[ FROM FILE… ]`** installs from a `.zip` you pick yourself — a plugin that was never published, a build handed over
 on a stick, or a machine that cannot reach a registry at all. There is no published checksum to compare against,

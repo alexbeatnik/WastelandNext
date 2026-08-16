@@ -75,6 +75,7 @@ my-plugin/
   "apiVersion": 5,
   "description": "One sentence, shown in the plugin list.",
   "author": "you",
+  "category": "everyday",
   "icon": "icon.svg",
   "main": "main.mjs",
   "actions": ["do_thing"],
@@ -139,6 +140,7 @@ screen, with the reason on it — it is never silently absent.
 | `apiVersion` | yes | The API your plugin needs. A higher number than the build implements means "listed, not loaded". |
 | `description` | no | One sentence. It is the only thing most people read. |
 | `author` | no | Shown on registry rows. |
+| `category` | no | The heading your row is drawn under — see [Categories](#categories). Anything unrecognised becomes `other`. |
 | `main` | for code | Entry point, a path inside your own directory. Its presence is what makes this a plugin that needs approval. |
 | `icon` | no | A path inside your directory. SVG with open strokes survives the app's colour filter best. |
 | `actions` | no | Action types the model may emit. `[a-z][a-z0-9_]{0,39}`. Registering one you did not declare throws. |
@@ -155,6 +157,35 @@ Two refusals worth knowing about, because they look like bugs otherwise:
   worse than one that says why it will not load.
 - **A `main`, `icon`, `themes[].file` or `locales[].file` that leaves your directory** — absolute, drive-lettered, or
   containing `..` — is refused. Backslash counts as a separator.
+
+### Categories
+
+`category` is the heading your plugin is drawn under, in the installed list and in **GET PLUGINS** alike.
+
+| Id | Heading | What goes there |
+|---|---|---|
+| `capability` | CAPABILITIES | What the model is allowed to do — anything contributing an action |
+| `input` | INPUT | Other ways of talking to it. Dictation is the one that exists |
+| `media` | MEDIA | Sound and playback |
+| `everyday` | EVERYDAY | Things it keeps track of for you: reminders, notes, a shopping list |
+| `games` | GAMES | Played in the chat window |
+| `language` | LANGUAGES | The words the app itself uses |
+| `appearance` | APPEARANCE | Themes and the shape of the screen |
+| `other` | OTHER | Where anything unrecognised — or unstated — lands |
+
+**A category this build has never heard of is folded into `other`, not refused.** That is the opposite of what a
+`select` setting does with a value it was never offered, and deliberately so: a setting is a control your code reads
+back, so a value you never declared is a row displaying a state nothing can honour, while a category is a word above
+your row. A plugin from a later build filing itself under a heading this version does not have is still a working
+plugin, and refusing to load it over that word would be absurd.
+
+Which is why **saying nothing costs more than guessing wrong**. There is no penalty for a heading the build does not
+know and no reward for leaving the field out — an absent category is `other`, and OTHER is the pile every heading
+exists to break up.
+
+Publish it in your registry entry as well as in the manifest (see [From a registry](#from-a-registry)). What is
+available is listed before anything has been downloaded, and at that point your manifest is inside an archive nobody
+has fetched.
 
 ---
 
@@ -645,7 +676,7 @@ A registry is a URL serving an `index.json`:
     {
       "id": "my-plugin", "name": "My plugin", "version": "1.0.0",
       "description": "…", "author": "you", "apiVersion": 5,
-      "kind": "code",
+      "kind": "code", "category": "everyday",
       "icon": "data:image/svg+xml;base64,…",
       "url": "https://…/my-plugin-1.0.0.zip",
       "sha256": "…", "size": 14735
@@ -659,6 +690,9 @@ A registry is a URL serving an `index.json`:
 - **`url` must be `https:`.** So must the index itself, except on loopback.
 - **`icon` is a data URI or nothing.** The page allows `img-src data:` and no remote host, so a linked icon would both
   fail to draw and turn opening the plugin list into a request telling somebody who opened it.
+- **`category` is read from the index, not from your manifest.** A heading is there to help somebody decide whether to
+  download the archive, and the manifest is inside the archive. An entry without one is listed under OTHER however the
+  manifest files itself once it is installed.
 
 Users add a registry in **GET PLUGINS → REGISTRIES**; pasting `https://github.com/owner/repo` expands to the raw
 `index.json` on `main`. Several registries are asked in parallel, and where two publish the same id the newest version
@@ -682,6 +716,11 @@ Declare the **lowest** version that has everything you use. Declaring a higher o
 | 4 | The `notify` service, and `ctx.state` — the plugin's own JSON document |
 | 5 | The `mic` service, `select` settings, `ctx.progress`, `ctx.dataDir()` |
 
+**Not every addition moves the number.** `category` arrived after 5 and did not: a build that has never heard of the
+field ignores it and loads the plugin exactly as before, so declaring 6 for it would lock your plugin out of every
+build that implements 5 in exchange for a heading. Raise the version you declare only for something your code would
+*fail* without.
+
 ---
 
 ## Checklist
@@ -690,6 +729,7 @@ Before publishing, or before telling someone it is finished:
 
 - [ ] `id` equals the directory name, and is lowercase letters, digits and dashes.
 - [ ] `apiVersion` is the lowest that has everything you use.
+- [ ] `category` names a heading the app knows, in the manifest **and** in your registry entry. An absent one is OTHER.
 - [ ] Every action you register is in `actions`; every service you fetch is in `services`.
 - [ ] Your prompt fragment **names the refusal it exists to prevent** and says it is wrong in this session.
 - [ ] Your fragment shows a worked example in a fenced `action` block.
