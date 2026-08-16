@@ -6,7 +6,7 @@
  * `{event, ...payload}`. One channel rather than twenty keeps the preload
  * surface small and means a new event type needs no changes here or there.
  */
-import { dialog, ipcMain } from 'electron';
+import { Notification, dialog, ipcMain } from 'electron';
 import { readFileSync } from 'node:fs';
 import * as chats from './chats.mjs';
 import * as config from './config.mjs';
@@ -17,6 +17,12 @@ import { detectVram, placementForSize } from './llm/gpu.mjs';
 import { server } from './llm/server.mjs';
 import { downloadLlamaServer, llamaServerStatus } from './llm/tools.mjs';
 import { BrowserBridge, browser, engineAvailable } from './browser/manul-browser.mjs';
+import { PluginHost } from './plugins/host.mjs';
+import { serveProtocols } from './plugins/protocol.mjs';
+import * as registry from './plugins/registry.mjs';
+import { audio } from './audio.mjs';
+import { mic } from './mic.mjs';
+import { notify } from './notify.mjs';
 import { Agent } from './agent/agent.mjs';
 import { Updater } from './updater.mjs';
 
@@ -40,7 +46,30 @@ const VERSION = (() => {
 
 /** Lookups get their own headless browser so they never touch the visible one. */
 const lookupBrowser = new BrowserBridge();
-const agent = new Agent({ server, browser, lookupBrowser });
+
+/**
+ * The two browsers are handed to the host as *services*, not imported by the
+ * plugins that use them. That is what makes "which plugin can reach what" a
+ * fact readable from a manifest, and what lets the host be tested with a stub
+ * browser and no Chrome anywhere.
+ */
+const plugins = new PluginHost({ services: { browser, lookupBrowser, audio, notify, mic } });
+const agent = new Agent({ server, plugins });
+
+/**
+ * Install the custom-scheme handlers. Called from `main.mjs` once the app is
+ * ready; the schemes themselves were registered before that.
+ *
+ * Both questions the handlers ask are answered by the objects that know: which
+ * directory a plugin owns is the host's business, and which file may be read
+ * right now is the audio service's.
+ */
+export function serveAssets() {
+  serveProtocols({
+    pluginDir: (id) => plugins.dirFor(id),
+    mediaAllows: (path) => audio.allows(path),
+  });
+}
 
 let getWindow = () => null;
 let download = null;
@@ -62,13 +91,68 @@ function snapshot() {
     busy: agent.busy,
     version: VERSION,
     update: updater?.status ?? { state: 'idle' },
+    plugins: plugins.list(),
+    themes: plugins.themes(),
+    locales: plugins.locales(),
+    audio: audio.status(),
+    mic: mic.status(),
+    /**
+     * Anything said before the window was listening.
+     *
+     * A reminder can come due during boot — the plugin host starts before the
+     * renderer has subscribed — and that is the exact case this whole path
+     * exists for: the app was closed, something was missed, say so on the way
+     * in. Each notice carries an id so one that arrived both ways is drawn once.
+     */
+    notices: notify.recent(),
   };
+}
+
+/**
+ * Raise an operating system notification.
+ *
+ * The card in the transcript is what survives; this is what arrives. Somebody
+ * looking at another window sees nothing at all otherwise, which for a reminder
+ * is the only case that matters.
+ *
+ * Failing to show one is not worth reporting: a Linux desktop with no
+ * notification daemon, or Windows with them switched off for this app, is a
+ * setting rather than a fault, and the card has already been drawn.
+ */
+function showDesktopNotice(notice) {
+  try {
+    if (!Notification.isSupported()) return;
+    const toast = new Notification({ title: notice.title, body: notice.body, silent: false });
+    toast.on('click', () => {
+      const window = getWindow();
+      if (!window || window.isDestroyed()) return;
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+    });
+    toast.show();
+  } catch {
+    /* no notification service on this machine */
+  }
 }
 
 export function registerIpc(windowGetter) {
   getWindow = windowGetter;
 
   agent.on('event', ({ event, ...payload }) => send(event, payload));
+  plugins.on('changed', (list) =>
+    send('plugins:changed', { plugins: list, themes: plugins.themes(), locales: plugins.locales() }),
+  );
+  plugins.on('log', (line) => send('log', { text: line }));
+  // A long job on the plugin's own row, which is where it was started from.
+  plugins.on('progress', (detail) => send('plugins:working', detail));
+  audio.on('state', (status) => send('audio:state', status));
+  mic.on('state', (status) => send('mic:state', status));
+  notify.on('notice', (notice) => {
+    send('notice', { notice });
+    if (notice.desktop) showDesktopNotice(notice);
+  });
+  notify.on('log', (line) => send('log', { text: line }));
   server.on('state', (status) => send('llm:state', status));
   server.on('log', (line) => send('llm:log', { line }));
   server.on('tool', (progress) => send('tool:progress', progress));
@@ -189,9 +273,25 @@ export function registerIpc(windowGetter) {
     send('config:changed', { settings: config.load() });
     return binary;
   });
-  handle('llm:load', (name) => server.load(name));
+  /**
+   * Load a model, and remember which one.
+   *
+   * Recorded here rather than in `server.mjs`, which has no business knowing
+   * about settings — and only on success, so a name that could not be loaded
+   * does not become the thing tried again on every start.
+   */
+  handle('llm:load', async (name) => {
+    const status = await server.load(name);
+    config.update({ model: name });
+    send('config:changed', { settings: config.load() });
+    return status;
+  });
   handle('llm:unload', async () => {
     await server.unload();
+    // Unloading is a decision, not a crash: bringing it back on the next start
+    // would override the thing the user just chose.
+    config.update({ model: '' });
+    send('config:changed', { settings: config.load() });
     return server.status;
   });
   handle('llm:status', () => server.status);
@@ -289,6 +389,166 @@ export function registerIpc(windowGetter) {
   handle('attach:pickFiles', () => pick(['openFile'], 'Add files to the conversation'));
   handle('attach:pickFolder', () => pick(['openDirectory'], 'Add a folder to the conversation'));
 
+  /* ---------- plugins ---------- */
+
+  /**
+   * Awaited rather than answered from whatever is registered so far.
+   *
+   * Discovery is asynchronous, so a renderer that asked at exactly the wrong
+   * moment would paint an empty list and then be corrected by an event — which
+   * looks like the plugins section flickering into existence on every boot.
+   */
+  handle('plugins:list', async () => {
+    await plugins.ready;
+    return plugins.list();
+  });
+  handle('plugins:setEnabled', (id, enabled) => plugins.setEnabled(id, enabled));
+  handle('plugins:setSetting', (id, key, value) => plugins.setSetting(id, key, value));
+
+  /**
+   * A click on one of the options an action put in the transcript.
+   *
+   * Routed by action type rather than by plugin id, because the type is what
+   * the result event already carries and what identifies the handler — and a
+   * type can only be claimed by one plugin at a time.
+   */
+  handle('plugins:choose', (type, choiceId) =>
+    plugins.choose(type, choiceId, {
+      status: (text) => send('status', { text }),
+      log: (text) => send('log', { text }),
+    }),
+  );
+
+  /**
+   * A folder setting, picked through the native dialog.
+   *
+   * Opened here because only the main process can, and parented to the window
+   * so it behaves as a sheet on macOS rather than a stray window — the same
+   * reason `models:addFile` lives here.
+   */
+  handle('plugins:pickFolder', async (id, key) => {
+    const result = await dialog.showOpenDialog(getWindow() ?? undefined, {
+      title: 'Choose a folder',
+      properties: ['openDirectory', 'dontAddToRecent'],
+    });
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true, plugins: plugins.list() };
+    return { canceled: false, plugins: await plugins.setSetting(id, key, result.filePaths[0]) };
+  });
+  handle('plugins:themes', async () => {
+    await plugins.ready;
+    return plugins.themes();
+  });
+  handle('plugins:locales', async () => {
+    await plugins.ready;
+    return plugins.locales();
+  });
+
+  /* ---------- the registry ---------- */
+
+  handle('plugins:available', () => registry.fetchIndex());
+
+  /**
+   * The registries themselves.
+   *
+   * Adding one widens what the app will offer to download, so it is a typed URL
+   * and an explicit button rather than anything a page or a plugin can do. The
+   * list is returned from all three so the section repaints from what was
+   * actually stored, never from what the click assumed.
+   */
+  handle('plugins:registries', () => registry.registries());
+  handle('plugins:addRegistry', (url) => registry.addRegistry(url));
+  handle('plugins:removeRegistry', (url) => registry.removeRegistry(url));
+
+  /**
+   * Install or update — the same operation, because an update is an install
+   * over the top of one that is already there. The plugin keeps whatever the
+   * user had decided about it: `mergeEnablement` never overrules a record that
+   * already exists, so a plugin switched on stays on across an update and one
+   * that was never allowed to run does not become allowed by being newer.
+   */
+  const afterInstall = async (installed) => {
+    send('plugins:progress', { stage: 'done', id: installed.id });
+    await plugins.refresh();
+    // Replacing a plugin that has already been imported does not replace what
+    // is running: Node caches modules by URL for the life of the process. The
+    // row says so, and this is the same fact where the install happened.
+    const row = plugins.list().find((plugin) => plugin.id === installed.id);
+    return { ...installed, restartRequired: Boolean(row?.stale) };
+  };
+
+  handle('plugins:install', async (entry) =>
+    afterInstall(await registry.install(entry, { onProgress: (progress) => send('plugins:progress', progress) })),
+  );
+
+  /**
+   * Install from an archive on this machine.
+   *
+   * The dialog is opened here because only the main process can, and because it
+   * is what makes the file a *choice*: the renderer never names a path, it asks
+   * for the picker and is told what came back. Same reason as `models:addFile`.
+   */
+  handle('plugins:installFile', async () => {
+    const result = await dialog.showOpenDialog(getWindow() ?? undefined, {
+      title: 'Choose a plugin archive',
+      properties: ['openFile', 'dontAddToRecent'],
+      filters: [
+        { name: 'Plugin archives', extensions: ['zip'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true };
+
+    return afterInstall(
+      await registry.installArchive(result.filePaths[0], {
+        onProgress: (progress) => send('plugins:progress', progress),
+      }),
+    );
+  });
+
+  handle('plugins:uninstall', async (id) => {
+    const entry = plugins.list().find((plugin) => plugin.id === id);
+    // A built-in has no directory to delete, and offering it would be a button
+    // that cannot work.
+    if (entry?.builtin) throw new Error(`${entry.name} ships with the app and cannot be removed`);
+    await registry.uninstall(id);
+    // Its document and its data directory go with it. Leaving them behind would
+    // mean reinstalling brought back reminders the user removed along with the
+    // plugin — and would leave a gigabyte of speech model with nothing on screen
+    // to explain what it belongs to.
+    plugins.forgetData(id);
+    await plugins.refresh();
+    return plugins.list();
+  });
+
+  /* ---------- audio ---------- */
+
+  handle('audio:status', () => audio.status());
+  /**
+   * One command channel rather than a method per button: the set of buttons is
+   * the transport's to declare, so a fixed list of IPC names here would be a
+   * second, competing account of what the player can do.
+   */
+  handle('audio:command', (name) => audio.command(name));
+  handle('audio:volume', (value) => audio.setVolume(value));
+  /** The renderer reporting what only it can know. */
+  handle('audio:ended', () => audio.command('ended'));
+  handle('audio:failed', (message) => audio.fail(message));
+
+  /* ---------- dictation ---------- */
+
+  handle('mic:status', () => mic.status());
+  /** The stream is open, or shut. Only the renderer holds it, so only it knows. */
+  handle('mic:listening', (on) => mic.setListening(on));
+  /**
+   * A finished recording, as a 16 kHz mono WAV.
+   *
+   * The bytes are the whole of it: the renderer captured and encoded them, and
+   * what comes back is the text. Nothing is stored — `hear` deletes the file it
+   * writes whether the engine succeeded or not.
+   */
+  handle('mic:transcribe', (bytes) => mic.hear(bytes));
+  handle('mic:failed', (message) => mic.fail(message));
+
   /* ---------- browser ---------- */
   handle('browser:status', () => browser.status);
   handle('browser:open', async () => {
@@ -299,11 +559,39 @@ export function registerIpc(windowGetter) {
     await browser.close();
     return browser.status;
   });
+
+  // Started last and deliberately not awaited: registering the handlers is what
+  // lets the window boot, and a plugin that is slow to import must not hold the
+  // window back. Anything that needs the list waits on `plugins.ready`.
+  plugins.load();
+  restoreModel();
+}
+
+/**
+ * Bring back the model that was loaded when the app was last closed.
+ *
+ * Unawaited, and quiet about most failures: a load takes tens of seconds and
+ * the window must not wait for it, while a model on an unplugged drive is an
+ * ordinary Tuesday rather than something to open with an error. The status bar
+ * shows the attempt through the `state` event like any other load, so nothing
+ * here has to narrate it.
+ *
+ * The name is only recorded on a successful load, so this cannot get stuck
+ * retrying something that has never worked.
+ */
+async function restoreModel() {
+  const name = String(config.get('model') ?? '').trim();
+  if (!name) return;
+  try {
+    await server.load(name);
+  } catch (err) {
+    send('log', { text: `could not reload ${name} — ${err.message}` });
+  }
 }
 
 /** Called from `before-quit`. Stops the browsers; the model is unloaded after. */
 export async function shutdown() {
   download?.abort();
   agent.stop();
-  await Promise.allSettled([browser.close(), lookupBrowser.close()]);
+  await Promise.allSettled([plugins.shutdown(), browser.close(), lookupBrowser.close()]);
 }

@@ -11,12 +11,18 @@ import { fileURLToPath } from 'node:url';
 import { setDataRoot } from './paths.mjs';
 import * as config from './config.mjs';
 import { server } from './llm/server.mjs';
-import { registerIpc, shutdown } from './ipc.mjs';
+import { registerSchemes } from './plugins/protocol.mjs';
+import { registerIpc, serveAssets, shutdown } from './ipc.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
 
 setDataRoot(app.getPath('userData'));
+
+// Before `whenReady`, and therefore at module scope: after the app is ready the
+// scheme table is fixed, and a scheme registered late is an ordinary opaque one
+// — no Range support, so a seek in a long track would do nothing.
+registerSchemes();
 
 let window = null;
 
@@ -39,6 +45,22 @@ function createWindow() {
       nodeIntegration: false,
       spellcheck: false,
     },
+  });
+
+  /**
+   * Exactly one permission, and only when it was asked for.
+   *
+   * Electron grants everything by default, which for a window that never wanted
+   * geolocation, notifications or a camera is a wider surface than the app uses.
+   * Dictation needs `media` and nothing else needs anything — so the list is a
+   * list of one, and adding to it is a deliberate act rather than the default
+   * quietly covering something new.
+   *
+   * The microphone still has to be allowed at the operating system level as
+   * well; this only decides whether the page may ask.
+   */
+  window.webContents.session.setPermissionRequestHandler((_contents, permission, callback) => {
+    callback(permission === 'media');
   });
 
   window.once('ready-to-show', () => window.show());
@@ -64,6 +86,8 @@ function createWindow() {
 
 app.whenReady().then(() => {
   config.load();
+  // The handlers, as opposed to the schemes, can only be installed now.
+  serveAssets();
   registerIpc(() => window);
   createWindow();
 

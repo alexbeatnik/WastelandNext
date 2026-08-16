@@ -1,0 +1,704 @@
+# Writing a plugin for Wasteland Next
+
+Everything the model may *do* is a plugin. So is every theme, every language, and dictation. The four capabilities that
+ship with the app — browser control, web lookup, file reading, shell commands — are plugins too, imported from
+`src/plugins/` instead of from disk, and they use the same API as anything you write.
+
+This document is the whole of it. It is written to be followed straight through by a person or by an agent: the
+[skeleton](#a-plugin-that-works) below is a working plugin, and everything after it is reference.
+
+**Plugin API version 5.** Put the number your plugin actually needs in the manifest — see
+[API versions](#api-versions). Declaring a version the user's build does not implement means your plugin is listed
+with "update Wasteland Next" instead of being loaded, which is deliberate and much better than failing halfway through
+`activate` on a function that does not exist yet.
+
+---
+
+## Contents
+
+- [The two kinds of plugin](#the-two-kinds-of-plugin)
+- [A plugin that works](#a-plugin-that-works)
+- [The manifest](#the-manifest)
+- [`activate(ctx)`](#activatectx)
+- [Actions](#actions)
+- [The prompt fragment](#the-prompt-fragment)
+- [Per-turn context](#per-turn-context)
+- [Settings](#settings)
+- [Storing things](#storing-things)
+- [Services](#services)
+- [Themes](#themes)
+- [Languages](#languages)
+- [Rules that are not negotiable](#rules-that-are-not-negotiable)
+- [Testing](#testing)
+- [Installing and publishing](#installing-and-publishing)
+- [API versions](#api-versions)
+- [Checklist](#checklist)
+
+---
+
+## The two kinds of plugin
+
+**A theme pack or a language pack is data.** A manifest and some CSS or a JSON dictionary, read by the app's own code.
+There is nothing to run, so there is nothing to consent to, and installing one is about as consequential as changing a
+setting.
+
+**Anything with a `main` is code.** It runs in the app's main process with everything Node can reach — the filesystem,
+the network, child processes. The app will not import a line of it until the user presses **ALLOW AND RUN** on its row.
+Installing is not switching on.
+
+Neither kind runs code in the chat window. The renderer executes the application's own scripts and nothing else
+(`script-src 'self'`, context isolation, a sandboxed preload). This is why a plugin that wants to play audio asks the
+app for the `audio` service rather than shipping a player, and why a plugin that wants a microphone asks for `mic`.
+
+---
+
+## A plugin that works
+
+A plugin is a directory. Everything except `plugin.json` is optional.
+
+```
+my-plugin/
+├── plugin.json
+├── main.mjs        # omit for a theme or language pack
+├── icon.svg        # optional, 24×24
+├── themes/*.css    # optional
+└── locales/*.json  # optional
+```
+
+**`plugin.json`**
+
+```json
+{
+  "id": "my-plugin",
+  "name": "My plugin",
+  "version": "1.0.0",
+  "apiVersion": 5,
+  "description": "One sentence, shown in the plugin list.",
+  "author": "you",
+  "icon": "icon.svg",
+  "main": "main.mjs",
+  "actions": ["do_thing"],
+  "services": [],
+  "settings": [
+    { "key": "folder", "type": "folder", "label": "Where the things are" }
+  ],
+  "order": 50
+}
+```
+
+**`main.mjs`**
+
+```js
+export function activate(ctx) {
+  ctx.prompt(`
+THINGS — {"type":"do_thing","steps":"<what to do>"}
+
+You CAN do the thing in this session. "I can't do that" is wrong here — this
+action is how you do it, and it costs one turn.`);
+
+  ctx.action({
+    type: 'do_thing',
+    run: async (steps, turn) => {
+      turn.status('Doing the thing…');
+      if (!steps) {
+        return {
+          ok: false,
+          summary: 'nothing was asked for',
+          feedback: '[THINGS] Nothing was named. Ask the user what they meant.',
+        };
+      }
+      return {
+        ok: true,
+        summary: `did ${steps}`,
+        feedback: `[THINGS] Done: ${steps}. Say so in one short sentence.`,
+      };
+    },
+  });
+}
+
+export function deactivate() {
+  // Release anything that outlives an import: timers, watchers, child processes.
+}
+```
+
+Drop the directory into the app's `plugins/` folder (see [Installing](#installing-and-publishing)), restart, and switch
+it on in **PLUGINS**.
+
+---
+
+## The manifest
+
+Every field is validated before a line of your code is imported. A manifest that does not parse is still a row on
+screen, with the reason on it — it is never silently absent.
+
+| Field | Required | What it is |
+|---|---|---|
+| `id` | yes | `[a-z0-9][a-z0-9-]{0,39}`. **Must equal the directory name.** It becomes a key in the app's config and part of a URL. |
+| `name` | no | Shown in the list. Defaults to the id. |
+| `version` | no | Compared numerically, so `1.10.0` is newer than `1.9.0`. Defaults to `0.0.0`. |
+| `apiVersion` | yes | The API your plugin needs. A higher number than the build implements means "listed, not loaded". |
+| `description` | no | One sentence. It is the only thing most people read. |
+| `author` | no | Shown on registry rows. |
+| `main` | for code | Entry point, a path inside your own directory. Its presence is what makes this a plugin that needs approval. |
+| `icon` | no | A path inside your directory. SVG with open strokes survives the app's colour filter best. |
+| `actions` | no | Action types the model may emit. `[a-z][a-z0-9_]{0,39}`. Registering one you did not declare throws. |
+| `services` | no | `browser`, `lookupBrowser`, `audio`, `mic`, `notify`. Asking for one you did not declare throws. |
+| `settings` | no | Controls drawn on your row — see [Settings](#settings). |
+| `themes` | no | `[{id, name, file}]` — see [Themes](#themes). |
+| `locales` | no | `[{id, name, file}]` — see [Languages](#languages). |
+| `order` | no | Where your prompt fragment sits relative to others. Lower goes first. Default 100. |
+| `enabledByDefault` | no | Only meaningful for a pack with no code. Default true. |
+
+Two refusals worth knowing about, because they look like bugs otherwise:
+
+- **Declaring `actions` or `services` with no `main`** is refused. A plugin listed as working while doing nothing is
+  worse than one that says why it will not load.
+- **A `main`, `icon`, `themes[].file` or `locales[].file` that leaves your directory** — absolute, drive-lettered, or
+  containing `..` — is refused. Backslash counts as a separator.
+
+---
+
+## `activate(ctx)`
+
+`main.mjs` exports `activate`, and optionally `deactivate`. Both may be async.
+
+```js
+export function activate(ctx) { /* register everything here */ }
+export function deactivate() { /* stop timers, close handles */ }
+```
+
+Contributions are collected during `activate` and committed only once it has **returned**. A plugin that registers two
+actions and throws between them registers neither — half a plugin is worse than none, because the model would be
+holding an action whose other half never arrived.
+
+| | |
+|---|---|
+| `ctx.id` | Your plugin's id. |
+| `ctx.apiVersion` | The API version this build implements. |
+| `ctx.action({type, run, choose})` | An action the model may emit. See [Actions](#actions). |
+| `ctx.prompt(text)` | The slice of the system prompt documenting your actions. See [the prompt fragment](#the-prompt-fragment). |
+| `ctx.context(fn)` | Text recomputed each turn and appended to the prompt. See [per-turn context](#per-turn-context). |
+| `ctx.onTurnStart(fn)` | Called once per user message, before the first model call. |
+| `ctx.service(name)` | A service named in your manifest. See [Services](#services). |
+| `ctx.store.get(key, fallback)` | One of your declared settings, as the user filled it in. Read live. |
+| `ctx.store.all()` | All of them. |
+| `ctx.onSettingsChanged(fn)` | `fn(key, value)` after the user edits one. |
+| `ctx.state.get()` / `ctx.state.set(obj)` | Your own JSON document. See [Storing things](#storing-things). |
+| `ctx.dataDir()` | A directory of your own, for files. |
+| `ctx.progress(text, {received, total})` | A long job, drawn on your row. `''` takes the line away. |
+| `ctx.log(text)` | A line in the activity log, prefixed with your id. |
+
+---
+
+## Actions
+
+```js
+ctx.action({
+  type: 'do_thing',       // must be in the manifest's `actions`
+  run: async (steps, turn) => ({ ok, summary, feedback, choices }),
+  choose: async (choiceId, { status, log }) => ({ ok, summary }),   // optional
+});
+```
+
+### `run(steps, turn)`
+
+`steps` is the raw string the model emitted — its own words, not parsed. Return an object:
+
+| Field | Meaning |
+|---|---|
+| `ok` | Whether it worked. Draws the card as `✓` or `✗`. Default true. |
+| `summary` | One line, shown to the user on the action card. |
+| `feedback` | What the **model** reads on the next turn. This is where you tell it what to say. |
+| `choices` | Optional `[{id, label, note, title}]`, drawn as buttons under the card. |
+
+`turn` is deliberately small:
+
+| | |
+|---|---|
+| `turn.signal` | An `AbortSignal`, aborted when the user presses Stop. Pass it to `fetch` and `spawn`. |
+| `turn.status(text)` | The status line under the composer. |
+| `turn.log(text)` | The activity column. |
+| `turn.confirm({kind, command})` | Puts the app's own approval dialog in front of the user; resolves to a boolean. |
+
+**Write `feedback` as an instruction, not as data.** A local model reads it as the account of what happened and tends
+to repeat it verbatim unless told otherwise. `[MUSIC] Now playing "X". Say what is playing in one short sentence.` is
+the shape that works. Naming the tag in brackets helps the model attribute the result when several actions ran.
+
+**Throwing is safe.** A handler that throws produces feedback the model can act on, exactly as returning `{ok: false}`
+does. Nothing a plugin does may end a turn — without that, a third-party typo would leave the transcript with a
+blinking cursor and no reply. Prefer returning a failure with a `feedback` that names the remedy; throw when the
+message alone is the useful part.
+
+### `choose(choiceId, {status, log})`
+
+A press on one of the buttons `run` returned. It arrives long after the turn finished, so there is no `signal` and no
+turn — it is a user action, like pressing the player's next button.
+
+**Carry a token in the id.** A second search replaces your offered list while the first is still on screen and still
+clickable; a bare index would quietly pick from the newer list and act on something the user never saw offered.
+
+```js
+let offered = { token: '', items: [] };
+let count = 0;
+
+// in run(), when several things match:
+count += 1;
+offered = { token: `o${count}`, items: hits.slice(0, 8) };
+return {
+  ok: true,
+  summary: `${hits.length} possible matches`,
+  choices: offered.items.map((item, at) => ({ id: `${offered.token}:${at}`, label: item.title, note: item.detail })),
+  feedback: '[THINGS] Several could be meant, and the user has the list with a button on each. Tell them to pick — do not choose for them, and do not repeat the list.',
+};
+
+// and in choose():
+choose: async (choiceId) => {
+  const [token, at] = String(choiceId).split(':');
+  if (token !== offered.token) throw new Error('that list is no longer the current one');
+  const picked = offered.items[Number(at)];
+  if (!picked) throw new Error('that list is no longer the current one');
+  return { ok: true, summary: picked.title };
+},
+```
+
+Use choices when the model would otherwise be guessing and the user is the only one who knows — five near-identical
+files, three recordings of the same song. Do not use them for something destructive without the user having asked for
+that specific thing first.
+
+---
+
+## The prompt fragment
+
+**Name the refusal your action exists to prevent, and say plainly that it is wrong in this session.** Describing the
+action accurately is not enough.
+
+This is the single most common way a working plugin appears broken. `audio-player` shipped a fragment that described
+`play_music` correctly and never said "I can't play music" was false — and the first request to play a song got
+*"I can't directly play music. However, I can search for it on YouTube for you."* from a model holding the action.
+Local models are strongly disposed to explain what an assistant cannot do, and they will do it with the tool in hand.
+
+```
+MUSIC — {"type":"play_music","steps":"<what to play>"}
+
+You CAN play music in this session. It plays out of the user's own speakers,
+from their own folder, through the player in the chat window. "I can't play
+music", "I can't directly play audio" and "I can only search for it" are all
+wrong here — this action is how you do it, and it costs one turn. Never offer
+to look a song up on YouTube instead of playing it.
+```
+
+Also worth doing:
+
+- **Show a worked example** in a fenced `action` block. Models copy shapes far more reliably than they follow prose.
+- **Say what to do when it fails**, not just when it works.
+- **Say how to answer.** "Say what is playing in one short sentence" prevents a model reading your whole feedback
+  string out loud.
+- **Push back against neighbouring sections.** The browser fragment carries a worked example of playing a song on
+  YouTube; anything competing with that has to say so explicitly.
+
+Your fragment is in the prompt only while your plugin is switched on. A disabled capability is *absent* from the
+prompt, never forbidden in it — a model told about a tool reaches for it, and the resulting refusal reads to the user
+as a bug.
+
+**Do not add a fragment for something the model cannot operate.** Voice input contributes none: dictated text arrives
+in the composer exactly as if typed, nothing the model can do changes, and describing a microphone would only invite
+it to offer to "listen".
+
+---
+
+## Per-turn context
+
+```js
+ctx.context(async () => {
+  if (!somethingWorthSaying) return '';   // an empty string contributes nothing
+  return `[THINGS] ${count} pending — ${names}.`;
+});
+```
+
+Recomputed before every model call, including the follow-up calls inside one turn, and appended to the system prompt.
+Include your own heading. A provider that throws is logged and skipped; it does not cost the turn its prompt.
+
+This is where facts the model needs but cannot ask for go — the current page map, the local time, what is queued. It
+is also charged against the context window on every call, so keep it short and return `''` when there is nothing to
+say.
+
+---
+
+## Settings
+
+Declared in the manifest, drawn on your row, edited by the user, read live through `ctx.store`.
+
+```json
+"settings": [
+  { "key": "library", "type": "folder", "label": "Music folder" },
+  { "key": "endpoint", "type": "text", "label": "Server", "placeholder": "http://…" },
+  { "key": "loud", "type": "toggle", "label": "Start loud" },
+  { "key": "model", "type": "select", "label": "Speech model",
+    "options": [{ "value": "small", "label": "small — fastest (≈466 MB)" },
+                { "value": "large", "label": "large — best (≈547 MB)" }] }
+]
+```
+
+| Type | Control | Value |
+|---|---|---|
+| `text` | A text box, saved on idle | string |
+| `folder` | `[ CHOOSE… ]`, a native directory dialog | absolute path string |
+| `toggle` | A checkbox | boolean |
+| `select` | A dropdown | one of the `options` values |
+
+A `select` names its options in the manifest so the control can be drawn before any of your code has run — and the app
+**refuses to store a value you never offered**, so you can read one back without checking it.
+
+`ctx.store.get(key)` reads live rather than at activation, so a value the user changed a moment ago is the one you see.
+`ctx.onSettingsChanged(key, value)` exists for the settings that invalidate work already done — a music folder is the
+case in point, since nothing else would make the library rescan.
+
+---
+
+## Storing things
+
+Three places, and they are not interchangeable.
+
+**`ctx.store`** — the user's answers to the questions your manifest asked. Every key is a control on your row.
+
+**`ctx.state`** — your own JSON document, for what nobody declares: a list of reminders, a cache, a counter.
+
+```js
+const held = ctx.state.get();                    // {} the first time
+ctx.state.set({ items: [...(held.items ?? []), one] });
+```
+
+It is written whole and renamed into place, because a half-written file reads back as `{}` — which would be everything
+the user had, gone, with nothing saying so. One megabyte is the ceiling. Writes are synchronous; the call has happened
+by the time it returns.
+
+**`ctx.dataDir()`** — a directory of your own, for files: a downloaded model, an extracted binary, a cache too big to
+be a document.
+
+Both live **outside** your installed directory, which is deleted and replaced on every update. A model downloaded into
+your own directory would be downloaded again on every version bump. Both are removed when the user uninstalls you.
+
+---
+
+## Services
+
+Named in the manifest, handed over by name. Asking for one you did not declare throws — that is what makes the plugin
+list a true account of what a plugin can reach rather than a summary somebody wrote.
+
+### `notify`
+
+For the one message with no question in front of it.
+
+```js
+const notify = ctx.service('notify');
+notify.show({ pluginId: ctx.id, title: 'Watch the series', body: 'Due at 18:45' });
+notify.show({ pluginId: ctx.id, title: 'You missed 2 reminders', body: lines, desktop: false });
+```
+
+Goes two places at once — a card in the transcript and an operating system notification — because neither is enough
+alone: the first is invisible to somebody in another window, the second is gone the moment it is dismissed. Pass
+`desktop: false` for something raised while the window is opening anyway; a system toast for what the user is already
+looking at is noise.
+
+Notices raised before the window is listening are kept and shown on the way in, which is what makes "the app was closed
+when this came due" work. Your *name* is not passed — it is resolved from `pluginId` where the notice is drawn, so a
+plugin cannot sign a message with a name other than the one on its own row. Six notices a minute is the ceiling; past
+that they are dropped and the log says so.
+
+### `mic`
+
+Dictation. The app owns the microphone button beside Send, the recording and the encoding to 16 kHz mono; you get a
+finished WAV and return the words.
+
+```js
+const mic = ctx.service('mic');
+mic.setTranscriber({
+  pluginId: ctx.id,
+  label: 'Whisper small',
+  ready: false,                       // true once a model is actually on disk
+  transcribe: async (wavPath) => 'what they said',
+});
+mic.setReady(ctx.id, true, 'Whisper small');
+```
+
+`ready` is what decides whether the button is drawn at all, and it means "there is a model on disk", not "this plugin
+is switched on". A microphone that records into nothing is a dead control, and your row is where a model is obtained.
+
+The WAV is deleted as soon as `transcribe` returns, whether it returned a transcript or threw. Anything you write
+beside it is yours to remove.
+
+### `audio`
+
+Sound output. The app owns the `<audio>` element and the transport bar; you own everything that makes it a player.
+
+```js
+const audio = ctx.service('audio');
+audio.load({ path, label: track.title, sublabel: `${track.artist} · 3 of 47` }, { play: true });
+audio.play(); audio.pause(); audio.clear();
+audio.setTransport({
+  pluginId: ctx.id,
+  buttons: ['previous', 'next', 'stop'],   // only these three exist; an undeclared one is never drawn
+  handle: (command) => { /* 'next' | 'previous' | 'stop' | 'ended' */ },
+});
+```
+
+There is no queue in the service on purpose: what "next" means is your business, and two plugins with different ideas
+can drive the same bar. The bar's second line is your words — "3 of 47", "shuffled" — because only you know them.
+
+### `browser` and `lookupBrowser`
+
+The visible Chrome and a headless one. `lookupBrowser` exists so a lookup never disturbs the tab the user is looking
+at; never use `browser` for background work.
+
+```js
+const browser = ctx.service('browser');
+const outcomes = await browser.runSteps(dsl, { signal: turn.signal });
+const map = await browser.pageMap();
+const text = await browser.readText('body', 4000);
+await browser.close();
+```
+
+`runSteps` takes manul-browser DSL, one command per line. See `src/plugins/browser-control.mjs` for the full DSL as
+documented to the model, and note that **a step reporting `ok` means the engine resolved a target and acted on it —
+not that the page did what was wanted.**
+
+`readText` falls back to the whole page body when its selector matches nothing, so you cannot infer presence from a
+non-empty answer.
+
+---
+
+## Themes
+
+No code, no approval. A theme redefines the variables on `:root` and nothing else.
+
+```json
+"themes": [{ "id": "dusk", "name": "Dusk", "file": "themes/dusk.css" }]
+```
+
+```css
+:root {
+  /* The phosphor. Everything else is derived from these four by eye. */
+  --amber: #33ff33;
+  --amber-bright: #99ff99;
+  --amber-dim: #1f9f1f;
+  --amber-faint: #0d3d0d;
+
+  /* Surfaces. */
+  --bg: #050505;
+  --bg-panel: #0a0a0a;
+  --bg-deep: #000000;
+  --btn-bg: #123012;
+  --btn-bg-hover: #1a401a;
+  --btn-bg-active: #000000;
+
+  /* Meaning, not decoration: a failure, a success, an addition. */
+  --warn: #ff6020;
+  --ok: #66cc66;
+  --add: #aacc00;
+}
+```
+
+It is loaded after the app's stylesheet, so equal specificity wins on order and `!important` is never needed. **Set
+variables, not selectors** — overriding `button { background: … }` works until the app adds a rule, which is exactly
+why the button surfaces became variables. The file is served over `wasteland-plugin://`, which is the only way a
+stylesheet can reach that page at all: `style-src 'self'` on a `file://` page rejects both an inline `<style>` built
+from IPC text and a stylesheet in another directory.
+
+`plugins/phosphor-themes/themes/green.css` in the registry repository is the full set worth setting; `paper.css` beside
+it is the one that also touches `.crt`, and says why in a comment.
+
+---
+
+## Languages
+
+No code, no approval. A dictionary keyed by the English text it replaces.
+
+```json
+"locales": [{ "id": "uk", "name": "Українська", "file": "locales/uk.json" }]
+```
+
+```json
+{
+  "LOCAL VAULT": "ЛОКАЛЬНЕ СХОВИЩЕ",
+  "[ NEW ]": "[ НОВА ]",
+  "Send": "Надіслати"
+}
+```
+
+Keyed by the text rather than by invented identifiers, so adding a language is translating a list of phrases and a
+partial translation works rather than breaks — a missing entry falls back to the English already on screen. Copy
+`plugins/ukrainian/locales/uk.json` from the registry repository as a starting list.
+
+---
+
+## Rules that are not negotiable
+
+**No code runs in the chat window.** There is no way to ship renderer JavaScript and there will not be. If you need
+something on screen, it is either a service the app provides or it does not exist yet.
+
+**An action type can be claimed once.** Built-ins are activated first. The second claimant is refused with the reason
+on its row — quietly letting a newcomer shadow `system_shell` is how an action stops meaning what the prompt says it
+means.
+
+**Register your action *and* its documentation together.** It is impossible to register an action without its prompt
+fragment or document one that will not dispatch, and the app's test suite asserts the two sets are equal. Do not try
+to work around it.
+
+**Clear your timers in `deactivate`.** The host drops every contribution when a plugin is switched off, but nothing
+else knows about an interval. A switched-off plugin still raising notifications is the plainest possible way for its
+checkbox to be a lie. Hold the handle at module scope — `deactivate` is a module export, not something `activate`
+returned — and clear any previous one at the top of `activate`, because switching off and on again activates twice.
+
+```js
+let ticker = null;
+export function activate(ctx) {
+  if (ticker) clearInterval(ticker);
+  ticker = setInterval(tick, 20_000);
+  ticker.unref?.();          // nothing of yours should keep the process alive
+}
+export function deactivate() {
+  if (ticker) clearInterval(ticker);
+  ticker = null;
+}
+```
+
+**Prefer one ticker to a timer per event.** A `setTimeout` for six hours' time is a promise about a process that will
+probably be restarted first, and it does not survive the machine sleeping. A ticker comparing wall-clock time against
+a stored moment pays the debt the moment something is watching again.
+
+**Updating a plugin needs a restart to take effect.** Node caches modules by URL for the life of the process, so
+replacing files does not replace what is running. The app says so on the row rather than pretending otherwise. Do not
+try to defeat this with a query string on your entry point: the query is not inherited by your own
+`import './library.mjs'`, so you get a new entry point linked against cached dependencies, which fails with
+`does not provide an export named …`. This has already happened once.
+
+**Do not import from the app.** `src/` lives inside `app.asar` in a packaged build. Node built-ins and your own files
+only.
+
+**Throttle progress.** `ctx.progress` on every chunk of a download is hundreds of IPC messages a second for a figure
+nobody can read as it flickers. Four times a second is plenty.
+
+---
+
+## Testing
+
+Plugins in the registry repository are tested two ways, and both are worth copying.
+
+**Pure logic, in the registry repo.** Put the parts that do not need the app — parsing, scheduling, tag reading — in
+their own module and test them with `node --test`. `tests/schedule.test.mjs` is a worked example.
+
+**Against the real host, in the app repo.** `test/plugins.test.mjs` loads plugins from a checkout of the registry
+repository sitting beside the app, with stub services, and asserts they activate, register what they claimed, and
+produce the prompt they should:
+
+```js
+const host = new PluginHost({ userDir: pluginsCheckout, services: { mic: stubMic() } });
+await host.load();
+const row = host.list().find((plugin) => plugin.id === 'my-plugin');
+assert.equal(row.active, true, row.error);
+```
+
+Clone `wasteland-plugins` beside `WastelandNext` and those tests run; without it they skip.
+
+`row.error` carries the reason a plugin failed to activate, which is why it is passed as the assertion message — a
+bare `false` tells you nothing.
+
+---
+
+## Installing and publishing
+
+### While you are writing it
+
+Put the directory in the app's plugin folder and restart:
+
+| Platform | Path |
+|---|---|
+| Windows | `%APPDATA%\Wasteland Next\plugins\<id>\` |
+| macOS | `~/Library/Application Support/Wasteland Next/plugins/<id>/` |
+| Linux | `~/.config/Wasteland Next/plugins/<id>/` |
+
+Beside `plugins/` in the same directory you will find `config.json` (where `plugins.<id>` records whether yours is
+enabled and approved), `plugin-state/<id>.json` (your `ctx.state`) and `plugin-data/<id>/` (your `ctx.dataDir()`).
+Deleting the whole `plugins/<id>` directory and the two entries is a clean uninstall by hand.
+
+The directory name must equal the manifest's `id`. Switch it on in **PLUGINS**; a plugin with code needs
+**ALLOW AND RUN** once.
+
+### From an archive
+
+**GET PLUGINS → `[ FROM FILE… ]`** installs a `.zip` you pick yourself: a plugin that was never published, a build
+handed over on a stick, or a machine that cannot reach a registry. Zip from *inside* the plugin directory so
+`plugin.json` is at the archive root (one wrapper directory is tolerated).
+
+There is no checksum, because there is no index making a claim about the bytes — what is trusted is that you chose the
+file. Every other check still runs, and the code does not run until it is approved.
+
+### From a registry
+
+A registry is a URL serving an `index.json`:
+
+```json
+{
+  "schema": 1,
+  "updated": "2026-08-15",
+  "plugins": [
+    {
+      "id": "my-plugin", "name": "My plugin", "version": "1.0.0",
+      "description": "…", "author": "you", "apiVersion": 5,
+      "kind": "code",
+      "icon": "data:image/svg+xml;base64,…",
+      "url": "https://…/my-plugin-1.0.0.zip",
+      "sha256": "…", "size": 14735
+    }
+  ]
+}
+```
+
+- **`sha256` is mandatory.** An entry without one is refused: the index is the only thing being trusted, and without a
+  digest nothing ties it to the bytes.
+- **`url` must be `https:`.** So must the index itself, except on loopback.
+- **`icon` is a data URI or nothing.** The page allows `img-src data:` and no remote host, so a linked icon would both
+  fail to draw and turn opening the plugin list into a request telling somebody who opened it.
+
+Users add a registry in **GET PLUGINS → REGISTRIES**; pasting `https://github.com/owner/repo` expands to the raw
+`index.json` on `main`. Several registries are asked in parallel, and where two publish the same id the newest version
+wins with the source shown on the row.
+
+In the `wasteland-plugins` repository, `scripts/build-index.mjs` packs every plugin and writes `index.json` with the
+digests; the release workflow runs it. An archive uploaded by hand with no regenerated index entry is invisible.
+
+---
+
+## API versions
+
+Declare the **lowest** version that has everything you use. Declaring a higher one means users on an older build see
+"update Wasteland Next" instead of your plugin.
+
+| Version | Added |
+|---|---|
+| 1 | Actions, prompt fragments, per-turn context, turn hooks, the `browser` and `lookupBrowser` services |
+| 2 | Themes, settings (`text`, `folder`, `toggle`), the `audio` service |
+| 3 | Interactive `choices` and `choose`, language packs |
+| 4 | The `notify` service, and `ctx.state` — the plugin's own JSON document |
+| 5 | The `mic` service, `select` settings, `ctx.progress`, `ctx.dataDir()` |
+
+---
+
+## Checklist
+
+Before publishing, or before telling someone it is finished:
+
+- [ ] `id` equals the directory name, and is lowercase letters, digits and dashes.
+- [ ] `apiVersion` is the lowest that has everything you use.
+- [ ] Every action you register is in `actions`; every service you fetch is in `services`.
+- [ ] Your prompt fragment **names the refusal it exists to prevent** and says it is wrong in this session.
+- [ ] Your fragment shows a worked example in a fenced `action` block.
+- [ ] Every `feedback` tells the model what to *say*, not just what happened.
+- [ ] A failure returns `{ok: false}` with a reason the model can act on, and never leaves the turn hanging.
+- [ ] Offered choices carry a token, and a stale click is refused in words.
+- [ ] Timers are held at module scope, cleared in `deactivate`, and re-cleared at the top of `activate`.
+- [ ] Long jobs report through `ctx.progress`, throttled to about four times a second.
+- [ ] Anything downloaded goes in `ctx.dataDir()`, not in your own directory.
+- [ ] Nothing is imported from the app's `src/`.
+- [ ] `version` is bumped, and it compares numerically the way you think it does.
+- [ ] The pure parts have tests, and the plugin activates against the real host.

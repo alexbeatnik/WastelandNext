@@ -12,6 +12,211 @@ renderer's `handleEvent`.
 The renderer holding no pipeline state is deliberate: a reload can never leave the two disagreeing about whether a turn
 is running.
 
+## Plugins
+
+Everything the model may *do* is a plugin. `PluginHost` in `plugins/host.mjs` is the registry; `agent.mjs` no longer
+knows that a browser exists. A plugin contributes exactly four things — action handlers, the slice of the system prompt
+documenting them, context recomputed each turn, and a hook run once per user message — and reaches the app only through
+services it named in its manifest and the host handed it by name.
+
+**The prompt fragment and the handler ship together, in one activation.** That pairing used to be four checkboxes and a
+`switch`, held in step by hand. It is now impossible to register an action without its documentation or document one
+that will not dispatch, and `plugins.test.mjs` asserts the two sets are equal against the real built-ins. This is what
+the whole indirection is for; do not add an action type to `prompts.mjs`.
+
+**A prompt fragment must name the refusal it exists to prevent.** Describing the action accurately is not enough:
+`audio-player`'s first fragment did exactly that and never said "I can't play music" was false, and the first request
+to play a song got "I can't directly play music. However, I can search for it on YouTube" — from a model holding
+`play_music`. That is the same failure as answering "I have no access to real-time information" with `web_lookup` in
+hand, and the same cure applies. It is worse inside this app than most, because `BROWSER` is long, prescriptive and
+carries a worked example of playing a song on YouTube; a fragment that does not push back is competing with that.
+
+**Built-ins are imported statically from `src/plugins/index.mjs`, never discovered on disk.** They are part of the
+build, so there is nothing to discover — and a packaged app keeps `src/` inside `app.asar`, where whether a dynamic
+import resolves is a question worth not having to answer. Only installed plugins, which live on the ordinary
+filesystem under the data root, are imported by path.
+
+**A manifest is untrusted input.** It arrives inside an archive from a repository we do not control. The id becomes a
+directory name *and* a key in `config.plugins`, so it is validated for the same reason `isSafeId` exists in
+`chats.mjs`; `main` is checked with the same question `assertSafeArchive` asks of an archive entry, backslash counted
+as a separator. A manifest naming an `apiVersion` this build does not implement is listed with "update Wasteland Next"
+rather than loaded — a plugin failing somewhere inside `activate` on a function that does not exist yet is the same
+bug as a pinned llama.cpp tag that predates a flag.
+
+**A plugin present on disk is not an instruction to run it.** `approved` is recorded when the user switches an
+installed plugin on, and that click is the consent — the warning sits on the row being clicked. A directory that
+appeared in `plugins/` runs nothing until then. Built-ins are approved by shipping inside the application.
+
+**Half a plugin is worse than none.** Contributions are collected during `activate` and committed only once it has
+returned: one that registers two actions and throws between them would otherwise leave the model holding an action
+whose other half never arrived.
+
+**An action type can be claimed once, and built-ins are activated first.** Quietly letting a newcomer shadow
+`system_shell` is how an action stops meaning what the prompt says it means. The second claimant is refused with a
+reason on its row.
+
+**A switched-off plugin's action types are still known.** `owner()` reads them from the manifest without loading
+anything, so the dispatcher answers "Browser control is switched off" instead of "unknown action type". The difference
+is not cosmetic: told the second, a model retries with different spelling; told the first, it tells the user.
+
+**Nothing a plugin does may end a turn.** A handler that throws produces feedback the model can act on, exactly as one
+returning a failure does. Without that, a third-party typo leaves the transcript with a blinking cursor and no reply —
+which is the same failure `reply:start` owing a `reply:end` exists to prevent.
+
+**The approval dialog belongs to the turn, not to the plugin.** `turn.confirm` is what `system-shell` calls; the
+pending map, the `shell:request`/`shell:resolved` events and the answer from Stop all stay in `agent.mjs`. A plugin
+that wanted to skip the dialog would only have to not call anything, so the question cannot live on its side.
+
+**The old `allow*` keys are read exactly once, and only when all of them are present.** They are gone from `DEFAULTS`,
+so a fresh install has none — and reading an absent key as `false` would ship with every capability disabled and no
+hint why. `mergeEnablement` also never overrules an id already recorded: rediscovery on the next boot must not undo
+what the user chose.
+
+**A theme pack has no code, and that is the whole consent model.** `main` is optional in a manifest; a plugin without
+one contributes only what the app reads itself — stylesheets, an icon — so there is nothing to approve and the
+approval step keeps meaning something. `needsApproval` is the single place that decides, and a manifest declaring
+actions or services with no entry point is refused rather than listed as working while doing nothing.
+
+**The custom schemes must be registered before `app.whenReady()`**, which is why `registerSchemes()` sits at module
+scope in `main.mjs` and in `smoke.mjs`. Registered late, a scheme is an ordinary opaque one: no `stream: true`, no
+Range support, and a seek in a long track silently does nothing. `serveProtocols` — the handlers — can only be
+installed after ready, so the two halves are deliberately separate calls.
+
+**`wasteland-plugin:` is the only way a theme can exist.** `style-src 'self'` on a `file://` page rejects an inline
+`<style>` built from IPC text *and* a stylesheet in another directory. Both are named in the CSP in `index.html`;
+`script-src` stays `'self'` alone, because no plugin runs code in that window. A theme therefore arrives as a `<link>`
+pointed at our own handler, which serves nothing outside one plugin's directory.
+
+**`shared/schemes.mjs` exists because `protocol.mjs` imports `electron`.** The first version put the URL builders
+beside the handler, and `host.mjs` importing one of them took the whole plugin test suite down with
+`does not provide an export named 'protocol'` — the same lesson `classifyError` records, learned again. Anything both
+processes need must not live in a file that imports `electron`.
+
+**The audio service is not a music player, and must not become one.** It knows one source, whether it is playing, how
+loud, and what to write on the bar. The queue, shuffle, repeat, the library and what "next" means all belong to the
+plugin, which registers a transport the app asks. That is what lets a second plugin drive the same bar, and what keeps
+a plugin that plays one notification sound from inheriting a next button it cannot honour. The bar's buttons come from
+the transport's own list, so an undeclared one is never drawn.
+
+**The media scheme reaches anywhere on disk, so the allowlist is the one file that is loaded.** Not the queue — the app
+does not have the queue — and not "is the path well formed". `audio.allows` answers exactly "did we put this in front
+of the user", and `clear()` revokes it.
+
+**The renderer never builds a media URL.** `status().source.src` is built in the main process, because the scheme and
+its encoding belong to the handler that takes them apart again — a second encoder is a second thing to get wrong about
+a filename containing `#`, which ends a path and starts a fragment.
+
+**`.player[hidden]` is not optional.** The bar is `display: flex`, and any author-level `display` outranks the UA rule
+behind `hidden` — the drop veil shipped visible for exactly this reason. The smoke check reads `getComputedStyle`.
+
+**A registry icon is a data URI or nothing.** The page allows `img-src data:` and no remote host, so a linked icon
+would both fail to draw and turn opening the plugin list into a request telling somebody who opened it. `parseEntry`
+drops anything that is not `data:image/`.
+
+**An install is atomic, and a checksum is mandatory.** Fetch to scratch, compare the digest the index published, read
+the archive's central directory without unpacking (`assertSafeArchive`), unpack to staging, validate the manifest, and
+only then move it into `plugins/`. A half-unpacked directory would be discovered on the next boot and listed as a
+broken plugin the user never installed. An entry with no `sha256` is refused outright: the index is the only thing
+being trusted, and without a digest nothing ties it to the bytes.
+
+**Versions are compared numerically, in two places.** `1.10.0` is newer than `1.9.0`, which a string comparison gets
+backwards — and an update button that never appears is indistinguishable from a registry that never publishes. The
+renderer has its own small copy because it decides which rows show UPDATE.
+
+**Anything meant to be discovered must be on disk before `registerIpc`.** It is what starts `plugins.load()`. The smoke
+runner writes its test theme first for that reason; the version that wrote it afterwards reported four plugins and a
+theme picker with one entry, both truthfully.
+
+**`#broken` carries every field `list()` reads.** A plugin that could not be understood is still a row on screen, and a
+row that throws while being drawn takes the whole list with it.
+
+**The `mic` service is the mirror of `audio`, and must stay as small.** Capture has to happen in the renderer, because
+`getUserMedia` exists there and nowhere else, and no plugin runs code in that window — so the app owns the button, the
+recording and the encoding to 16 kHz mono, and a plugin owns turning sound into words. It knows whether it is
+listening, whether something is being transcribed, and who to hand the audio to; which model, which language and how
+the words are extracted are the plugin's, which is what lets a second plugin drive the same button with a different
+engine.
+
+**The mic button is drawn only when a transcriber says it is `ready`.** Registered and ready are different facts:
+the first means "this plugin drives dictation", the second means "there is a model on disk". A microphone that records
+into nothing is a dead control, and the explanation belongs on the plugin's row, where a model can actually be
+obtained.
+
+**`hear()` deletes the recording in a `finally`, on every path.** This is a recording of somebody's voice. Leaving it
+in a scratch directory because the engine threw is not litter; it is a recording of somebody's voice left on their
+disk. The renderer stops every track the moment recording ends rather than when the transcript comes back, for the
+same reason in a different register: the operating system's recording indicator stays lit until it does, and a
+microphone that appears to still be listening while a model runs is alarming and untrue.
+
+**Dictated text goes into the composer, never straight out.** What a speech model heard is exactly the thing worth
+reading before it is sent. Voice input also contributes *nothing* to the system prompt — nothing the model can do
+changes, since the text arrives as if typed, and describing a microphone it cannot operate would invite it to offer to
+"listen".
+
+**A `select` setting names its options in the manifest.** So the row can be drawn before a line of the plugin's code
+has run, and so what a plugin may be set to stays readable without reading it. `setSetting` refuses a value that was
+not offered: a row displaying a state the plugin has no code for is worse than a refused click, and the plugin reading
+it back would be entitled to assume otherwise.
+
+**`ctx.progress` draws on the plugin's own row, and the renderer keeps it in `state`.** The activity log is the wrong
+place for a 1.5 GB download — it scrolls, the narrow layout hides that column, and a percentage that has to be hunted
+for is one nobody watches. It is held in `state.pluginProgress` rather than left in the DOM because `paintPlugins`
+rebuilds every row for reasons that have nothing to do with the download, and a meter that vanished because a setting
+was saved mid-fetch looks like a download that stopped.
+
+**`ctx.dataDir()` is outside the installed tree, like `ctx.state`.** That tree is deleted and replaced on every update,
+so a speech model downloaded into it would be downloaded again on every version bump. `forgetData` removes both on
+uninstall: a gigabyte of model outliving the plugin it belongs to is the largest thing in the data directory with
+nothing on screen to explain it.
+
+**`ctx.store` is the user's answers; `ctx.state` is the plugin's own.** Every `store` key is declared in the manifest
+because every one of them is a control drawn on the plugin's row — a music folder, an endpoint. A list of reminders is
+neither: nobody declares it, nobody types it into a field, and there is no row to draw it on. So a plugin also gets one
+JSON document keyed by id, under `plugin-state/` rather than inside the plugin directory — that whole tree is deleted
+and replaced on every update, which would make updating a plugin the thing that loses your reminders. It is written to
+a temporary file and renamed over the target: a truncated JSON file reads back as `{}`, which is every reminder gone
+with nothing anywhere saying so.
+
+**A notice is the one message with no question in front of it.** Everything else this app says is an answer — the user
+typed, a turn ran, a reply came back — and there was nowhere for a reminder to go: the transcript belongs to a
+conversation, the status bar is overwritten by the next thing, and a plugin cannot reach the window. `notify.show`
+goes two places at once, a card in the transcript and an OS notification, because neither is enough alone. It is
+drawn as its own element rather than as an assistant turn: it did not come from the model, and dressing it as a reply
+makes the model responsible for words it never wrote.
+
+**Recent notices are kept, because one can be raised before the window is listening.** The plugin host starts before the
+renderer has subscribed, and a reminder coming due during boot is exactly the case the feature exists for. They arrive
+twice on purpose — in the snapshot and again on the stream — and the renderer skips an id it has already drawn.
+`pluginName` is deliberately *not* on the notice: the name is resolved from the id where it is drawn, so a plugin
+cannot sign a message with a name other than the one on its own row.
+
+**A registry list is a widening of trust, and looks like one.** Adding one is a URL typed in and a button pressed;
+nothing a page or a plugin can arrange. An index must be https — it is a list of URLs and checksums deciding what gets
+downloaded and unpacked, and anything on the path could rewrite it — with loopback excepted, since there is no path to
+sit on. Two registries publishing the same id is a fork or a mirror rather than an error, so the newest wins; what
+makes that safe is that it is not silent, and the source label travels with the entry to the row.
+
+**One registry failing must not empty the list, and *all* of them failing must not hide which were asked.** `fetchIndex`
+reports per source and never throws: it returns `error` only when nothing answered, because throwing lost exactly the
+thing worth showing in that state. Removing the broken registry is how the user gets the list back, and they cannot
+remove a row that was never drawn. The boot fetch stays silent about a failure — the update badges are worth a
+background request, an error about a list nobody asked to see is not — while the rows still say what happened.
+
+**Installing from a local archive has no checksum, and that is not a gap.** A digest ties a download to the index that
+offered it; a file picked in a dialog was offered by nobody, and the choice is the consent — the same distinction
+`attach.mjs` draws between a path a model named and a path a person picked. Every other check still runs, including
+`assertSafeArchive` and the manifest, and the code still cannot run until it is approved. The digest is computed and
+handed back anyway, so somebody who *does* have a published hash can compare.
+
+**Staging happens inside the data root, not in `tmpdir()`.** The last step of an install is a rename onto the data
+root, and a rename across volumes fails with `EXDEV`. On a machine whose `TEMP` is on another drive that made every
+install fail at the very end — after the download, the checksum and the unpacking had all worked.
+
+**`paintPlugins` owns the section's status line.** It writes the active count, which is also how a previous error
+message goes away; the first version of the toggle handler cleared the line immediately afterwards and blanked the
+count it had just written. The smoke check asserts the number, not that the text changed — an empty string is
+different from anything, so the weaker check passed on the bug.
+
 ## Traps
 
 **`ELECTRON_RUN_AS_NODE`.** VS Code's integrated terminal sets this. With it set, `npx electron .` runs the binary as
@@ -98,6 +303,14 @@ field confidently displaying the wrong number is worse than one that fails.
 **Every link in the About box needs `target="_blank"`.** That is what routes it through `setWindowOpenHandler` into
 `shell.openExternal`. Without it the chat window itself navigates to GitHub, and there is no way back — no address bar,
 no back button. The smoke check asserts it on every anchor in the dialog, not just the first.
+
+**`applyDictionary` must not write over text the app has since rewritten.** It walks markup captured at boot, and some
+of that markup is written to later by code — the mic button's tooltip gains the name of whichever plugin is listening.
+Putting the captured original back is not a translation, it is an erasure: the button spent a whole run saying
+`Dictate` instead of `Dictate — Smoke ears`, with the main process reporting the right answer the entire time. A node
+is skipped when what it holds is neither the string captured nor the one this function last wrote — both of those are
+ours, anything else has an owner. Anything written dynamically therefore goes through `t()` instead, which is what the
+function is for.
 
 **The `hidden` attribute loses to any author-level `display`.** `hidden` is nothing but the UA rule
 `[hidden] { display: none }`, and the weakest author declaration outranks the whole UA sheet — so `.drop-veil
@@ -242,11 +455,18 @@ picker rewritten back into a `<select>` would fail there first.
 a guess. The full path is the tooltip — a chip wide enough to show it would fit one item. The chips row wraps rather
 than scrolling sideways, because an attachment scrolled out of view is one the user cannot see to remove.
 
-**An attachment is folded into the transcript once, not re-sent every turn.** `Attachments` is a pending list that
-`send()` empties into one `tool` message ahead of the user's words. Held outside the transcript and prepended to every
-prompt instead, the same folder would go over the wire five times in five turns — and would sit outside compaction,
-which is the only thing that can shrink it once the conversation grows. Half the prompt budget is the attachment's; the
-other half has to hold the conversation it is for.
+**An attachment is folded into a conversation once, and stays attached until the user detaches it.** Those sound
+contradictory and are not. `take(chatId)` renders whatever *that chat* has not seen into one `tool` message ahead of
+the user's words and records where it went; it returns `''` on every turn after the first, so re-sending cannot happen.
+Prepended to every prompt instead, the same folder would go over the wire five times in five turns — and would sit
+outside compaction, which is the only thing that can shrink it once the conversation grows. Half the prompt budget is
+the attachment's; the other half has to hold the conversation it is for.
+
+The list itself is emptied only by `remove` or `clear`, both of which are buttons. The first version emptied it at send
+time, and a chip that vanished the moment a question was asked read as the app having thrown the folder away — the user
+then re-attached the same project to ask a second question about it. What is remembered is therefore not "has this been
+used up" but "has this chat seen it", which is also what lets one folder reach two conversations. `includedIn` is sent
+as a list rather than resolved against "the current chat", because the main process does not have one.
 
 **Attachment paths are not confined to the home directory, and `readfile.mjs` paths still are.** The difference is who
 named the path: a model naming one is a request to be vetted, a person picking one through a file dialog or dropping it

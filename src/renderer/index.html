@@ -2,9 +2,23 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:;" />
+    <!--
+      `wasteland-plugin:` is what makes a theme possible at all. `style-src
+      'self'` on a file:// page rejects both an inline <style> built from IPC
+      text and a stylesheet in another directory, so a scheme named here is the
+      only door — and it is a narrow one: the handler serves nothing outside the
+      plugin's own directory. `wasteland-media:` is the audio, restricted to the
+      one file the player was handed. Scripts are still 'self' alone: no plugin
+      runs code in this window.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' wasteland-plugin:; script-src 'self'; img-src 'self' data: wasteland-plugin:; font-src 'self' wasteland-plugin:; media-src 'self' wasteland-media:; connect-src 'self' wasteland-plugin:;"
+    />
     <title>Wasteland Next</title>
     <link rel="stylesheet" href="styles.css" />
+    <!-- Filled in by the theme picker; inert until it has an href. -->
+    <link id="theme-css" rel="stylesheet" />
   </head>
   <body>
     <div class="crt" aria-hidden="true"></div>
@@ -23,7 +37,7 @@
     <main class="workspace" id="workspace">
       <!-- ===================== LEFT PANEL ===================== -->
       <aside class="panel panel-left" id="panel-left">
-        <details class="section" open>
+        <details class="section" id="section-find" open>
           <summary>FIND A MODEL</summary>
           <div class="section-body">
             <label class="field">
@@ -108,10 +122,47 @@
           </div>
         </details>
 
+        <!-- What the model may do. Every row is a plugin: the four that ship
+             with the app, and whatever else has been installed. -->
+        <details class="section" open>
+          <summary>PLUGINS</summary>
+          <div class="section-body">
+            <div id="plugin-list" class="plugin-list"></div>
+            <div id="plugin-status" class="muted"></div>
+          </div>
+        </details>
+
+        <!-- The registry. Nothing here is fetched until the section is opened:
+             the app must not talk to the network because it was started. -->
+        <details class="section" id="section-store">
+          <summary>GET PLUGINS</summary>
+          <div class="section-body">
+            <div class="row">
+              <button id="btn-store-refresh">[ REFRESH ]</button>
+              <!-- For a plugin that was never published, or a machine that
+                   cannot reach a registry at all. -->
+              <button id="btn-store-file">[ FROM FILE… ]</button>
+              <span id="store-status" class="muted"></span>
+            </div>
+            <div id="store-list" class="plugin-list"></div>
+
+            <!-- Where the list above comes from. Adding one widens what the app
+                 will offer to download, so it is a URL typed in and a button
+                 pressed — never something a page or a plugin can arrange. -->
+            <div class="field">
+              <span>REGISTRIES</span>
+              <div id="registry-list" class="registry-list"></div>
+              <div class="row">
+                <input id="registry-url" type="text" placeholder="https://github.com/owner/repo" />
+                <button id="btn-registry-add">[ ADD ]</button>
+              </div>
+            </div>
+          </div>
+        </details>
+
         <details class="section" open>
           <summary>BROWSER</summary>
           <div class="section-body">
-            <label class="check"><input type="checkbox" id="set-browser-enabled" /> <span>Browser control</span></label>
             <label class="check"><input type="checkbox" id="set-browser-headless" /> <span>Headless</span></label>
             <label class="field">
               <span>CHROME PATH</span>
@@ -125,12 +176,20 @@
         </details>
 
         <details class="section">
-          <summary>CAPABILITIES</summary>
+          <summary>INTERFACE</summary>
           <div class="section-body">
-            <label class="check"><input type="checkbox" id="set-allow-browser" /> <span>browser_steps</span></label>
-            <label class="check"><input type="checkbox" id="set-allow-lookup" /> <span>web_lookup</span></label>
-            <label class="check"><input type="checkbox" id="set-allow-read" /> <span>read_file</span></label>
-            <label class="check"><input type="checkbox" id="set-allow-shell" /> <span>system_shell (asks first)</span></label>
+            <label class="field">
+              <span>LANGUAGE</span>
+              <select id="set-locale">
+                <option value="">English — built in</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>THEME</span>
+              <select id="set-theme">
+                <option value="">Amber — built in</option>
+              </select>
+            </label>
             <label class="check"><input type="checkbox" id="set-crt" /> <span>CRT effects</span></label>
           </div>
         </details>
@@ -153,6 +212,18 @@
           </div>
           <button id="btn-new-chat" title="Start a new conversation">[ NEW ]</button>
           <button id="btn-delete-chat" class="ghost danger" title="Delete this conversation">×</button>
+
+          <!-- Which model is answering belongs where the answering happens. It
+               was only in the left rail, which is closed on a narrow window and
+               scrolled away on a tall one. -->
+          <div class="chat-picker model-picker">
+            <button id="model-current" class="chat-current" aria-haspopup="listbox" aria-expanded="false"
+                    title="Choose the model that answers">
+              <span id="model-current-label">— no model —</span>
+              <span class="chat-caret">▾</span>
+            </button>
+            <div class="chat-menu" id="model-menu" role="listbox" hidden></div>
+          </div>
         </div>
 
         <div class="chat-log" id="chat-log"></div>
@@ -160,6 +231,28 @@
         <!-- Shown only while something is being dragged over the window. -->
         <div class="drop-veil" id="drop-veil" hidden>
           <span>Release to add to the conversation</span>
+        </div>
+
+        <!-- Whatever plugin is driving the audio service. Absent until there
+             is something loaded, so an app with no player is unchanged. -->
+        <div class="player" id="player" hidden>
+          <div class="player-transport">
+            <button id="player-previous" class="ghost" title="Previous" hidden>⏮</button>
+            <button id="player-toggle" class="ghost" title="Play">▶</button>
+            <button id="player-next" class="ghost" title="Next" hidden>⏭</button>
+            <button id="player-stop" class="ghost" title="Stop" hidden>⏹</button>
+          </div>
+          <div class="player-labels">
+            <span class="player-title" id="player-title"></span>
+            <span class="player-sub" id="player-sub"></span>
+          </div>
+          <span class="player-time" id="player-position">0:00</span>
+          <input id="player-seek" class="player-seek" type="range" min="0" max="1000" step="1" value="0"
+                 title="Seek" aria-label="Seek" />
+          <span class="player-time" id="player-duration">0:00</span>
+          <span class="player-vol-icon" aria-hidden="true">♪</span>
+          <input id="player-volume" class="player-volume" type="range" min="0" max="100" step="1" value="80"
+                 title="Volume" aria-label="Volume" />
         </div>
 
         <div class="ctx-row">
@@ -183,6 +276,10 @@
           <textarea id="input" rows="2" placeholder="Ask, or tell it what to open…  (Enter sends · Shift+Enter newline)"></textarea>
           <div class="composer-buttons">
             <button id="btn-expand" class="ghost" title="Expand the composer">⤡</button>
+            <!-- Drawn only when a plugin has a working transcriber: a
+                 microphone that records into nothing is a dead control, and
+                 getting a model is done on that plugin's own row. -->
+            <button id="btn-mic" class="mic" title="Dictate" hidden>●</button>
             <button id="btn-send" class="send" title="Send">▶</button>
           </div>
         </div>

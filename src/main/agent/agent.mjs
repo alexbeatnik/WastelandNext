@@ -6,17 +6,14 @@
  * shows is an event emitted from here, so the renderer holds no pipeline state
  * of its own and a reload cannot desynchronise it.
  */
-import { exec } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import * as chats from '../chats.mjs';
 import * as config from '../config.mjs';
 import { estimateTokens, streamChat } from '../llm/client.mjs';
-import { readForModel } from './readfile.mjs';
-import { COMPACT_PROMPT, buildSystemPrompt, pageMapContext, titlePrompt } from './prompts.mjs';
+import { COMPACT_PROMPT, buildSystemPrompt, titlePrompt } from './prompts.mjs';
 import { extractActions, splitNarration, splitThinking, stripActionBlocks, stripThinking } from './actions.mjs';
 import { Attachments } from './attach.mjs';
-import { BatchGuard } from './batch-guard.mjs';
 
 /** How many times one user message may bounce back through the model. */
 const MAX_FOLLOW_UPS = 3;
@@ -35,8 +32,6 @@ const KEEP_MESSAGES = 4;
  * couple of paragraphs plus an action block.
  */
 const REPLY_RESERVE = 1536;
-/** Shell commands are killed rather than left hanging the pipeline. */
-const SHELL_TIMEOUT_MS = 120_000;
 /** Marks where `fitToWindow` cut a message that could not be dropped whole. */
 const TRIM_NOTE = '\n\n[… trimmed to fit the context window …]\n\n';
 
@@ -134,21 +129,25 @@ export function fitToWindow(messages, budget) {
 
 export class Agent extends EventEmitter {
   #server;
-  #browser;
-  #lookupBrowser;
+  /** The plugin host. Every action the model may emit comes from it. */
+  #plugins;
   #abort = null;
   #busy = false;
-  #pendingShell = new Map();
-  /** Refuses a browser batch identical to one already run this turn. */
-  #batchGuard = new BatchGuard();
+  /**
+   * Approval questions waiting on the user, by id.
+   *
+   * Owned by the agent rather than by the plugin that asked, so a plugin cannot
+   * arrange to run something without the dialog by simply not calling anything
+   * — and so Stop can answer every outstanding question at once.
+   */
+  #pendingApprovals = new Map();
   /** Files and folders the user attached, waiting for the next message. */
   attachments = new Attachments();
 
-  constructor({ server, browser, lookupBrowser }) {
+  constructor({ server, plugins }) {
     super();
     this.#server = server;
-    this.#browser = browser;
-    this.#lookupBrowser = lookupBrowser;
+    this.#plugins = plugins;
   }
 
   get busy() {
@@ -168,17 +167,6 @@ export class Agent extends EventEmitter {
     this.#say('status', { text });
   }
 
-  /** The capability set as the left panel currently has it. */
-  #capabilities() {
-    const settings = config.load();
-    return {
-      browser: Boolean(settings.allowBrowser && settings.browserEnabled),
-      webLookup: Boolean(settings.allowWebLookup && settings.browserEnabled),
-      readFile: Boolean(settings.allowReadFile),
-      shell: Boolean(settings.allowShell),
-    };
-  }
-
   /**
    * Turn stored history into API messages.
    *
@@ -186,12 +174,12 @@ export class Agent extends EventEmitter {
    * go over the wire as user turns, because a mid-conversation system message
    * is handled inconsistently across local models.
    */
-  #buildMessages(chat, pageContext) {
+  #buildMessages(chat, context) {
     const settings = config.load();
     const system = buildSystemPrompt({
-      capabilities: this.#capabilities(),
+      fragments: this.#plugins.promptFragments(),
       userPrompt: settings.systemPrompt,
-      pageContext,
+      context,
     });
 
     const messages = [{ role: 'system', content: system }];
@@ -258,9 +246,15 @@ export class Agent extends EventEmitter {
     // back to the composer.
     if (!this.#server.usable) throw new Error('no model loaded — pick one from the vault');
 
+    // Plugins are discovered and activated asynchronously at boot. Waiting here
+    // costs nothing after the first turn and removes the one race that would
+    // matter: a first message sent fast enough to be answered by a model that
+    // had not yet been told which actions exist.
+    await this.#plugins.ready;
+
     this.#busy = true;
     this.#abort = new AbortController();
-    this.#batchGuard.beginTurn();
+    this.#plugins.beginTurn();
 
     try {
       let chat = chats.read(chatId) ?? chats.create(chats.titleFromPrompt(prompt));
@@ -270,10 +264,18 @@ export class Agent extends EventEmitter {
       // exactly the machinery that handles everything else, instead of being a
       // second kind of context with its own rules. Half the prompt budget is
       // theirs — the other half has to hold the conversation they are for.
-      const attached = this.attachments.take(Math.floor(promptBudget(this.#window()) / 2));
+      //
+      // Per chat, and only once each: they stay attached until the user detaches
+      // them, but a conversation that already holds a folder does not need it
+      // again — the model can see it. `take` answers '' on every turn after the
+      // first, which is why this costs nothing to ask on all of them.
+      const attached = this.attachments.take(chat.id, Math.floor(promptBudget(this.#window()) / 2));
       if (attached) {
         chat = chats.append(chat.id, { role: 'tool', content: attached });
-        this.#say('attach:consumed', {});
+        // Carries the list, because the chips do not go away any more: what
+        // changed is that they now belong to this conversation, and the row has
+        // to say so.
+        this.#say('attach:consumed', { items: this.attachments.list() });
       }
 
       chat = chats.append(chat.id, { role: 'user', content: prompt });
@@ -298,16 +300,19 @@ export class Agent extends EventEmitter {
 
   /** One model round: stream, persist, dispatch, recurse if an action fed back. */
   async #runTurn(chatId, depth) {
-    const pageContext = this.#browser.open ? pageMapContext(await this.#browser.pageMap()) : '';
+    // Recomputed every round, from every active plugin. The browser's page map
+    // is the one that moves most, and it is why this is not hoisted out of the
+    // follow-up loop.
+    const context = await this.#plugins.context();
 
     // Checked here rather than only at the start of `send`, because a browsing
     // turn grows its own history: every batch appends a page map, and three
     // follow-ups can carry a conversation past the window without a single new
     // message from the user.
-    await this.#maybeCompact(chatId, { pageContext });
+    await this.#maybeCompact(chatId, { context });
 
     const chat = chats.read(chatId);
-    const built = this.#buildMessages(chat, pageContext);
+    const built = this.#buildMessages(chat, context);
 
     // Compaction is the graceful shrink and normally the only one that runs.
     // This is what happens when it could not shrink enough — without it the
@@ -351,7 +356,7 @@ export class Agent extends EventEmitter {
     let fedBack = false;
     for (const action of actions) {
       if (this.#abort?.signal.aborted) return;
-      const result = await this.#dispatch(chatId, action);
+      const result = await this.#dispatch(action);
       if (result?.feedback) {
         chats.append(chatId, { role: 'tool', content: result.feedback });
         fedBack = true;
@@ -365,31 +370,56 @@ export class Agent extends EventEmitter {
     else if (post) this.#say('log', { text: post });
   }
 
-  async #dispatch(chatId, action) {
-    const capabilities = this.#capabilities();
+  /**
+   * Hand one action to the plugin that provides it.
+   *
+   * Nothing a plugin does may end a turn. A handler that throws produces
+   * feedback the model can act on, exactly as a handler that returns a failure
+   * does — the alternative is a third-party plugin able to kill the pipeline
+   * with a typo, leaving the transcript with a live cursor and no reply.
+   */
+  async #dispatch(action) {
     this.#say('action:start', { type: action.type, steps: action.steps });
 
-    switch (action.type) {
-      case 'browser_steps':
-        if (!capabilities.browser) return this.#refuse('browser control is switched off');
-        return this.#doBrowserSteps(action.steps);
-      case 'browser_close':
-        await this.#browser.close();
-        this.#say('action:result', { type: action.type, ok: true, summary: 'browser closed' });
-        return null;
-      case 'web_lookup':
-        if (!capabilities.webLookup) return this.#refuse('web lookup is switched off');
-        return this.#doWebLookup(action.steps);
-      case 'read_file':
-        if (!capabilities.readFile) return this.#refuse('file reading is switched off');
-        return this.#doReadFile(action.steps);
-      case 'system_shell':
-        if (!capabilities.shell) return this.#refuse('shell access is switched off');
-        return this.#doShell(action.steps);
-      default:
-        this.#say('log', { text: `unknown action type: ${action.type}` });
-        return null;
+    const handler = this.#plugins.action(action.type);
+    if (!handler) {
+      // Known but not running is a different answer from never heard of, and
+      // the model can only act on the first one. The manifest is what lets a
+      // switched-off plugin still be named without loading it.
+      const owner = this.#plugins.owner(action.type);
+      if (owner) return this.#refuse(`${owner.name} is switched off`);
+      this.#say('log', { text: `unknown action type: ${action.type}` });
+      return null;
     }
+
+    let result;
+    try {
+      result = await handler.run(action.steps, this.#turnContext());
+    } catch (err) {
+      this.#say('action:result', { type: action.type, ok: false, summary: err.message });
+      return { feedback: `[ACTION FAILED] ${action.type}: ${err.message}. Tell the user; do not retry it.` };
+    }
+
+    const { ok = true, summary = '', feedback = '', ...detail } = result ?? {};
+    this.#say('action:result', { type: action.type, ok, summary, ...detail });
+    return feedback ? { feedback } : null;
+  }
+
+  /**
+   * What a plugin's handler is given for the duration of one action.
+   *
+   * Deliberately small: the signal so a handler can be stopped, the two ways of
+   * saying what is happening, and the approval question. Anything wider — the
+   * chat, the config, the window — would make a plugin able to do things the
+   * plugin list does not describe.
+   */
+  #turnContext() {
+    return {
+      signal: this.#abort?.signal,
+      status: (text) => this.#status(text),
+      log: (text) => this.#say('log', { text }),
+      confirm: (request) => this.#confirm(request),
+    };
   }
 
   #refuse(reason) {
@@ -397,140 +427,40 @@ export class Agent extends EventEmitter {
     return { feedback: `[ACTION REFUSED] ${reason}. Tell the user, and do not retry it.` };
   }
 
-  async #doBrowserSteps(steps) {
-    // A batch identical to one already run this turn cannot produce a different
-    // result, and a model that cannot tell "the click resolved" from "the page
-    // changed" will send it again — five times, in the session this guard was
-    // written for. The decision lives in `batch-guard.mjs`.
-    const refusal = this.#batchGuard.check(steps);
-    if (refusal) {
-      this.#say('action:result', { type: 'browser_steps', ok: false, summary: 'identical batch already run' });
-      return { feedback: refusal };
-    }
-
-    this.#status('Browser…');
-    let outcomes;
-    try {
-      outcomes = await this.#browser.runSteps(steps, { signal: this.#abort?.signal });
-    } catch (err) {
-      this.#say('action:result', { type: 'browser_steps', ok: false, summary: err.message });
-      return { feedback: `[BROWSER FAILED] ${err.message}` };
-    }
-
-    const failed = outcomes.find((o) => !o.ok);
-    const summary = failed
-      ? `failed at: ${failed.step} — ${failed.error || failed.reason || 'no match'}`
-      : `${outcomes.length} step(s) ok`;
-    this.#say('action:result', { type: 'browser_steps', ok: !failed, summary, outcomes });
-
-    const map = await this.#browser.pageMap();
-    const context = pageMapContext(map);
-    const lines = [
-      failed
-        ? `[BROWSER] Step failed: ${failed.step}\nReason: ${failed.error || failed.reason || 'no element matched'}`
-        : // Deliberately not "succeeded": the engine reports that it resolved a
-          // target and acted on it, which is not the same as the page having
-          // done what was wanted. Told the stronger thing, a model stops
-          // checking and repeats itself.
-          `[BROWSER] All ${outcomes.length} step(s) resolved and were acted on. That does NOT prove the page did ` +
-          'what you intended — check CURRENT PAGE below before saying it worked.',
-    ];
-    if (context) {
-      lines.push(
-        '',
-        'What is on the page now — use these exact labels if you act again:',
-        context,
-      );
-    }
-    lines.push('', 'Tell the user what happened in one or two sentences. Emit another action only if the goal is not met yet.');
-    return { feedback: lines.join('\n') };
-  }
-
   /**
-   * A lookup runs in its own headless browser, not the user's visible one.
+   * Ask the user to approve something, and wait.
    *
-   * The point of this action is that it does not disturb what the user is
-   * looking at, so it cannot share their tab.
+   * Resolvable from two directions — the user answering, or Stop resolving it
+   * out from under them — so the resolution is announced either way. Without
+   * that the renderer would be left holding a dead dialog whose buttons do
+   * nothing.
    */
-  async #doWebLookup(query) {
-    this.#status('Looking up…');
-    const url = `https://duckduckgo.com/?q=${encodeURIComponent(query)}`;
-    try {
-      await this.#lookupBrowser.runSteps(`NAVIGATE to ${url}\nWAIT 2`, { signal: this.#abort?.signal });
-      const text = (await this.#lookupBrowser.readText('body', 4000)) ?? '';
-      const trimmed = text.replace(/\n{3,}/g, '\n\n').trim().slice(0, 4000);
-      this.#say('action:result', {
-        type: 'web_lookup',
-        ok: Boolean(trimmed),
-        summary: `${query} — ${trimmed.length} chars`,
-      });
-      if (!trimmed) return { feedback: `[LOOKUP] "${query}" returned nothing readable. Say so; do not invent an answer.` };
-      return {
-        feedback: `[LOOKUP] Search results for "${query}":\n${trimmed}\n\nAnswer the user's question from this in one or two sentences. If the answer is not here, say so.`,
-      };
-    } catch (err) {
-      this.#say('action:result', { type: 'web_lookup', ok: false, summary: err.message });
-      return { feedback: `[LOOKUP FAILED] ${err.message}. Tell the user you could not check.` };
-    } finally {
-      // A lookup is a one-shot: hold the headless Chrome open and it costs a
-      // few hundred megabytes until the app quits, for nothing. Reopening on
-      // the next lookup is a second or two.
-      await this.#lookupBrowser.close().catch(() => {});
-    }
-  }
-
-  async #doReadFile(path) {
-    this.#status('Reading…');
-    const result = await readForModel(path);
-    this.#say('action:result', {
-      type: 'read_file',
-      ok: result.ok,
-      summary: result.ok ? `${result.path} (${result.size} bytes)` : `${path}: ${result.reason}`,
-    });
-    if (!result.ok) return { feedback: `[READ FAILED] ${path}: ${result.reason}` };
-    return {
-      feedback: `[FILE] ${result.path}\n\n${result.content}\n\n[END FILE] Answer the user's question about this file concisely.`,
-    };
-  }
-
-  /** Shell runs only after the user clicks approve in the renderer. */
-  async #doShell(command) {
+  async #confirm({ kind = 'shell', command = '' } = {}) {
     const id = randomUUID();
     this.#status('Waiting for approval…');
-    this.#say('shell:request', { id, command });
+    this.#say('shell:request', { id, kind, command });
 
-    const approved = await new Promise((resolve) => {
-      this.#pendingShell.set(id, resolve);
-      this.#abort?.signal.addEventListener('abort', () => resolve(false), { once: true });
-    });
-    this.#pendingShell.delete(id);
-
-    // The dialog can be answered by the user OR resolved out from under them by
-    // Stop. Announcing the resolution means the renderer dismisses it either
-    // way, instead of leaving a dead dialog whose buttons do nothing.
-    this.#say('shell:resolved', { id, approved });
-
-    if (!approved) {
-      this.#say('action:result', { type: 'system_shell', ok: false, summary: 'declined' });
-      return { feedback: `[SHELL DECLINED] The user did not approve \`${command}\`. Do not retry it.` };
+    // Stop may have been pressed before the handler reached here. The abort
+    // event only fires once, so a listener added now would never resolve and
+    // the turn would hang with a live dialog and no way out.
+    if (this.#abort?.signal.aborted) {
+      this.#pendingApprovals.delete(id);
+      this.#say('shell:resolved', { id, approved: false });
+      return false;
     }
 
-    this.#status('Running…');
-    const output = await new Promise((resolve) => {
-      exec(command, { timeout: SHELL_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
-        resolve({ ok: !err, text: `${stdout ?? ''}${stderr ?? ''}`.trim() || (err ? err.message : '(no output)') });
-      });
+    const approved = await new Promise((resolve) => {
+      this.#pendingApprovals.set(id, resolve);
+      this.#abort?.signal.addEventListener('abort', () => resolve(false), { once: true });
     });
-
-    this.#say('action:result', { type: 'system_shell', ok: output.ok, summary: output.text.slice(0, 200) });
-    return {
-      feedback: `[SHELL] \`${command}\` ${output.ok ? 'succeeded' : 'failed'}:\n${output.text.slice(0, 4000)}\n\nSummarise this for the user in one or two sentences.`,
-    };
+    this.#pendingApprovals.delete(id);
+    this.#say('shell:resolved', { id, approved });
+    return approved;
   }
 
   /** Called from IPC when the user answers the approval dialog. */
   answerShell(id, approved) {
-    const resolve = this.#pendingShell.get(id);
+    const resolve = this.#pendingApprovals.get(id);
     if (!resolve) return false;
     resolve(Boolean(approved));
     return true;
@@ -583,14 +513,14 @@ export class Agent extends EventEmitter {
    * The summary replaces the messages it covers, so the prefix stays roughly
    * constant however long the conversation runs.
    */
-  async #maybeCompact(chatId, { force = false, pageContext = '' } = {}) {
+  async #maybeCompact(chatId, { force = false, context = '' } = {}) {
     const chat = chats.read(chatId);
     if (!chat) return false;
 
-    // The page context counts. It is part of every prompt and, on a busy site,
-    // it is the largest part — estimating without it is what let a browsing
-    // turn sail past the threshold without ever triggering.
-    const messages = this.#buildMessages(chat, pageContext);
+    // The plugin context counts. It is part of every prompt and, on a busy
+    // site, the page map is the largest part of it — estimating without it is
+    // what let a browsing turn sail past the threshold without ever triggering.
+    const messages = this.#buildMessages(chat, context);
     const usage = this.#contextUsage(messages);
     if (!force && !shouldCompact(usage, chat.messages.length)) return false;
     if (chat.messages.length <= KEEP_MESSAGES + 1) return false;

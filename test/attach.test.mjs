@@ -198,15 +198,46 @@ test('a bad path rejects with something worth showing the user', async () => {
   assert.equal(pending.size, 0);
 });
 
-test('taking the attachments renders them once and empties the list', async () => {
+test('an attachment goes into a conversation once, and stays attached', async () => {
+  // Both halves of the rule, which sound contradictory and are not. The folder
+  // is not sent twice — that would put the same thing in the prompt on every
+  // turn, outside compaction. But it is not thrown away either: a chip that
+  // vanished the moment a question was asked read as the app having discarded
+  // it, and the user re-attached the same folder to ask a second question.
   const root = makeProject();
   const pending = new Attachments();
   await pending.add(root);
 
-  const text = pending.take(100_000);
+  const text = pending.take('chat-1', 100_000);
   assert.match(text, /\[ATTACHED FOLDER\]/);
-  assert.equal(pending.size, 0, 'a second turn must not resend the same folder');
-  assert.equal(pending.take(100_000), '', 'and there is nothing left to send');
+  assert.equal(pending.take('chat-1', 100_000), '', 'a second turn must not resend the same folder');
+  assert.equal(pending.size, 1, 'and it must still be attached');
+});
+
+test('a conversation that has not seen an attachment still gets it', async () => {
+  // What is remembered is not "used up" but "this chat has it" — which is why
+  // a folder attached once and asked about in two conversations reaches both.
+  const root = makeProject();
+  const pending = new Attachments();
+  await pending.add(root);
+
+  assert.match(pending.take('chat-1', 100_000), /\[ATTACHED FOLDER\]/);
+  assert.match(pending.take('chat-2', 100_000), /\[ATTACHED FOLDER\]/, 'a second chat has never seen it');
+  assert.equal(pending.take('chat-2', 100_000), '', 'but only once there, too');
+});
+
+test('the chips say which conversations already hold each attachment', async () => {
+  const root = makeProject();
+  const pending = new Attachments();
+  await pending.add(root);
+
+  assert.deepEqual(pending.list()[0].includedIn, [], 'nothing has been sent yet');
+  pending.take('chat-1', 100_000);
+  assert.deepEqual(pending.list()[0].includedIn, ['chat-1']);
+  // Detaching forgets where it had been: the id is not reused, and a record
+  // keyed by it would outlive everything that could read it.
+  pending.remove(pending.list()[0].id);
+  assert.equal(pending.size, 0);
 });
 
 test('the budget is shared out, not spent by whichever folder went first', async () => {
@@ -215,7 +246,7 @@ test('the budget is shared out, not spent by whichever folder went first', async
   await pending.add(root);
   await pending.add(join(root, 'src', 'main.mjs'));
 
-  const text = pending.take(100_000);
+  const text = pending.take('chat-1', 100_000);
   assert.match(text, /\[ATTACHED FOLDER\]/);
   assert.match(text, /\[ATTACHED FILE\]/, 'the second attachment must still be in there');
 });

@@ -67,6 +67,40 @@ contextBridge.exposeInMainWorld('wasteland', {
     close: () => call('browser:close'),
   },
 
+  plugins: {
+    list: () => call('plugins:list'),
+    setEnabled: (id, enabled) => call('plugins:setEnabled', id, enabled),
+    setSetting: (id, key, value) => call('plugins:setSetting', id, key, value),
+    pickFolder: (id, key) => call('plugins:pickFolder', id, key),
+    choose: (type, choiceId) => call('plugins:choose', type, choiceId),
+    themes: () => call('plugins:themes'),
+    locales: () => call('plugins:locales'),
+    available: () => call('plugins:available'),
+    install: (entry) => call('plugins:install', entry),
+    /** Opens a file dialog in the main process; the renderer names no paths. */
+    installFile: () => call('plugins:installFile'),
+    uninstall: (id) => call('plugins:uninstall', id),
+    registries: () => call('plugins:registries'),
+    addRegistry: (url) => call('plugins:addRegistry', url),
+    removeRegistry: (url) => call('plugins:removeRegistry', url),
+  },
+
+  mic: {
+    status: () => call('mic:status'),
+    listening: (on) => call('mic:listening', on),
+    /** A 16 kHz mono WAV, in; the words, out. Nothing is kept on either side. */
+    transcribe: (bytes) => call('mic:transcribe', bytes),
+    failed: (message) => call('mic:failed', message),
+  },
+
+  audio: {
+    status: () => call('audio:status'),
+    command: (name) => call('audio:command', name),
+    volume: (value) => call('audio:volume', value),
+    ended: () => call('audio:ended'),
+    failed: (message) => call('audio:failed', message),
+  },
+
   updates: {
     status: () => call('update:status'),
     check: () => call('update:check'),

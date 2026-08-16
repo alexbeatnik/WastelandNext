@@ -23,8 +23,8 @@ Type a request. The model answers, or emits a fenced action block and the app ca
 The browser is always one the app launches itself; there is no attach-to-your-own-Chrome mode, so a failure can never
 look like the app meddling with tabs you were using.
 
-Each capability has its own toggle in the left panel. A disabled capability is left out of the system prompt entirely
-rather than described and then refused, so the model does not reach for tools it cannot have.
+**Every one of those is a plugin**, switched on and off in the PLUGINS section of the left panel — and more can be
+installed. See [Plugins](#plugins) below.
 
 After a browser batch the page is scanned and its real labels are fed back, so the next step targets text that is
 actually on screen instead of a guess. A title that is not on screen yet takes two turns by design: search on the
@@ -58,13 +58,94 @@ model shown the tree can ask for a file by name. File bodies fill whatever budge
 then shallow before deep and small before large — and whatever did not fit is named as not having fitted, so the model
 can tell "there is no more" from "there is more I have not seen".
 
-Attachments go into the transcript **once**, as a message ahead of the words they came with, and are drawn folded there
-— a dropped project is thousands of lines, and a transcript with the reply somewhere underneath is unusable. One click
-opens it, because what was sent to the model is what you should be able to check.
+An attachment goes into the transcript **once per conversation**, as a message ahead of the words it came with, and is
+drawn folded there — a dropped project is thousands of lines, and a transcript with the reply somewhere underneath is
+unusable. One click opens it, because what was sent to the model is what you should be able to check.
+
+**It stays attached until you detach it.** The chip does not disappear when you send: it changes from `+` to `✓`,
+meaning this conversation now holds it. Asking a second question about the same project costs nothing, because the
+model can already see it — re-sending it every turn would put the same folder in the prompt five times over, outside
+the compaction that is the only thing able to shrink it later. Start a new conversation with the chip still there and
+it goes into that one too, which is what makes "here is my project" worth saying once.
 
 Unlike `read_file`, an attachment is not confined to your home directory: a model naming a path is a request to be
 vetted, but you picking one through a dialog have already decided, and a checkout on another drive is ordinary. The
 credential directories — `.ssh`, `.aws`, `.gnupg` and friends — are refused either way.
+
+## Plugins
+
+Everything the model may *do* is a plugin. The four capabilities above ship with the app and cannot be removed, only
+switched off; **GET PLUGINS** lists what the [registry](https://github.com/alexbeatnik/wasteland-plugins) offers — with
+icons, descriptions, and an UPDATE button when a newer version is published — and installs into the data directory on a
+click.
+
+A plugin contributes its action handlers **and** the slice of the system prompt that documents them, in one act. That
+is the point of the indirection: a switched-off capability is absent from the prompt rather than described and then
+refused, so the model never reaches for a tool it cannot have, and the two halves cannot drift apart. What a plugin may
+reach for — the browser, the headless lookup browser, audio output — is declared in its manifest and handed over by
+name, so the plugin list is a true account of what is running rather than a summary somebody wrote.
+
+**Two kinds, and only one of them is code.** A theme pack is a manifest and some CSS, read by the app's own protocol
+handler; there is nothing to run, so there is nothing to consent to. Anything with an entry point runs in the main
+process with everything Node can reach, and the app will not import a line of it until you press **ALLOW AND RUN** on
+its row. Installing is not switching on — a directory that appeared in `plugins/` is not an instruction.
+
+**Themes** are chosen in INTERFACE. A theme redefines the variables on `:root` and nothing else; it arrives over the
+`wasteland-plugin://` scheme, because `style-src 'self'` on a `file://` page rejects both an inline `<style>` built
+from IPC text and a stylesheet in another directory. Scripts stay `'self'` alone — no plugin runs code in the chat
+window, which is why one that wants to play audio asks the app for the `audio` service instead of shipping a player.
+
+**Audio** is the smallest part of a music player that cannot be a plugin: an `<audio>` element, the transport bar under
+the transcript, and a scheme that serves one file with Range support so seeking works. It has no queue, no shuffle and
+no idea what "next" means — a plugin registers a transport and answers that, so two plugins can drive the same bar and
+one that plays a single notification sound does not inherit a next button it cannot honour.
+
+**An action can ask rather than guess.** A handler that returns `choices` has them drawn as buttons under its result,
+and pressing one calls back into the plugin. It is what stops a model picking blindly between five near-identical
+files, and what stops the alternative — asking someone to retype a file name.
+
+**A plugin can listen.** The `mic` service is the mirror of `audio`: the app owns the microphone button beside Send,
+the recording and the encoding to 16 kHz mono, because `getUserMedia` only exists in the window and no plugin runs code
+there — and a plugin owns turning the sound into words. The button appears only once something can actually
+transcribe, dictated text lands in the composer rather than being sent, and the recording is deleted the moment it has
+been read, whether or not the engine worked. The [voice input](https://github.com/alexbeatnik/wasteland-plugins)
+plugin runs whisper.cpp locally: pick small, medium or large, it is downloaded once, and no audio leaves the machine.
+
+**A plugin can say something without being asked.** Everything else in the transcript is an answer to something you
+typed; a reminder coming due is not. The `notify` service puts a card in the transcript *and* raises an operating
+system notification, because neither is enough alone — the first is invisible to somebody in another window, the second
+is gone the moment it is dismissed. Notices raised before the window was listening are kept and shown on the way in,
+which is how a reminder that came due while the app was closed still reaches you.
+
+**A plugin keeps its own state.** Settings are the questions its manifest asked you and each one is a control on its
+row; a list of reminders is neither of those, so a plugin also gets one JSON document of its own under `plugin-state/`,
+which the app never reads the inside of. It is written whole and renamed into place, because a half-written file reads
+back as empty — which would be every reminder you had set, gone, with nothing saying so.
+
+**More than one registry, and archives off your own disk.** GET PLUGINS lists the registries it asks; paste a
+repository URL — `https://github.com/owner/repo` is expanded to the index inside it — and press ADD. An index has to be
+served over https, since it is a list of URLs and checksums deciding what gets downloaded and unpacked; loopback is the
+exception, for anyone serving their own. One registry being unreachable does not empty the list, and the failure sits
+on that registry's row where removing it is the fix. Where a plugin came from travels with it to the screen, so two
+registries publishing the same id is visible rather than silent.
+
+**`[ FROM FILE… ]`** installs from a `.zip` you pick yourself — a plugin that was never published, a build handed over
+on a stick, or a machine that cannot reach a registry at all. There is no published checksum to compare against,
+because there is no index making a claim about the bytes; what is trusted is that you chose the file, the same
+distinction the app draws between a path a model names and a path a person picks. Every other check still runs: the
+archive is refused if any entry would unpack outside its own directory, the manifest has to be one this build can use,
+and the code does not run until you press ALLOW AND RUN.
+
+**Updating a plugin needs a restart to finish.** Node caches modules by URL for the life of the process, so replacing
+files does not replace what is running; the row says so, and the version shown is what is installed. An earlier attempt
+to defeat the cache by importing the entry point under a unique query made it worse — the query is not inherited by the
+plugin's own imports, so a new entry point linked against cached dependencies and failed outright.
+
+**Writing one is documented in full in [docs/PLUGIN-API.md](docs/PLUGIN-API.md)** — the manifest, every method on
+`ctx`, all five services, the rules that are not negotiable, and a checklist. It is written to be followed straight
+through by a person or by an agent. The
+[registry repository](https://github.com/alexbeatnik/wasteland-plugins) holds the published plugins and how to publish
+one.
 
 ## Requirements
 
@@ -119,8 +200,8 @@ Stages manul-browser, then runs electron-builder. Two artifacts land in `dist/`:
 
 | File | What it is |
 |---|---|
-| `WastelandNext-0.1.0-portable.exe` | ~75 MB, single self-contained file, runs with no install |
-| `WastelandNext-0.1.0-setup.exe` | ~76 MB installer, per-user, installation directory selectable |
+| `WastelandNext-<version>-portable.exe` | ~75 MB, single self-contained file, runs with no install |
+| `WastelandNext-<version>-setup.exe` | ~76 MB installer, per-user, installation directory selectable |
 
 `dist/win-unpacked/` holds the same app as a plain directory, which is the quickest thing to debug against.
 
@@ -312,39 +393,56 @@ src/
 │   │   └── placement.mjs   where a model would run, before it is loaded
 │   ├── browser/
 │   │   └── manul-browser.mjs  the manul-browser bridge
+│   ├── plugins/
+│   │   ├── host.mjs        the registry: discovery, activation, contributions
+│   │   ├── manifest.mjs    validating what a plugin claims about itself
+│   │   ├── registry.mjs    the published index: fetch, verify, install, remove
+│   │   └── protocol.mjs    serving a plugin's files and one audio file
+│   ├── audio.mjs           audio output, driven by whichever plugin wants it
 │   └── agent/
 │       ├── agent.mjs       the turn pipeline, compaction, window budgeting
 │       ├── attach.mjs      files and folders the user put in front of the model
 │       ├── actions.mjs     reading actions out of a reply
 │       ├── batch-guard.mjs refusing a browser batch identical to one already run
-│       ├── prompts.mjs     the system prompt, assembled per capability
+│       ├── prompts.mjs     assembling the system prompt from plugin fragments
 │       └── readfile.mjs    the read-only file path
+├── plugins/                the plugins that ship with the app
+│   ├── index.mjs           the static list of built-ins
+│   ├── browser-control.mjs browser_steps · browser_close
+│   ├── web-lookup.mjs      web_lookup, in its own headless browser
+│   ├── read-file.mjs       read_file
+│   └── system-shell.mjs    system_shell, behind the approval dialog
 ├── preload/preload.cjs     the renderer's whole view of main
 ├── renderer/               index.html · styles.css · app.js
 └── shared/
     ├── render.mjs          text shaping both processes need
     ├── markdown.mjs        markdown → data the renderer builds nodes from
+    ├── media.mjs           MIME types, Range parsing, clock formatting
+    ├── schemes.mjs         how a wasteland-plugin:// or wasteland-media:// URL is spelled
     └── engine.mjs          finding the manul-browser checkout
 ```
 
 ## Testing
 
 ```bash
-npm test       # 288 unit tests, no Electron, no network
+npm test       # 437 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
 ```
 
 `npm test` covers the pure logic: action extraction and its JSON repair, `<think>` splitting and stripping, markdown
 parsing, chat storage and id validation, path vetting, HuggingFace URL rewriting and quantisation choice, prompt
-assembly, GGUF header parsing and the context/GPU arithmetic, the compaction threshold and the window backstop, folder
+assembly, plugin manifest validation and host activation, registry entries and version comparison, Range parsing and
+custom-scheme URLs, GGUF header parsing and the context/GPU arithmetic, the compaction threshold and the window backstop, folder
 collection and its budget, download speed and resume, crash-log summarising, checkout resolution, and where a
 *packaged* app looks for the engine.
 
-`npm run smoke` boots the real window offscreen — 83 checks — and covers what unit tests cannot: a renderer that throws
+`npm run smoke` boots the real window offscreen — 134 checks — and covers what unit tests cannot: a renderer that throws
 on boot, a preload that failed to expose its bridge, an IPC channel renamed on one side only, a layout that breaks at
 one screen shape, or a control that stops resetting what it should. It clicks NEW CHAT, presses Enter, attaches a
-folder and detaches one of two, deletes a conversation from the picker without opening it, opens the About box and
-checks every link in it would leave the window, resizes through seven screen shapes, and checks that a reply containing
+folder and detaches one of two, switches a plugin off and checks the main process agrees, allows a plugin that brings
+code and watches it start, installs a theme and asserts the window actually repaints, plays a real audio file through
+the media scheme, presses one of the options an action offered and checks the plugin answered, deletes a conversation
+from the picker without opening it, opens the About box and checks every link in it would leave the window, resizes through seven screen shapes, and checks that a reply containing
 `<img onerror=…>` is drawn as text rather than run.
 
 Where a fix is for something a user reported, the test reproduces *their* case rather than a tidy abstraction of it:

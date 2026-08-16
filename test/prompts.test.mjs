@@ -1,65 +1,68 @@
 /**
- * The prompt must not describe a tool the dispatcher will refuse: a model told
- * about a capability reaches for it, and the refusal reads to the user as a bug.
+ * How the system prompt is assembled.
+ *
+ * What each capability *says* moved out with the plugin that provides it, and
+ * is asserted in `plugins.test.mjs` — through the host, against the real
+ * built-ins, which is the only place the pairing of "documented" and
+ * "dispatchable" can actually be checked. What is left here is the assembly
+ * itself: the invariant that a capability nobody contributed is absent rather
+ * than forbidden, because a model told about a tool it may not use reaches for
+ * it anyway and the refusal reads to the user as a bug.
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildSystemPrompt, pageMapContext } from '../src/main/agent/prompts.mjs';
+import { buildSystemPrompt } from '../src/main/agent/prompts.mjs';
 
-test('a disabled capability is absent, not forbidden', () => {
-  const prompt = buildSystemPrompt({ capabilities: { browser: true } });
-  assert.match(prompt, /browser_steps/);
+test('a contributed fragment is in the prompt, and nothing else is', () => {
+  const prompt = buildSystemPrompt({ fragments: ['TOOL — {"type":"do_thing"}'] });
+  assert.match(prompt, /do_thing/);
   assert.doesNotMatch(prompt, /system_shell/);
   assert.doesNotMatch(prompt, /read_file/);
-  assert.doesNotMatch(prompt, /web_lookup/);
 });
 
-test('every capability on documents every action type', () => {
-  const prompt = buildSystemPrompt({
-    capabilities: { browser: true, webLookup: true, readFile: true, shell: true },
-  });
-  for (const type of ['browser_steps', 'browser_close', 'web_lookup', 'read_file', 'system_shell']) {
-    assert.match(prompt, new RegExp(type), `${type} should be documented`);
-  }
+test('fragments appear in the order they were given', () => {
+  const prompt = buildSystemPrompt({ fragments: ['FIRST THING', 'SECOND THING'] });
+  assert.ok(prompt.indexOf('FIRST THING') < prompt.indexOf('SECOND THING'));
 });
 
-test('with no capabilities the model is told it has none', () => {
-  const prompt = buildSystemPrompt({ capabilities: {} });
+test('the action protocol is present only when something can act', () => {
+  assert.match(buildSystemPrompt({ fragments: ['ANYTHING'] }), /```action/);
+  const bare = buildSystemPrompt({ fragments: [] });
+  assert.match(bare, /no tools enabled/);
+  assert.doesNotMatch(bare, /```action/);
+});
+
+test('an empty fragment does not conjure the protocol out of nothing', () => {
+  // A plugin that registers an action but no prompt text still leaves the model
+  // with nothing to write, and an ACTIONS heading with no actions under it is
+  // an invitation to invent one.
+  const prompt = buildSystemPrompt({ fragments: ['', '   '] });
   assert.match(prompt, /no tools enabled/);
-  assert.doesNotMatch(prompt, /```action/);
 });
 
 test('the user prompt is appended last so it wins', () => {
-  const prompt = buildSystemPrompt({ capabilities: {}, userPrompt: 'Always answer in Ukrainian.' });
+  const prompt = buildSystemPrompt({ fragments: [], userPrompt: 'Always answer in Ukrainian.' });
   assert.ok(prompt.trimEnd().endsWith('Always answer in Ukrainian.'));
 });
 
 test('an empty user prompt adds no empty section', () => {
-  assert.doesNotMatch(buildSystemPrompt({ capabilities: {}, userPrompt: '   ' }), /ADDITIONAL INSTRUCTIONS/);
+  assert.doesNotMatch(buildSystemPrompt({ fragments: [], userPrompt: '   ' }), /ADDITIONAL INSTRUCTIONS/);
 });
 
-test('page context is included when there is a page', () => {
-  const prompt = buildSystemPrompt({ capabilities: { browser: true }, pageContext: "URL: https://a.test\nMain: 'Sign in'" });
+test('turn context is included, heading and all', () => {
+  // The heading travels with the text rather than being added here: a second
+  // plugin contributing context would otherwise have its lines filed under the
+  // first one's heading.
+  const prompt = buildSystemPrompt({
+    fragments: ['ANYTHING'],
+    context: "CURRENT PAGE\nURL: https://a.test\nMain: 'Sign in'",
+  });
   assert.match(prompt, /CURRENT PAGE/);
   assert.match(prompt, /Sign in/);
 });
 
-test('pageMapContext flattens a map into quoted labels', () => {
-  const context = pageMapContext({
-    url: 'https://a.test',
-    groups: [
-      { name: 'Main', elements: [{ label: 'Sign in' }, { label: 'Register' }], truncated: 0 },
-      { name: 'Nav', elements: [{ label: 'Home' }], truncated: 3 },
-    ],
-  });
-  assert.match(context, /URL: https:\/\/a\.test/);
-  assert.match(context, /Main: 'Sign in', 'Register'/);
-  assert.match(context, /Nav: 'Home' \(\+3 more\)/);
-});
-
-test('pageMapContext is empty when there is nothing to describe', () => {
-  assert.equal(pageMapContext(null), '');
-  assert.equal(pageMapContext({ url: 'https://a.test', groups: [] }), '');
+test('empty context adds nothing', () => {
+  assert.doesNotMatch(buildSystemPrompt({ fragments: [], context: '  \n ' }), /CURRENT PAGE/);
 });
 
 test('markdown is permitted, and formatting is not up for debate', () => {
@@ -68,68 +71,14 @@ test('markdown is permitted, and formatting is not up for debate', () => {
   // action block. A model spent an entire budget deliberating over that
   // contradiction instead of answering. The view renders markdown now, so the
   // rule allows it and says explicitly not to agonise.
-  const prompt = buildSystemPrompt({ capabilities: { browser: true } });
+  const prompt = buildSystemPrompt({ fragments: ['ANYTHING'] });
   assert.match(prompt, /Markdown is rendered/i);
   assert.match(prompt, /Never deliberate about formatting/i);
   assert.doesNotMatch(prompt, /no markdown headings/i);
 });
 
-test('the browser section shows the two-turn search flow', () => {
-  // "Never use positional targets" with no recipe for an unknown title left the
-  // model stuck between guessing and refusing.
-  const prompt = buildSystemPrompt({ capabilities: { browser: true } });
-  assert.match(prompt, /TWO turns/);
-  assert.match(prompt, /search_query=/);
-  assert.match(prompt, /CLICK the 'Exact Title As Listed'/);
-});
-
-test('the action fence is shown, and nothing forbids it', () => {
-  const prompt = buildSystemPrompt({
-    capabilities: { browser: true, webLookup: true, readFile: true, shell: true },
-  });
+test('nothing in the base rules forbids what the protocol demands', () => {
+  const prompt = buildSystemPrompt({ fragments: ['ANYTHING'] });
   assert.ok((prompt.match(/```action/g) ?? []).length >= 1, 'expected the protocol to show a fence');
-  // No rule anywhere may tell the model not to produce the thing the protocol
-  // requires of it.
   assert.doesNotMatch(prompt, /no (markdown|code fences|fenced)/i);
-});
-
-test('lookup is reached for before a refusal, not after one', () => {
-  // The reported session: "what is today's date" answered with "I have no
-  // access to real-time information", and then, when pushed, a negotiation
-  // about which site to open — with the lookup action sitting right there and
-  // the same model having used it for the weather two messages earlier.
-  const prompt = buildSystemPrompt({ capabilities: { webLookup: true } });
-  assert.match(prompt, /BEFORE saying you do not know/i);
-  assert.match(prompt, /today's date/i);
-  assert.match(prompt, /no access to real-time information/i);
-  assert.match(prompt, /search first/i);
-});
-
-test('the answer must come from the result, not from memory dressed as one', () => {
-  const prompt = buildSystemPrompt({ capabilities: { webLookup: true } });
-  assert.match(prompt, /do not fill the gap from\s+memory/i);
-});
-
-test('none of that survives with lookup switched off', () => {
-  // The whole point of assembling the prompt from parts: told to look things up
-  // with no lookup to hand, the model reaches for it and the refusal reads as a
-  // bug — which is the same failure this section was written to end.
-  const prompt = buildSystemPrompt({ capabilities: { browser: true, readFile: true, shell: true } });
-  assert.doesNotMatch(prompt, /BEFORE saying you do not know/i);
-  assert.doesNotMatch(prompt, /no access to real-time information/i);
-});
-
-test('the browser section says a resolved step is not a reached goal', () => {
-  // A model told "all steps succeeded" stops checking and repeats itself; this
-  // is what let one loop five times on a sort that never applied.
-  const prompt = buildSystemPrompt({ capabilities: { browser: true } });
-  assert.match(prompt, /does NOT mean the page did what you wanted/i);
-  assert.match(prompt, /check CURRENT PAGE/i);
-});
-
-test('the browser section offers a route out of a stuck interaction', () => {
-  const prompt = buildSystemPrompt({ capabilities: { browser: true } });
-  assert.match(prompt, /do not send the same steps again/i);
-  assert.match(prompt, /query parameters/i);
-  assert.match(prompt, /will be refused/i);
 });

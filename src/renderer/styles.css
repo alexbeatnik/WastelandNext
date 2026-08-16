@@ -20,6 +20,14 @@
   --ok: #66cc66;
   --add: #aacc00;
 
+  /* Surfaces a theme has to be able to move. They were literals until themes
+     existed, and a theme that has to fight `button { background: #333 }` with
+     its own selector is one that breaks the next time a rule is added. */
+  --btn-bg: #333;
+  --btn-bg-hover: #444;
+  --btn-bg-active: #000;
+  --summary-bg: #111;
+
   --left-w: 21rem;
   --gap: 0.7rem;
   --radius: 0;
@@ -254,7 +262,7 @@ body.no-crt .crt {
   font-size: 0.88em;
   list-style: none;
   user-select: none;
-  background: #111;
+  background: var(--summary-bg);
   border-bottom: 1px solid transparent;
 }
 
@@ -301,7 +309,7 @@ a:hover {
 button {
   font: inherit;
   color: var(--amber);
-  background: #333;
+  background: var(--btn-bg);
   border: 1px solid var(--amber-dim);
   padding: 0.22rem 0.5rem;
   cursor: pointer;
@@ -310,12 +318,12 @@ button {
 }
 
 button:hover:not(:disabled) {
-  background: #444;
+  background: var(--btn-bg-hover);
   border-color: var(--amber);
 }
 
 button:active:not(:disabled) {
-  background: #000;
+  background: var(--btn-bg-active);
 }
 
 button:disabled {
@@ -554,6 +562,359 @@ input[type='checkbox']:checked {
   display: block;
   color: var(--amber-dim);
   font-size: 0.78em;
+}
+
+/* The model picker shares the conversation picker's shape, and gives way first
+   when the bar runs out of room: which chat is open matters more than which
+   model answers, and the topbar says the model too. */
+.model-picker {
+  margin-left: auto;
+  min-width: 0;
+  flex: 0 1 12rem;
+}
+
+.model-picker .chat-current.loaded {
+  border-color: var(--amber);
+}
+
+@media (max-width: 900px) {
+  .model-picker {
+    flex-basis: 7rem;
+  }
+}
+
+/* ============================ Choices in the transcript ============================ */
+
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.35rem;
+}
+
+/* A row, not a chip: a track title needs the width, and a column of full-width
+   rows is a list you read down rather than a wrapped bag of buttons. */
+button.choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.05rem;
+  width: 100%;
+  text-align: left;
+  white-space: normal;
+  padding: 0.25rem 0.4rem;
+}
+
+.choice-label {
+  overflow-wrap: anywhere;
+}
+
+.choice-note {
+  color: var(--amber-dim);
+  font-size: 0.78em;
+}
+
+/* What was taken, kept visible: the list stays as a record of the offer. */
+button.choice.chosen {
+  border-color: var(--amber);
+  background: var(--btn-bg-hover);
+}
+
+button.choice.chosen .choice-label::before {
+  content: '▶ ';
+  color: var(--amber-bright);
+}
+
+/* ============================ Player ============================ */
+
+.player {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.5rem;
+  border-top: 1px dashed var(--amber-faint);
+  font-size: 0.82em;
+}
+
+/* `hidden` is only the UA rule `[hidden] { display: none }`, and the weakest
+   author declaration outranks the whole UA sheet — so the flex above would
+   leave this bar on screen with the attribute faithfully set. Every element
+   with an author `display` that is toggled by `hidden` needs this line. */
+.player[hidden] {
+  display: none;
+}
+
+.player-transport {
+  display: flex;
+  gap: 0.1rem;
+  flex: none;
+}
+
+.player-transport button {
+  padding: 0.05rem 0.3rem;
+  font-size: 1em;
+  line-height: 1.1;
+}
+
+.player-labels {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /* The label is the part that gives way: the transport and the clock have
+     fixed widths and a long track title must not push them off the row. */
+  flex: 1 1 6rem;
+}
+
+.player-title,
+.player-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-sub {
+  color: var(--amber-dim);
+  font-size: 0.85em;
+}
+
+.player-sub.bad {
+  color: var(--warn);
+}
+
+.player-time {
+  color: var(--amber-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: none;
+}
+
+.player-seek {
+  flex: 2 1 6rem;
+  min-width: 4rem;
+}
+
+.player-vol-icon {
+  color: var(--amber-dim);
+  flex: none;
+}
+
+.player-volume {
+  flex: 0 1 4.5rem;
+  min-width: 3rem;
+}
+
+/* Tight windows: the seek bar keeps the row, the volume gives up its place. */
+@media (max-aspect-ratio: 4 / 3) {
+  .player-volume,
+  .player-vol-icon {
+    display: none;
+  }
+}
+
+/* ============================ Plugins ============================ */
+
+.plugin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+
+/* Two columns: the toggle and its name take the width, the version and origin
+   sit at the right; everything else spans both. */
+.plugin-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.1rem 0.4rem;
+  align-items: baseline;
+  border: 1px solid var(--amber-faint);
+  padding: 0.25rem 0.35rem;
+}
+
+.plugin-item .plugin-name {
+  letter-spacing: 0.04em;
+}
+
+/* The registry rows have no checkbox, so the icon and name need their own row. */
+.plugin-head {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.plugin-icon {
+  width: 1.1rem;
+  height: 1.1rem;
+  flex: none;
+  object-fit: contain;
+  /* Icons arrive from a plugin author and will not all be amber. Rendering them
+     through the palette costs the artwork nothing and keeps one screen. */
+  filter: sepia(1) saturate(3) hue-rotate(-15deg);
+}
+
+.plugin-icon.glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--amber-dim);
+  filter: none;
+}
+
+.plugin-buttons {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 0.3rem;
+  margin-top: 0.15rem;
+}
+
+.plugin-buttons button {
+  font-size: 0.78em;
+  padding: 0.1rem 0.35rem;
+}
+
+/* A long job under the row that started it — a model being downloaded, most
+   likely. Full width, because the label is a filename and a percentage. */
+.plugin-progress {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-top: 0.2rem;
+}
+
+.plugin-settings {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.2rem;
+  padding-left: 0.2rem;
+  border-left: 1px dashed var(--amber-faint);
+}
+
+.plugin-setting {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78em;
+}
+
+.plugin-setting-label {
+  color: var(--amber-dim);
+  white-space: nowrap;
+}
+
+.plugin-setting-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.plugin-setting input[type='text'] {
+  flex: 1;
+  min-width: 0;
+}
+
+.plugin-setting button {
+  font-size: 0.92em;
+  padding: 0.05rem 0.3rem;
+}
+
+.plugin-meta {
+  color: var(--amber-dim);
+  font-size: 0.72em;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.plugin-desc,
+.plugin-adds,
+.plugin-note {
+  grid-column: 1 / -1;
+  font-size: 0.78em;
+}
+
+/* The action types the plugin adds to the model's vocabulary. */
+.plugin-adds {
+  font-size: 0.74em;
+  letter-spacing: 0.05em;
+  opacity: 0.75;
+}
+
+.plugin-note {
+  color: var(--amber-dim);
+}
+
+/* Switched off: still legible, plainly inert. */
+.plugin-item.off {
+  border-style: dashed;
+}
+
+.plugin-item.off .plugin-name,
+.plugin-item.off .plugin-desc,
+.plugin-item.off .plugin-adds {
+  color: var(--amber-faint);
+}
+
+/* New on disk, old in memory: not a failure, but not finished either. */
+.plugin-item.stale {
+  border-style: dashed;
+  border-color: var(--amber-dim);
+}
+
+.plugin-item.stale .plugin-note {
+  color: var(--amber-bright);
+}
+
+/* Asked for and unable to run — the one state that has to be read. */
+.plugin-item.failed {
+  border-color: var(--warn);
+}
+
+.plugin-item.failed .plugin-note {
+  color: var(--warn);
+}
+
+/* Where the plugin list is fetched from. One row per index, and the row says
+   what that index last answered — a registry that is down is the reason the
+   list is short, and that belongs beside the registry rather than on the
+   section. */
+.registry-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin: 0.2rem 0;
+}
+
+.registry-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  border: 1px solid var(--amber-faint);
+  padding: 0.1rem 0.3rem;
+  font-size: 0.85em;
+}
+
+.registry-item .registry-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.registry-item.failed {
+  border-color: var(--warn);
+}
+
+.registry-item.failed .muted {
+  color: var(--warn);
 }
 
 .vault-item,
@@ -818,6 +1179,50 @@ input[type='checkbox']:checked {
   color: var(--amber-dim);
 }
 
+/* A message with no question in front of it — a reminder coming due. Brighter
+   than an action card and marked down the left edge, because it has to be
+   findable in a transcript somebody has scrolled back into. */
+.notice {
+  border: 1px solid var(--amber-bright);
+  border-left-width: 3px;
+  padding: 0.35rem 0.5rem;
+  background: #14100a;
+}
+
+.notice-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.notice-mark {
+  color: var(--amber-bright);
+}
+
+.notice-title {
+  color: var(--amber-bright);
+  letter-spacing: 0.04em;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.notice-when {
+  flex: 0 0 auto;
+  font-size: 0.85em;
+}
+
+.notice-body {
+  margin-top: 0.2rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.notice-from {
+  margin-top: 0.2rem;
+  font-size: 0.8em;
+  letter-spacing: 0.06em;
+}
+
 /* ============================ Context + composer ============================ */
 
 /* The conversation picker, above the transcript it belongs to. */
@@ -979,6 +1384,20 @@ input[type='checkbox']:checked {
   white-space: nowrap;
 }
 
+/* ✓ once this conversation holds it, + while it is still to go. The chip stays
+   either way: only the × detaches anything. */
+.chip .chip-state {
+  color: var(--amber-bright);
+}
+
+.chip.included {
+  border-color: var(--amber-dim);
+}
+
+.chip.included .chip-state {
+  color: var(--ok);
+}
+
 .chip .chip-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1062,6 +1481,36 @@ input[type='checkbox']:checked {
 button.send {
   min-width: 2.6rem;
   font-size: 1.05em;
+}
+
+/* The microphone, beside Send and only when something can transcribe. */
+button.mic {
+  display: block;
+  min-width: 2.6rem;
+  font-size: 1.05em;
+}
+
+/* Not optional. `hidden` is nothing but the UA rule `[hidden] {display:none}`,
+   and the author-level `display: block` above outranks the whole UA sheet — the
+   drop veil shipped visible for exactly this reason. */
+button.mic[hidden] {
+  display: none;
+}
+
+button.mic.listening {
+  color: var(--warn);
+  border-color: var(--warn);
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+
+button.mic.working {
+  color: var(--amber-dim);
+}
+
+@keyframes mic-pulse {
+  50% {
+    opacity: 0.45;
+  }
 }
 
 button.send.stop {

@@ -132,8 +132,14 @@ function extractors(zipPath, targetDir) {
   ];
 }
 
-/** Unpack, trying each extractor until one succeeds. */
-function extractZip(zipPath, targetDir) {
+/**
+ * Unpack, trying each extractor until one succeeds.
+ *
+ * Exported because the plugin installer needs exactly this and the list of
+ * ways to unpack a zip on three platforms is not worth having twice — the
+ * GNU-tar-on-PATH trap above is the sort of thing that gets fixed in one copy.
+ */
+export function extractZip(zipPath, targetDir) {
   const failures = [];
   for (const [command, args] of extractors(zipPath, targetDir)) {
     const result = spawnSync(command, args, { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });

@@ -10,16 +10,23 @@
 import { app, BrowserWindow } from 'electron';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { setDataRoot } from '../src/main/paths.mjs';
-import { registerIpc } from '../src/main/ipc.mjs';
+import { setDataRoot, pluginStateDir, pluginsDir } from '../src/main/paths.mjs';
+import { registerSchemes } from '../src/main/plugins/protocol.mjs';
+import { registerIpc, serveAssets } from '../src/main/ipc.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
 
 // A scratch data root, so a smoke run never touches real chats or settings.
 setDataRoot(mkdtempSync(join(tmpdir(), 'wl-smoke-')));
+
+// At module scope, exactly as in `main.mjs`: after the app is ready the scheme
+// table is fixed, and a theme served over an unregistered scheme is refused by
+// the page's CSP without ever reaching the handler.
+registerSchemes();
 
 /**
  * A GUI Electron process on Windows has no attached console, so stdout goes
@@ -378,6 +385,92 @@ async function checkAttachments(window) {
     return document.querySelectorAll('#chat-log .turn.attachment').length;
   })()`);
   check('an attachment turn has its own shape in the transcript', folded === 1);
+
+  /**
+   * Sending a message does not detach anything.
+   *
+   * The chip used to vanish the moment a question was asked, which read as the
+   * app having thrown the folder away — so the user attached it again to ask a
+   * second question about the same project. Driven through the real event
+   * channel rather than by calling a renderer function, because what is under
+   * test is exactly the handler that used to blank the row.
+   */
+  await window.webContents.executeJavaScript(`window.wasteland.attach.add([${JSON.stringify(process.cwd())}])`);
+  await new Promise((r) => setTimeout(r, 200));
+
+  const pendingMark = await window.webContents.executeJavaScript(
+    `document.querySelector('#attach-chips .chip-state')?.textContent ?? ''`,
+  );
+  check('an attachment not yet sent is marked as still to go — +', pendingMark === '+', pendingMark);
+
+  const items = await window.webContents.executeJavaScript(`window.wasteland.attach.list()`);
+  window.webContents.send('event', {
+    event: 'attach:consumed',
+    items: items.map((item) => ({ ...item, includedIn: [''] })),
+  });
+  await new Promise((r) => setTimeout(r, 200));
+
+  const afterSend = await window.webContents.executeJavaScript(`(() => ({
+    count: document.querySelectorAll('#attach-chips .chip').length,
+    mark: document.querySelector('#attach-chips .chip-state')?.textContent ?? '',
+    title: document.querySelector('#attach-chips .chip')?.title ?? '',
+  }))()`);
+  check('the chip survives the message it went with', afterSend.count === 1, JSON.stringify(afterSend));
+  check('and says the conversation now holds it — ✓', afterSend.mark === '✓', JSON.stringify(afterSend));
+  check('the tooltip says so too', afterSend.title.includes('Already in this conversation'), afterSend.title);
+
+  await window.webContents.executeJavaScript(`window.wasteland.attach.clear()`);
+}
+
+/**
+ * A message with no question in front of it.
+ *
+ * Driven over the real `event` channel, which is the only way in: a reminder
+ * coming due is a main-process timer talking to a window that never asked for
+ * anything. What is being checked is that it lands somewhere the user will see
+ * it and that it lands exactly once — the same notice arrives twice by design,
+ * through the boot snapshot and again on the stream.
+ */
+async function checkNotices(window) {
+  say('');
+  say('Notices');
+
+  await window.webContents.executeJavaScript(`document.getElementById('chat-log').replaceChildren()`);
+
+  const notice = { id: 'smoke-notice-1', title: 'Watch the series', body: 'Due at 18:45', pluginId: 'reminders', at: Date.now() };
+  window.webContents.send('event', { event: 'notice', notice });
+  await new Promise((r) => setTimeout(r, 200));
+
+  const drawn = await window.webContents.executeJavaScript(`(() => {
+    const card = document.querySelector('#chat-log .notice');
+    return {
+      count: document.querySelectorAll('#chat-log .notice').length,
+      title: card?.querySelector('.notice-title')?.textContent ?? '',
+      body: card?.querySelector('.notice-body')?.textContent ?? '',
+      display: card ? getComputedStyle(card).display : 'none',
+      logged: document.getElementById('activity-log').textContent.includes('Watch the series'),
+    };
+  })()`);
+  check('a notice reaches the transcript', drawn.count === 1, JSON.stringify(drawn));
+  check(`the notice says what it is for — ${drawn.title}`, drawn.title === 'Watch the series');
+  check('and when it was due', drawn.body.includes('18:45'), drawn.body);
+  // Asserted on the computed style rather than on the element existing: a card
+  // in the DOM that nothing draws is the failure this app has already shipped
+  // once, with the drop veil.
+  check('the notice is actually on screen', drawn.display !== 'none', drawn.display);
+  check('and it reaches the activity log', drawn.logged === true);
+
+  // The same notice arrives twice by design — once in the boot snapshot, once
+  // on the stream — and drawing a reminder twice is worse than the race that
+  // makes it arrive twice.
+  window.webContents.send('event', { event: 'notice', notice });
+  await new Promise((r) => setTimeout(r, 150));
+  const again = await window.webContents.executeJavaScript(
+    `document.querySelectorAll('#chat-log .notice').length`,
+  );
+  check('the same notice is not drawn twice', again === 1, `${again} card(s)`);
+
+  await window.webContents.executeJavaScript(`document.getElementById('chat-log').replaceChildren()`);
 }
 
 /**
@@ -428,6 +521,271 @@ async function checkContextControls(window) {
     box.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
   await new Promise((r) => setTimeout(r, 300));
+}
+
+/**
+ * The plugin list.
+ *
+ * The unit tests drive the host directly and never see the half that is only
+ * visible from here: the rows reaching the DOM, a checkbox bound to the right
+ * id, and — the one that matters — a toggle whose effect comes back from the
+ * main process rather than from the click. A row that painted itself optimistically
+ * would pass every assertion below except the last one.
+ */
+async function checkPlugins(window) {
+  say('');
+  say('Plugins');
+
+  // Read first, before anything in this run has touched the section. The
+  // registry points at a closed port, and a boot that cannot reach it must be
+  // silent: the update badges are worth a background fetch, an error about a
+  // list nobody asked to see is not. Pressing REFRESH is asking, and that
+  // failure is said out loud further down.
+  const quiet = await window.webContents.executeJavaScript(`document.getElementById('store-status').textContent`);
+  check(`an unreachable registry is quiet at boot — "${quiet}"`, quiet === '', quiet);
+
+  const read = () =>
+    window.webContents.executeJavaScript(`(() => ({
+      rows: [...document.querySelectorAll('#plugin-list .plugin-item')].map((row) => ({
+        name: row.querySelector('.plugin-name').textContent,
+        checked: row.querySelector('input[type=checkbox]').checked,
+        off: row.classList.contains('off'),
+        adds: row.querySelector('.plugin-adds')?.textContent ?? '',
+        note: row.querySelector('.plugin-note')?.textContent ?? '',
+      })),
+      status: document.getElementById('plugin-status').textContent,
+    }))()`);
+
+  const start = await read();
+  // Four built-ins, the theme pack, and the code plugin awaiting approval.
+  check(`every plugin is listed — ${start.rows.length}`, start.rows.length === 6, JSON.stringify(start.rows.map((r) => r.name)));
+  check(`the section says how many are running — ${start.status}`, /^4 of 6 active$/.test(start.status), start.status);
+
+  const browser = start.rows.find((row) => row.name === 'Browser control');
+  const shell = start.rows.find((row) => row.name === 'Shell commands');
+  check('browser control is on by default', browser?.checked === true && browser?.off === false, JSON.stringify(browser));
+  // The one capability that has always been off until asked for.
+  check('shell is off by default, and looks it', shell?.checked === false && shell?.off === true, JSON.stringify(shell));
+  check(`a row names the actions it adds — ${browser?.adds}`, /browser_steps/.test(browser?.adds ?? ''), browser?.adds);
+  check('a working plugin has nothing to explain', browser?.note === '', browser?.note);
+
+  // A theme pack is manifest and CSS: there is no code to run, so there is
+  // nothing to approve, and it must be active on the strength of being enabled.
+  const theme = start.rows.find((row) => row.name === 'Smoke theme');
+  check('an installed theme pack is active without being approved', theme?.checked === true && theme?.off === false, JSON.stringify(theme));
+  check('and it says which theme it adds', /theme: Green/.test(theme?.adds ?? ''), theme?.adds);
+  // Languages were missing from this line entirely, so a language pack's row
+  // gave its name, its version and no hint whatever that it contributed a
+  // language — installed, working, and indistinguishable from a plugin that
+  // does nothing.
+  check('and which language', /language: Smokish/.test(theme?.adds ?? ''), theme?.adds);
+  // A pack does nothing by being installed: it appears in a picker, and the
+  // picker is in a collapsed section further down. Reported as "the language
+  // plugin is installed and there is no language choice anywhere".
+  check(`and where to go to use it — "${theme?.note}"`, /pick it in INTERFACE/.test(theme?.note ?? ''), theme?.note);
+
+  // Switch one off through the checkbox, exactly as a user would.
+  await window.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('#plugin-list .plugin-item')]
+      .find((r) => r.querySelector('.plugin-name').textContent === 'File reading');
+    const box = row.querySelector('input[type=checkbox]');
+    box.checked = false;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await new Promise((r) => setTimeout(r, 500));
+
+  const off = await read();
+  const readFile = off.rows.find((row) => row.name === 'File reading');
+  check('switching a plugin off is reflected in its row', readFile?.checked === false && readFile?.off === true, JSON.stringify(readFile));
+  // Asserted against the number, not merely against "it changed": the first
+  // version of this check passed because the handler blanked the status line it
+  // had just written, and an empty string is different from anything.
+  check(`and in the count — ${off.status}`, /^3 of 6 active$/.test(off.status), `${start.status} → ${off.status}`);
+
+  // The state must survive a round trip through the main process, not merely
+  // live in the checkbox that was clicked.
+  const persisted = await window.webContents.executeJavaScript(
+    `window.wasteland.plugins.list().then((list) => list.find((p) => p.id === 'read-file'))`,
+  );
+  check('the main process agrees it is off', persisted.enabled === false && persisted.active === false, JSON.stringify(persisted));
+
+  // Put it back, so the rest of the run sees the defaults.
+  await window.webContents.executeJavaScript(`window.wasteland.plugins.setEnabled('read-file', true)`);
+  await new Promise((r) => setTimeout(r, 400));
+  const back = await window.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('#plugin-list .plugin-item')]
+      .find((r) => r.querySelector('.plugin-name').textContent === 'File reading');
+    return { checked: row.querySelector('input[type=checkbox]').checked, off: row.classList.contains('off') };
+  })()`);
+  // Painted from the event, not from a click — nothing was clicked this time.
+  check('an enable from elsewhere repaints the row', back.checked === true && back.off === false, JSON.stringify(back));
+
+  // Before `checkApproval`, which is what approves the code plugin: this checks
+  // the state it is in *before* that, which is the state a real machine was
+  // found in twice.
+  await checkStoreApproval(window);
+  await checkApproval(window);
+  await checkChoices(window);
+
+  await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
+  await new Promise((r) => setTimeout(r, 1500));
+  const asked = await window.webContents.executeJavaScript(`(() => ({
+    status: document.getElementById('store-status').textContent,
+    rows: document.querySelectorAll('#store-list .plugin-item').length,
+  }))()`);
+  check(`asking for it out loud reports the failure — "${asked.status}"`, /registry/i.test(asked.status), JSON.stringify(asked));
+  check('and lists nothing rather than something stale', asked.rows === 0, `${asked.rows} row(s)`);
+
+  await checkRegistries(window);
+}
+
+/**
+ * A registry that actually answers, on loopback.
+ *
+ * Every other registry check in this run points at a closed port, because what
+ * they are checking is the failure. This one exists because the *success* path
+ * has its own failure mode, and it is the one that has now caught two people
+ * out: a plugin installs, its row says "installed (1.0.0)", and nothing runs —
+ * because installing is not switching on and the control that does it was in a
+ * different section entirely.
+ */
+function startRegistry(entries) {
+  return new Promise((resolve) => {
+    const server = createServer((request, response) => {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ schema: 1, updated: '2026-08-15', plugins: entries }));
+    });
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
+  });
+}
+
+/**
+ * What the registry row says about something installed that is not running.
+ *
+ * Run before the code plugin has been approved, which is the state a machine
+ * was found in twice: enabled false, approved false, and a row that mentioned
+ * neither.
+ */
+async function checkStoreApproval(window) {
+  const { server, port } = await startRegistry([
+    {
+      id: 'smoke-code',
+      name: 'Smoke code',
+      version: '1.0.0',
+      description: 'Registers one action, for the smoke test.',
+      author: 'the smoke runner',
+      apiVersion: 4,
+      kind: 'code',
+      url: 'https://example.test/smoke-code-1.0.0.zip',
+      sha256: 'a'.repeat(64),
+      size: 1024,
+    },
+  ]);
+
+  try {
+    await window.webContents.executeJavaScript(
+      `window.wasteland.plugins.addRegistry('http://127.0.0.1:${port}/index.json')`,
+    );
+    await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
+    await new Promise((r) => setTimeout(r, 1500));
+
+    const row = await window.webContents.executeJavaScript(`(() => {
+      const item = [...document.querySelectorAll('#store-list .plugin-item')]
+        .find((node) => node.querySelector('.plugin-name')?.textContent === 'Smoke code');
+      if (!item) return null;
+      return {
+        note: item.querySelector('.plugin-note')?.textContent ?? '',
+        buttons: [...item.querySelectorAll('.plugin-buttons button')].map((b) => b.textContent),
+        source: item.querySelector('.plugin-adds')?.textContent ?? '',
+      };
+    })()`);
+
+    check('a reachable registry lists what it published', Boolean(row), 'no row for the published plugin');
+    if (row) {
+      check(`the row says it came from elsewhere — ${row.source}`, /from 127\.0\.0\.1/.test(row.source), row.source);
+      // The two halves of the failure that was reported: the row claimed to be
+      // installed and said nothing about needing permission, and there was no
+      // control here to give it.
+      check(`an installed plugin that is not running says so — "${row.note}"`, /needs your permission/.test(row.note), row.note);
+      check('and the control that starts it is on that row', row.buttons.some((text) => text.includes('ALLOW AND RUN')), JSON.stringify(row.buttons));
+    }
+
+    await window.webContents.executeJavaScript(
+      `window.wasteland.plugins.removeRegistry('http://127.0.0.1:${port}/index.json')`,
+    );
+    await window.webContents.executeJavaScript(`window.wasteland.plugins.available().catch(() => {})`);
+  } finally {
+    server.close();
+  }
+}
+
+/**
+ * Where the plugin list is fetched from.
+ *
+ * Every URL here is loopback on a closed port, so each one fails in
+ * milliseconds rather than waiting out the fetch timeout — the run has a
+ * watchdog, and a check that spends twenty seconds proving a name does not
+ * resolve is a check that eventually kills the suite.
+ */
+async function checkRegistries(window) {
+  say('');
+  say('Registries');
+
+  const read = () =>
+    window.webContents.executeJavaScript(`(() => ({
+      rows: [...document.querySelectorAll('#registry-list .registry-item')].map((row) => ({
+        name: row.querySelector('.registry-name').textContent,
+        removable: Boolean(row.querySelector('button')),
+        failed: row.classList.contains('failed'),
+      })),
+      status: document.getElementById('store-status').textContent,
+    }))()`);
+
+  const start = await read();
+  check(`the registry being asked is on screen — ${start.rows.length}`, start.rows.length === 1, JSON.stringify(start.rows));
+  // The app's own has no remove button: a list with nothing in it and no way
+  // back to the default is a plugin section repairable only by editing
+  // config.json.
+  check('the app’s own registry cannot be removed', start.rows[0]?.removable === false, JSON.stringify(start.rows[0]));
+  check('a registry that did not answer says so on its own row', start.rows[0]?.failed === true, JSON.stringify(start.rows[0]));
+
+  // Refused before it is stored: an index over plain http is a list of URLs and
+  // checksums that anything on the path can rewrite.
+  await window.webContents.executeJavaScript(`(() => {
+    document.getElementById('registry-url').value = 'http://plugins.example/index.json';
+    document.getElementById('btn-registry-add').click();
+  })()`);
+  await new Promise((r) => setTimeout(r, 400));
+  const refused = await read();
+  check('a registry that is not over https is refused', refused.rows.length === 1, JSON.stringify(refused.rows));
+  check(`and the reason is where the user is looking — "${refused.status}"`, /https/.test(refused.status), refused.status);
+
+  await window.webContents.executeJavaScript(`(() => {
+    document.getElementById('registry-url').value = 'http://127.0.0.1:1/index.json';
+    document.getElementById('btn-registry-add').click();
+  })()`);
+  await new Promise((r) => setTimeout(r, 1500));
+  const added = await read();
+  check(`a second registry is added and asked — ${added.rows.length}`, added.rows.length === 2, JSON.stringify(added.rows));
+  check('and it is the one that can be removed', added.rows[1]?.removable === true, JSON.stringify(added.rows[1]));
+  const cleared = await window.webContents.executeJavaScript(
+    `document.getElementById('registry-url').value`,
+  );
+  check('the box is emptied once it has been taken', cleared === '', cleared);
+
+  // Removing is a click on the row, not a settings edit.
+  await window.webContents.executeJavaScript(
+    `document.querySelectorAll('#registry-list .registry-item')[1].querySelector('button').click()`,
+  );
+  await new Promise((r) => setTimeout(r, 1500));
+  const removed = await read();
+  check('removing one leaves the app’s own behind', removed.rows.length === 1, JSON.stringify(removed.rows));
+
+  const fromFile = await window.webContents.executeJavaScript(`(() => {
+    const button = document.getElementById('btn-store-file');
+    return { there: Boolean(button), shown: button ? getComputedStyle(button).display !== 'none' : false };
+  })()`);
+  check('installing from an archive on disk is offered', fromFile.there && fromFile.shown, JSON.stringify(fromFile));
 }
 
 /**
@@ -490,6 +848,431 @@ function assertOk(value) {
   if (!value) throw new Error('interaction setup failed');
 }
 
+/** A playable 8 kHz mono PCM WAV of `samples` bytes of silence. */
+function silentWav(samples) {
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0, 'ascii');
+  header.writeUInt32LE(36 + samples, 4);
+  header.write('WAVEfmt ', 8, 'ascii');
+  header.writeUInt32LE(16, 16); // fmt chunk length
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(1, 22); // mono
+  header.writeUInt32LE(8000, 24); // sample rate
+  header.writeUInt32LE(8000, 28); // byte rate
+  header.writeUInt16LE(1, 32); // block align
+  header.writeUInt16LE(8, 34); // bits per sample
+  header.write('data', 36, 'ascii');
+  header.writeUInt32LE(samples, 40);
+  // 8-bit PCM is unsigned, so silence is 128 rather than 0.
+  return Buffer.concat([header, Buffer.alloc(samples, 128)]);
+}
+
+/**
+ * Allowing a plugin that brings code.
+ *
+ * This is the path that failed on a real machine: the plugin was installed, its
+ * settings were filled in, its checkbox looked ticked — and the host had never
+ * imported a line of it, because nothing had approved it. The model then said,
+ * accurately, that it had no audio plugin. Every part of that is invisible from
+ * the unit tests, which can see the state but not what the row shows about it.
+ */
+async function checkApproval(window) {
+  const read = () =>
+    window.webContents.executeJavaScript(`(() => {
+      const row = [...document.querySelectorAll('#plugin-list .plugin-item')]
+        .find((r) => r.querySelector('.plugin-name').textContent === 'Smoke code');
+      if (!row) return null;
+      const button = [...row.querySelectorAll('.plugin-buttons button')]
+        .find((b) => b.textContent.includes('ALLOW'));
+      return {
+        checked: row.querySelector('input[type=checkbox]').checked,
+        boxDisabled: row.querySelector('input[type=checkbox]').disabled,
+        off: row.classList.contains('off'),
+        note: row.querySelector('.plugin-note')?.textContent ?? '',
+        allow: Boolean(button),
+      };
+    })()`);
+
+  const before = await read();
+  check('a plugin bringing code is listed', Boolean(before), 'no row for it');
+  if (!before) return;
+
+  check('it is not running before it is allowed', before.checked === false && before.off === true, JSON.stringify(before));
+  // The checkbox cannot start it, so it must not look as though it could.
+  check('and its checkbox does not pretend to be the control', before.boxDisabled === true, JSON.stringify(before));
+  check(`the row says what allowing it means — "${before.note}"`, /runs code from outside the app/.test(before.note), before.note);
+  check('there is a control that can actually start it', before.allow === true, JSON.stringify(before));
+
+  await window.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('#plugin-list .plugin-item')]
+      .find((r) => r.querySelector('.plugin-name').textContent === 'Smoke code');
+    [...row.querySelectorAll('.plugin-buttons button')].find((b) => b.textContent.includes('ALLOW')).click();
+  })()`);
+  await new Promise((r) => setTimeout(r, 600));
+
+  const after = await read();
+  check('allowing it starts it', after.checked === true && after.off === false, JSON.stringify(after));
+  check('and the checkbox becomes the control from then on', after.boxDisabled === false, JSON.stringify(after));
+  check('with nothing left to explain', after.note === '' && after.allow === false, JSON.stringify(after));
+
+  // The point of all of it: the model is now told the action exists.
+  const known = await window.webContents.executeJavaScript(
+    `window.wasteland.plugins.list().then((list) => list.find((p) => p.id === 'smoke-code')?.active === true)`,
+  );
+  check('the main process agrees it is running', known === true);
+
+  // It wrote to its own document during activation, which is the only proof
+  // from out here that `ctx.state` reached it at all — a service or a store
+  // that threw would have failed the row above with a reason, but a store that
+  // silently wrote nowhere would not.
+  const statePath = join(pluginStateDir(), 'smoke-code.json');
+  const kept = existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) : null;
+  check('a plugin keeps a document of its own, outside its directory', Number(kept?.starts) >= 1, JSON.stringify(kept));
+
+  // The picker is drawn from the manifest, so it exists before a line of the
+  // plugin's code has run — and a `select` that rendered as a text box would
+  // pass every assertion about the value while being unusable.
+  const picker = await window.webContents.executeJavaScript(`(() => {
+    const row = document.querySelector('#plugin-list .plugin-item[data-plugin="smoke-code"]');
+    const select = row?.querySelector('.plugin-setting select');
+    return {
+      there: Boolean(select),
+      options: select ? [...select.options].map((o) => o.value) : [],
+      chosen: select?.value ?? null,
+    };
+  })()`);
+  check('a picker setting is drawn as one', picker.there === true, JSON.stringify(picker));
+  // The blank leads, because an unset value reading as the first option would
+  // claim a decision nobody made.
+  check(`the choices come from the manifest — ${picker.options.join(',')}`, picker.options.join(',') === ',small,large', JSON.stringify(picker));
+
+  const stored = await window.webContents.executeJavaScript(`(async () => {
+    const list = await window.wasteland.plugins.setSetting('smoke-code', 'size', 'large');
+    let refused = '';
+    try { await window.wasteland.plugins.setSetting('smoke-code', 'size', 'enormous'); }
+    catch (err) { refused = err.message; }
+    return { value: list.find((p) => p.id === 'smoke-code').settings[0].value, refused };
+  })()`);
+  check('choosing one stores it', stored.value === 'large', JSON.stringify(stored));
+  check('and a value it never offered is refused', /not one of the choices/.test(stored.refused), stored.refused);
+}
+
+/**
+ * Dictation, without a microphone.
+ *
+ * Nothing here records anything — an offscreen window has no device and no
+ * permission — but everything on either side of the recording is real: the
+ * button appears because a plugin registered a transcriber, the bytes cross IPC,
+ * the plugin answers, and the words land in the composer. That is the seam worth
+ * checking; whisper.cpp is the plugin's business and is tested there.
+ */
+async function checkDictation(window) {
+  say('');
+  say('Dictation');
+
+  // The reported status comes along so a mismatch names both halves: the button
+  // once said "Dictate" while the main process reported the right label the
+  // whole time, and only having both told us which side was wrong.
+  const button = await window.webContents.executeJavaScript(`(async () => {
+    const node = document.getElementById('btn-mic');
+    return {
+      display: getComputedStyle(node).display,
+      glyph: node.textContent,
+      title: node.title,
+      reported: await window.wasteland.mic.status(),
+    };
+  })()`);
+  // Asserted on the computed style, never on the attribute: `hidden` is only
+  // the UA rule, and this button carries an author-level `display` that outranks
+  // it — the drop veil shipped visible for exactly this reason.
+  check('the microphone is offered once a plugin can hear', button.display !== 'none', JSON.stringify(button));
+  check(`and it says whose ears they are — ${button.title}`, /Smoke ears/.test(button.title), JSON.stringify(button));
+
+  // A WAV that is not a recording of anything: the stub answers regardless, and
+  // what is under test is that the bytes reach it and the words come back.
+  const heard = await window.webContents.executeJavaScript(`(async () => {
+    const bytes = new Uint8Array(1024);
+    const text = await window.wasteland.mic.transcribe(bytes.buffer);
+    const input = document.getElementById('input');
+    input.value = '';
+    return { text };
+  })()`);
+  check(`a recording comes back as words — "${heard.text}"`, heard.text === 'open the browser', JSON.stringify(heard));
+
+  // Switching the plugin off has to take the button with it, or the control
+  // outlives the only thing that could answer it.
+  await window.webContents.executeJavaScript(`window.wasteland.plugins.setEnabled('smoke-code', false)`);
+  await new Promise((r) => setTimeout(r, 500));
+  const gone = await window.webContents.executeJavaScript(
+    `getComputedStyle(document.getElementById('btn-mic')).display`,
+  );
+  check('switching the plugin off takes the button away', gone === 'none', gone);
+
+  await window.webContents.executeJavaScript(`window.wasteland.plugins.setEnabled('smoke-code', true)`);
+  await new Promise((r) => setTimeout(r, 500));
+}
+
+/**
+ * Options an action put in the transcript, and a click on one.
+ *
+ * The event is synthetic — there is no model here to emit an action — but
+ * everything after it is real: the renderer draws the buttons, the click goes
+ * out over IPC, and the plugin's own `choose` answers it. What this catches is
+ * a list that renders and does nothing, which looks identical to one that works
+ * until somebody presses it.
+ */
+async function checkChoices(window) {
+  window.webContents.send('event', {
+    event: 'action:result',
+    type: 'smoke_ping',
+    ok: true,
+    summary: '2 possible matches',
+    choices: [
+      { id: 'first', label: 'First option', note: 'an artist · an album' },
+      { id: 'second', label: 'Second option', note: 'another one' },
+    ],
+  });
+  await new Promise((r) => setTimeout(r, 300));
+
+  const drawn = await window.webContents.executeJavaScript(`(() => {
+    const box = [...document.querySelectorAll('#chat-log .action-card .choices')].pop();
+    if (!box) return null;
+    return {
+      count: box.querySelectorAll('button.choice').length,
+      labels: [...box.querySelectorAll('.choice-label')].map((n) => n.textContent),
+      notes: [...box.querySelectorAll('.choice-note')].map((n) => n.textContent),
+      chosen: box.querySelectorAll('button.choice.chosen').length,
+    };
+  })()`);
+  check('choices are drawn as buttons under the result', drawn?.count === 2, JSON.stringify(drawn));
+  check(`each one carries its own second line — ${drawn?.notes.join(' | ')}`, drawn?.notes.length === 2);
+  check('none is marked as taken before anything is pressed', drawn?.chosen === 0);
+
+  // The second one is what the fixture's `choose` accepts; the first is not.
+  const taken = await window.webContents.executeJavaScript(`(async () => {
+    const box = [...document.querySelectorAll('#chat-log .action-card .choices')].pop();
+    [...box.querySelectorAll('button.choice')][1].click();
+    await new Promise((r) => setTimeout(r, 500));
+    return {
+      chosen: [...box.querySelectorAll('button.choice')].map((b) => b.classList.contains('chosen')),
+      status: document.getElementById('status-line').textContent,
+    };
+  })()`);
+  check('pressing one marks it, and only it', JSON.stringify(taken.chosen) === '[false,true]', JSON.stringify(taken));
+
+  const refused = await window.webContents.executeJavaScript(`(async () => {
+    const box = [...document.querySelectorAll('#chat-log .action-card .choices')].pop();
+    [...box.querySelectorAll('button.choice')][0].click();
+    await new Promise((r) => setTimeout(r, 500));
+    return {
+      status: document.getElementById('status-line').textContent,
+      chosen: [...box.querySelectorAll('button.choice')].map((b) => b.classList.contains('chosen')),
+      enabled: [...box.querySelectorAll('button.choice')].every((b) => !b.disabled),
+    };
+  })()`);
+  // A plugin that refuses a choice must say so rather than leave a dead button.
+  check(`a refused choice is reported — "${refused.status}"`, /no longer the current one/.test(refused.status), refused.status);
+  check('and the mark stays where it was', JSON.stringify(refused.chosen) === '[false,true]', JSON.stringify(refused));
+  check('with every option still clickable', refused.enabled === true);
+}
+
+/**
+ * A theme, end to end.
+ *
+ * Every part of this is invisible to the unit tests: whether the scheme was
+ * registered in time, whether the CSP lets a stylesheet through it, whether the
+ * handler finds the file inside the plugin, and whether the picker points the
+ * `<link>` at the right place. The assertion is on a colour actually changing,
+ * because everything short of that can be true while the screen is unchanged.
+ */
+async function checkThemes(window) {
+  say('');
+  say('Themes');
+
+  const offered = await window.webContents.executeJavaScript(`(() => {
+    const select = document.getElementById('set-theme');
+    return {
+      options: [...select.options].map((option) => option.value),
+      labels: [...select.options].map((option) => option.textContent),
+      value: select.value,
+    };
+  })()`);
+  check(
+    `the picker lists the installed theme — ${offered.labels.join(' | ')}`,
+    offered.options.includes('smoke-theme/green'),
+    JSON.stringify(offered),
+  );
+  check('and starts on the built-in look', offered.value === '', offered.value);
+
+  const before = await window.webContents.executeJavaScript(`getComputedStyle(document.body).color`);
+
+  await window.webContents.executeJavaScript(`(() => {
+    const select = document.getElementById('set-theme');
+    select.value = 'smoke-theme/green';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  // The stylesheet is fetched over the custom scheme, so this is a real load.
+  await new Promise((r) => setTimeout(r, 800));
+
+  const applied = await window.webContents.executeJavaScript(`(() => ({
+    href: document.getElementById('theme-css').getAttribute('href') ?? '',
+    color: getComputedStyle(document.body).color,
+    sheets: [...document.styleSheets].length,
+  }))()`);
+  check(`the link points at the plugin scheme — ${applied.href}`, applied.href.startsWith('wasteland-plugin://smoke-theme/'), applied.href);
+  check(
+    `the theme actually repaints the window — ${before} → ${applied.color}`,
+    applied.color === 'rgb(51, 255, 51)',
+    `expected rgb(51, 255, 51), got ${applied.color}`,
+  );
+
+  // Back to amber, so the layout checks below see the shipped palette.
+  await window.webContents.executeJavaScript(`(() => {
+    const select = document.getElementById('set-theme');
+    select.value = '';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await new Promise((r) => setTimeout(r, 300));
+  const restored = await window.webContents.executeJavaScript(`(() => ({
+    href: document.getElementById('theme-css').getAttribute('href'),
+    color: getComputedStyle(document.body).color,
+  }))()`);
+  check('choosing the built-in look takes the stylesheet away again', restored.href === null && restored.color !== 'rgb(51, 255, 51)', JSON.stringify(restored));
+}
+
+/**
+ * The language picker.
+ *
+ * It had none of this, and a theme picker sitting beside it that had all of it —
+ * which is how a language pack came to be installed, enabled, correct on the
+ * main-process side and completely absent from the screen, with nothing failing
+ * anywhere. The dictionary is fetched over the plugin scheme like a stylesheet,
+ * so `connect-src` is in this too; the assertion is on text actually changing,
+ * because everything short of that can be true while the window is unchanged.
+ */
+async function checkLanguages(window) {
+  say('');
+  say('Languages');
+
+  const offered = await window.webContents.executeJavaScript(`(() => {
+    const select = document.getElementById('set-locale');
+    return {
+      options: [...select.options].map((option) => option.value),
+      labels: [...select.options].map((option) => option.textContent),
+      value: select.value,
+    };
+  })()`);
+  check(
+    `the picker lists the installed language — ${offered.labels.join(' | ')}`,
+    offered.options.includes('smoke-theme/xx'),
+    JSON.stringify(offered),
+  );
+  check('and starts on the English it ships in', offered.value === '', offered.value);
+
+  const before = await window.webContents.executeJavaScript(
+    `document.querySelector('.activity-head').textContent`,
+  );
+
+  await window.webContents.executeJavaScript(`(() => {
+    const select = document.getElementById('set-locale');
+    select.value = 'smoke-theme/xx';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  // A real fetch over wasteland-plugin://, so this is not instant.
+  await new Promise((r) => setTimeout(r, 800));
+
+  const applied = await window.webContents.executeJavaScript(`(() => ({
+    heading: document.querySelector('.activity-head').textContent,
+    send: document.getElementById('btn-send').title,
+  }))()`);
+  check(`the interface is actually translated — ${before} → ${applied.heading}`, applied.heading === 'SMOKE-LOG', JSON.stringify(applied));
+  // A `title` is text a user reads too, and it is captured separately from the
+  // text nodes — one working while the other does not is entirely possible.
+  check(`an attribute is translated as well — ${applied.send}`, applied.send === 'SMOKE-SEND', applied.send);
+
+  // Back to English, so everything below reads the shipped strings.
+  await window.webContents.executeJavaScript(`(() => {
+    const select = document.getElementById('set-locale');
+    select.value = '';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await new Promise((r) => setTimeout(r, 400));
+  const restored = await window.webContents.executeJavaScript(
+    `document.querySelector('.activity-head').textContent`,
+  );
+  check('choosing English puts the original text back', restored === before, `${before} → ${restored}`);
+}
+
+/**
+ * The player bar, driven the way a plugin drives it.
+ *
+ * The audio service is poked directly from the main process here because that
+ * is exactly what a plugin does — there is no renderer API for loading a track,
+ * on purpose. What this proves is the half a plugin cannot: that the bar
+ * appears, that the media scheme serves a real file to a real `<audio>`, and
+ * that a transport with no next button does not draw one.
+ */
+async function checkPlayer(window, wavPath) {
+  say('');
+  say('Audio player');
+
+  const { audio } = await import('../src/main/audio.mjs');
+
+  const hiddenAtBoot = await window.webContents.executeJavaScript(
+    `getComputedStyle(document.getElementById('player')).display`,
+  );
+  // Asserted through the computed style, never the attribute: `.player { display: flex }`
+  // outranks the UA rule behind `hidden`, which is how the drop veil once shipped visible.
+  check('the bar is absent until something is loaded', hiddenAtBoot === 'none', hiddenAtBoot);
+
+  let advanced = 0;
+  audio.setTransport({
+    pluginId: 'smoke',
+    buttons: ['next', 'stop'],
+    handle: (command) => {
+      if (command === 'next' || command === 'ended') advanced += 1;
+    },
+  });
+  audio.load({ path: wavPath, label: 'Silence', sublabel: '1 of 1' }, { play: false });
+  await new Promise((r) => setTimeout(r, 1200));
+
+  const shown = await window.webContents.executeJavaScript(`(() => {
+    const bar = document.getElementById('player');
+    return {
+      display: getComputedStyle(bar).display,
+      title: document.getElementById('player-title').textContent,
+      sub: document.getElementById('player-sub').textContent,
+      duration: document.getElementById('player-duration').textContent,
+      toggle: document.getElementById('player-toggle').textContent,
+      next: getComputedStyle(document.getElementById('player-next')).display,
+      previous: getComputedStyle(document.getElementById('player-previous')).display,
+    };
+  })()`);
+
+  check(`the bar appears with the track named — ${shown.title}`, shown.display !== 'none' && shown.title === 'Silence', JSON.stringify(shown));
+  check(`the plugin's own second line is shown — ${shown.sub}`, shown.sub === '1 of 1');
+  // The duration can only come from the element having actually loaded the
+  // file, which means the media scheme served it: this is the end-to-end bit.
+  check(`the media scheme delivered a playable file — ${shown.duration}`, /^0:0[01]$/.test(shown.duration), shown.duration);
+  check('a paused track shows a play button', shown.toggle === '▶');
+  // The transport declared next and stop but not previous.
+  check('declared buttons are shown', shown.next !== 'none', shown.next);
+  check('undeclared ones are not', shown.previous === 'none', shown.previous);
+
+  await window.webContents.executeJavaScript(`document.getElementById('player-next').click()`);
+  await new Promise((r) => setTimeout(r, 300));
+  check('the next button reaches the plugin that registered it', advanced === 1, `${advanced} advance(s)`);
+
+  // Switching the driving plugin off must take the bar with it, or a bar left
+  // behind offers buttons nothing is listening to.
+  audio.releasePlugin('smoke');
+  await new Promise((r) => setTimeout(r, 300));
+  const gone = await window.webContents.executeJavaScript(
+    `getComputedStyle(document.getElementById('player')).display`,
+  );
+  check('releasing the transport clears the bar', gone === 'none', gone);
+}
+
 app.on('window-all-closed', () => {});
 
 // `app.whenReady()` is awaited in a callback rather than at module top level:
@@ -513,11 +1296,115 @@ app.whenReady().then(async () => {
       if (level >= 2) errors.push(message);
     });
 
+    // A theme pack, installed the way the registry installer would leave one.
+    // It is the only way to exercise the whole path a theme takes: manifest →
+    // host → picker → custom scheme → CSP → a colour actually changing.
+    const themeDir = join(pluginsDir(), 'smoke-theme');
+    mkdirSync(join(themeDir, 'themes'), { recursive: true });
+    writeFileSync(
+      join(themeDir, 'plugin.json'),
+      JSON.stringify({
+        id: 'smoke-theme',
+        name: 'Smoke theme',
+        version: '1.0.0',
+        apiVersion: 3,
+        description: 'Two colours, for the smoke test.',
+        themes: [{ id: 'green', name: 'Green', file: 'themes/green.css' }],
+        // A language too, so both halves of "data a pack contributes" are
+        // exercised. They were not, and a language pack shipped that was
+        // installed, enabled and correct on the main-process side while being
+        // entirely absent from the screen.
+        locales: [{ id: 'xx', name: 'Smokish', file: 'locales/xx.json' }],
+      }),
+    );
+    writeFileSync(join(themeDir, 'themes', 'green.css'), ':root { --amber: #33ff33; }\n');
+    mkdirSync(join(themeDir, 'locales'), { recursive: true });
+    // Two entries, deliberately of different kinds: a text node and a `title`
+    // attribute are captured separately, and one working while the other does
+    // not is entirely possible.
+    writeFileSync(
+      join(themeDir, 'locales', 'xx.json'),
+      JSON.stringify({ ACTIVITY: 'SMOKE-LOG', Send: 'SMOKE-SEND' }),
+    );
+
+    // A plugin that brings code, and therefore has to be allowed before it runs.
+    // Installed but never approved is the state a real machine was found in:
+    // enabled true, approved false, a ticked checkbox beside a plugin the host
+    // had never imported, and no control left to correct it.
+    const codeDir = join(pluginsDir(), 'smoke-code');
+    mkdirSync(codeDir, { recursive: true });
+    writeFileSync(
+      join(codeDir, 'plugin.json'),
+      JSON.stringify({
+        id: 'smoke-code',
+        name: 'Smoke code',
+        version: '1.0.0',
+        apiVersion: 4,
+        description: 'Registers one action, for the smoke test.',
+        main: 'main.mjs',
+        actions: ['smoke_ping'],
+        // Asked for, so the whole chain is exercised from a manifest: declared
+        // here, handed over by name, and used to put something on screen.
+        services: ['notify', 'mic'],
+        settings: [
+          { key: 'size', type: 'select', label: 'Size', options: [{ value: 'small', label: 'Small' }, { value: 'large', label: 'Large' }] },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(codeDir, 'main.mjs'),
+      `export function activate(ctx) {
+         const notify = ctx.service('notify');
+         // Dictation, with no microphone anywhere near it: the app captures and
+         // encodes, a plugin turns the bytes into words, and this one has the
+         // words ready. It is the seam that is being checked, not whisper.
+         ctx.service('mic').setTranscriber({
+           pluginId: ctx.id,
+           label: 'Smoke ears',
+           ready: true,
+           transcribe: async () => 'open the browser',
+         });
+         // A plugin's own document: undeclared, unread by the app, and the only
+         // place a count like this can live across a restart. Touched during
+         // activation so that a store which cannot be written fails the row
+         // rather than waiting for somebody to run the action.
+         ctx.state.set({ starts: (ctx.state.get().starts ?? 0) + 1 });
+         ctx.prompt('PING — {"type":"smoke_ping","steps":""}');
+         ctx.action({
+           type: 'smoke_ping',
+           run: async () => {
+             notify.show({ title: 'Smoke ping', body: 'the plugin said so', desktop: false });
+             return { ok: true, summary: 'pong' };
+           },
+           // Answers a click that arrives long after the turn has ended, and
+           // refuses one from a list it no longer considers current.
+           choose: async (id) => {
+             if (id !== 'second') throw new Error('that list is no longer the current one');
+             return { ok: true, summary: id };
+           },
+         });
+       }\n`,
+    );
+
+    // One second of silence, so the media scheme has something real to serve.
+    // A missing file would exercise the error path instead, which is not the
+    // question — whether Range-capable delivery works at all is.
+    const wavPath = join(mkdtempSync(join(tmpdir(), 'wl-smoke-audio-')), 'silence.wav');
+    writeFileSync(wavPath, silentWav(8000));
+
+    serveAssets();
     registerIpc(() => window);
+
 
     // A model registered from outside the vault. The native picker cannot be
     // clicked from here, but everything downstream of it can be checked.
     const config = await import('../src/main/config.mjs');
+    // The registry is asked for at boot, which would make this run depend on
+    // the network and on what is published there. Pointed at a closed port
+    // instead: it fails immediately and deterministically, which is also the
+    // case worth checking — a machine with no network must still boot quietly.
+    config.update({ pluginRegistry: 'https://127.0.0.1:1/index.json' });
+
     const externalModel = join(mkdtempSync(join(tmpdir(), 'wl-smoke-away-')), 'elsewhere-Q4_K_M.gguf');
     const magic = Buffer.alloc(4096);
     magic.write('GGUF', 0, 'ascii');
@@ -573,7 +1460,7 @@ app.whenReady().then(async () => {
     // Nothing has been searched for yet, so an empty result list is correct.
     check('search results start empty', probe.results === 0, `${probe.results} entries`);
     check('vault section rendered', probe.vault > 0);
-    check('all left-panel sections present', probe.sections === 6, `${probe.sections} sections`);
+    check('all left-panel sections present', probe.sections === 8, `${probe.sections} sections`);
     check('composer present', probe.composer);
     check('model search controls present', probe.search);
     check('the open-a-file control is present', probe.openFile);
@@ -724,9 +1611,15 @@ app.whenReady().then(async () => {
     check('both columns have width', probe.leftWidth > 100 && probe.chatWidth > 300, `${probe.leftWidth}/${probe.chatWidth}`);
     check('no renderer errors', errors.length === 0, errors.join(' | '));
 
-      await checkMarkdown(window);
+    await checkMarkdown(window);
+    await checkPlugins(window);
+    await checkThemes(window);
+    await checkLanguages(window);
+    await checkPlayer(window, wavPath);
     await checkChatControls(window);
     await checkAttachments(window);
+    await checkNotices(window);
+    await checkDictation(window);
     await checkContextControls(window);
     await checkLayouts(window);
   } catch (err) {
