@@ -7,6 +7,7 @@
  * an id that would escape its own directory, an `apiVersion` from a build that
  * does not exist yet, a `main` pointing at somebody else's file.
  */
+import { normaliseCategory } from '../../shared/categories.mjs';
 
 /**
  * The contract version this build implements.
@@ -195,6 +196,16 @@ export function parseManifest(raw, { builtin = false } = {}) {
       actions,
       services,
       builtin,
+      /**
+       * Which heading it is drawn under.
+       *
+       * Normalised rather than validated: an unrecognised one becomes `other`,
+       * where a `select` setting offered a value it never declared would be
+       * refused outright. The difference is what happens next — a setting is a
+       * control the plugin has code for, a category is a word above its row, and
+       * refusing to load a working plugin over that word would be absurd.
+       */
+      category: normaliseCategory(raw.category),
       /** Where this one sits in the system prompt; lower goes first. */
       order: Number.isFinite(Number(raw.order)) ? Number(raw.order) : 100,
       enabledByDefault: raw.enabledByDefault !== false,

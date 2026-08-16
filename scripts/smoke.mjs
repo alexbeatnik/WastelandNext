@@ -553,10 +553,52 @@ async function checkPlugins(window) {
         adds: row.querySelector('.plugin-adds')?.textContent ?? '',
         note: row.querySelector('.plugin-note')?.textContent ?? '',
       })),
+      // The headings, and what sits under each. Read as the DOM order the user
+      // actually sees rather than from the grouping function — the question is
+      // whether the list is drawn in sections, not whether an array can be
+      // split into some.
+      sections: [...document.querySelectorAll('#plugin-list > *')].reduce((acc, node) => {
+        if (node.classList.contains('plugin-section')) {
+          acc.push({ label: node.querySelector('.plugin-section-label').textContent, count: 0 });
+        } else if (acc.length) {
+          acc[acc.length - 1].count += 1;
+        }
+        return acc;
+      }, []),
       status: document.getElementById('plugin-status').textContent,
     }))()`);
 
   const start = await read();
+
+  /**
+   * Grouped, and every heading has something under it.
+   *
+   * The list outgrew one column: four capabilities, a theme pack and whatever
+   * else is installed read as five lists printed on top of each other. An empty
+   * heading is the failure worth checking for — it is a promise of plugins that
+   * are not there, and on the narrow layout it costs a line to say nothing.
+   */
+  check(
+    `the list is drawn in sections — ${start.sections.map((s) => `${s.label} ${s.count}`).join(', ')}`,
+    start.sections.length >= 2,
+    JSON.stringify(start.sections),
+  );
+  check(
+    'no heading is drawn over an empty section',
+    start.sections.every((section) => section.count > 0),
+    JSON.stringify(start.sections),
+  );
+  check(
+    'every row sits under a heading',
+    start.sections.reduce((sum, section) => sum + section.count, 0) === start.rows.length,
+    JSON.stringify({ sections: start.sections, rows: start.rows.length }),
+  );
+  // Capabilities are what the section is mostly for, so they come first.
+  check(
+    `capabilities come first — ${start.sections[0]?.label}`,
+    start.sections[0]?.label === 'CAPABILITIES',
+    JSON.stringify(start.sections[0]),
+  );
   // Four built-ins, the theme pack, and the code plugin awaiting approval.
   check(`every plugin is listed — ${start.rows.length}`, start.rows.length === 6, JSON.stringify(start.rows.map((r) => r.name)));
   check(`the section says how many are running — ${start.status}`, /^4 of 6 active$/.test(start.status), start.status);

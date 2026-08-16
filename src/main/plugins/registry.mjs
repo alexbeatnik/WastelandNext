@@ -41,8 +41,28 @@ import { pluginsDir, scratchDir } from '../paths.mjs';
 import { assertSafeArchive } from '../llm/zip.mjs';
 import { extractZip } from '../llm/tools.mjs';
 import { PLUGIN_API_VERSION, parseManifest } from './manifest.mjs';
+import { normaliseCategory } from '../../shared/categories.mjs';
 
 export const DEFAULT_REGISTRY = 'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugins/main/index.json';
+
+/**
+ * Further indexes the app ships knowing about.
+ *
+ * One repository per plugin is a reasonable way to publish something large —
+ * Space Trader carries a bundled game engine and has its own release cycle —
+ * and asking every user to paste a URL to find a plugin the app already knows
+ * exists is a worse answer than listing it. These are asked *as well as* the
+ * primary and, like the primary, cannot be removed: they are part of the build,
+ * so a remove button on one would come back at the next launch.
+ *
+ * Adding to this list is a decision about what this build vouches for, and it
+ * is not the same act as a user adding a registry. Everything downstream is
+ * unchanged — a checksum is still mandatory, an archive is still checked before
+ * it is unpacked, and code still runs only once somebody switches it on.
+ */
+export const BUNDLED_REGISTRIES = [
+  'https://raw.githubusercontent.com/alexbeatnik/-wasteland-plugin-space-trader/main/index.json',
+];
 
 /** A plugin archive is manifest, code and a stylesheet; megabytes are a mistake. */
 const MAX_ARCHIVE_BYTES = 25 * 1024 * 1024;
@@ -172,12 +192,28 @@ export function registries() {
   const primary = registryUrl();
   const stored = Array.isArray(config.get('pluginRegistries')) ? config.get('pluginRegistries') : [];
 
+  /**
+   * The bundled ones come along only while the primary is the app's own.
+   *
+   * `pluginRegistry` is documented as an override of the default rather than an
+   * addition to it, and that has to mean the whole default. A developer who has
+   * pointed this build at their own index wants their index — not their index
+   * plus whatever else this build happened to ship knowing about, quietly
+   * fetched from the network behind them. It is also what keeps the smoke run
+   * offline: it overrides the primary, and so is asked nothing else.
+   */
+  const bundled = config.get('pluginRegistry') ? [] : BUNDLED_REGISTRIES;
+
   const seen = new Set();
   const list = [];
-  for (const url of [primary, ...stored.map((entry) => String(entry ?? '').trim())]) {
+  // Shipped ones are marked so the row that draws them leaves the remove button
+  // off: they are part of the build and would be back at the next launch, and a
+  // button that undoes itself overnight is worse than no button.
+  const shipped = new Set([primary, ...bundled]);
+  for (const url of [primary, ...bundled, ...stored.map((entry) => String(entry ?? '').trim())]) {
     if (!url || seen.has(url)) continue;
     seen.add(url);
-    list.push({ url, label: registryLabel(url), primary: list.length === 0 });
+    list.push({ url, label: registryLabel(url), primary: list.length === 0, shipped: shipped.has(url) });
   }
   return list;
 }
@@ -204,6 +240,7 @@ export function addRegistry(input) {
 export function removeRegistry(url) {
   const target = String(url ?? '').trim();
   if (target === registryUrl()) throw new Error('that is the registry the app ships with');
+  if (BUNDLED_REGISTRIES.includes(target)) throw new Error('that registry ships with the app');
   const stored = Array.isArray(config.get('pluginRegistries')) ? config.get('pluginRegistries') : [];
   config.update({ pluginRegistries: stored.filter((entry) => String(entry ?? '').trim() !== target) });
   return registries();
@@ -238,6 +275,14 @@ export function parseEntry(raw, source = null) {
     author: String(raw.author ?? '').trim(),
     homepage: /^https:\/\//i.test(String(raw.homepage ?? '')) ? String(raw.homepage) : '',
     apiVersion,
+    /**
+     * The heading it is listed under, before anything has been installed.
+     *
+     * Published in the index rather than read out of the manifest, because the
+     * manifest is inside an archive that has not been downloaded — and the whole
+     * point of a heading is to help somebody decide whether to download it.
+     */
+    category: normaliseCategory(raw.category),
     /** `code` needs approval to run; `theme` is manifest and CSS. */
     kind: raw.kind === 'theme' ? 'theme' : 'code',
     url,

@@ -26,6 +26,7 @@ import { pluginDataDir, pluginStateDir, pluginsDir } from '../paths.mjs';
 import { PluginStateStore } from './state.mjs';
 import { PLUGIN_API_VERSION, mergeEnablement, needsApproval, parseManifest } from './manifest.mjs';
 import { pluginAssetUrl } from '../../shared/schemes.mjs';
+import { DEFAULT_CATEGORY } from '../../shared/categories.mjs';
 import { BUILTIN_PLUGINS } from '../../plugins/index.mjs';
 
 export { PLUGIN_API_VERSION };
@@ -208,6 +209,7 @@ export class PluginHost extends EventEmitter {
         locales: [],
         settings: [],
         icon: '',
+        category: DEFAULT_CATEGORY,
         builtin,
         order: 100,
         enabledByDefault: false,
@@ -633,6 +635,8 @@ export class PluginHost extends EventEmitter {
         version: entry.manifest.version,
         description: entry.manifest.description,
         builtin: entry.manifest.builtin,
+        /** The heading it is drawn under; the renderer owns what that is called. */
+        category: entry.manifest.category ?? DEFAULT_CATEGORY,
         actions: entry.manifest.actions,
         services: entry.manifest.services,
         themes: entry.manifest.themes,

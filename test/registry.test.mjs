@@ -153,6 +153,7 @@ test('the registry defaults to the published one and can be pointed elsewhere', 
 /* ============================ more than one registry ============================ */
 
 const {
+  BUNDLED_REGISTRIES,
   addRegistry,
   fetchIndex: fetchAll,
   normaliseRegistryUrl,
@@ -160,6 +161,12 @@ const {
   registryLabel,
   removeRegistry,
 } = await import('../src/main/plugins/registry.mjs');
+
+/**
+ * Answer every registry the build ships with, so a test about *one* index does
+ * not fail on the others being unreachable. `fetchIndex` asks all of them.
+ */
+const shippedEmpty = () => Object.fromEntries(BUNDLED_REGISTRIES.map((url) => [url, { plugins: [] }]));
 
 /** Answer each URL from a table, so a test can fail one registry and not another. */
 function serve(table) {
@@ -207,23 +214,56 @@ test('a registry is named by owner and repository where it can be', () => {
   assert.equal(registryLabel('nonsense'), 'nonsense');
 });
 
-test('the app’s own registry is always in the list and cannot be removed', async () => {
+test('the registries the app ships with are always listed and cannot be removed', async () => {
   const config = await import('../src/main/config.mjs');
   config.update({ pluginRegistry: '', pluginRegistries: [] });
 
-  assert.equal(registries().length, 1);
+  const shipped = [DEFAULT_REGISTRY, ...BUNDLED_REGISTRIES];
+  assert.deepEqual(registries().map((source) => source.url), shipped);
   assert.equal(registries()[0].primary, true);
+  // Only one is primary — that is the one `pluginRegistry` overrides — but every
+  // shipped one is equally un-removable, because it is part of the build and a
+  // remove button that undoes itself at the next launch is worse than none.
+  assert.ok(registries().every((source) => source.shipped));
+
   // A list with nothing in it and no way back to the default would be a plugin
   // section repairable only by editing config.json.
   assert.throws(() => removeRegistry(DEFAULT_REGISTRY), /the app ships with/);
+  for (const url of BUNDLED_REGISTRIES) {
+    assert.throws(() => removeRegistry(url), /ships with the app/);
+  }
 
   addRegistry('https://example.test/index.json');
-  assert.deepEqual(registries().map((source) => source.primary), [true, false]);
+  const added = registries().at(-1);
+  assert.equal(added.url, 'https://example.test/index.json');
+  assert.equal(added.primary, false);
+  // The user's own is the only kind with a remove button on its row.
+  assert.equal(added.shipped, false);
   assert.throws(() => addRegistry('https://example.test/index.json'), /already in the list/);
   assert.throws(() => addRegistry('http://example.test/index.json'), /https/);
 
   removeRegistry('https://example.test/index.json');
-  assert.equal(registries().length, 1);
+  assert.deepEqual(registries().map((source) => source.url), shipped);
+});
+
+test('pointing the build at another index replaces the default, bundled ones included', async () => {
+  const config = await import('../src/main/config.mjs');
+  // `pluginRegistry` is an override, and that has to mean the whole default:
+  // a developer aiming this build at their own index does not want the shipped
+  // extras fetched from the network behind them.
+  config.update({ pluginRegistry: 'https://mine.test/index.json', pluginRegistries: [] });
+  assert.deepEqual(registries().map((source) => source.url), ['https://mine.test/index.json']);
+  config.update({ pluginRegistry: '' });
+  assert.ok(registries().length > 1);
+});
+
+test('a bundled registry is not asked twice when the user adds it themselves', async () => {
+  const config = await import('../src/main/config.mjs');
+  // Nothing stops somebody pasting in a URL the build already knows, and asking
+  // the same index twice would draw every plugin on it twice.
+  config.update({ pluginRegistry: '', pluginRegistries: [BUNDLED_REGISTRIES[0]] });
+  const urls = registries().map((source) => source.url);
+  assert.equal(new Set(urls).size, urls.length);
 });
 
 test('every registry is asked, and the newest version of a shared id wins', async () => {
@@ -232,6 +272,7 @@ test('every registry is asked, and the newest version of a shared id wins', asyn
 
   const restore = serve({
     [DEFAULT_REGISTRY]: { plugins: [{ ...GOOD, version: '1.0.0' }] },
+    ...shippedEmpty(),
     'https://other.test/index.json': {
       plugins: [
         { ...GOOD, version: '2.0.0' },
@@ -250,7 +291,11 @@ test('every registry is asked, and the newest version of a shared id wins', asyn
     const shared = index.plugins.find((entry) => entry.id === 'audio-player');
     assert.equal(shared.version, '2.0.0');
     assert.equal(shared.sourceLabel, 'other.test');
-    assert.deepEqual(index.sources.map((source) => source.ok), [true, true]);
+    // Every shipped registry is asked as well as the user's, and all of them
+    // answered here — the assertion is that none was skipped, not how many
+    // the build happens to ship with.
+    assert.ok(index.sources.every((source) => source.ok));
+    assert.equal(index.sources.length, 2 + BUNDLED_REGISTRIES.length);
   } finally {
     restore();
   }
@@ -260,7 +305,7 @@ test('one unreachable registry does not empty the list', async () => {
   const config = await import('../src/main/config.mjs');
   config.update({ pluginRegistry: '', pluginRegistries: ['https://down.test/index.json'] });
 
-  const restore = serve({ [DEFAULT_REGISTRY]: { plugins: [GOOD] } });
+  const restore = serve({ [DEFAULT_REGISTRY]: { plugins: [GOOD] }, ...shippedEmpty() });
   try {
     const index = await fetchAll();
     assert.equal(index.plugins.length, 1, 'a colleague’s server being down must not cost the app its own');
@@ -287,7 +332,7 @@ test('nothing answering at all still says which registries were asked', async ()
     const index = await fetchAll();
     assert.match(index.error, /could not reach the plugin registry/);
     assert.equal(index.plugins.length, 0);
-    assert.deepEqual(index.sources.map((source) => source.ok), [false, false]);
+    assert.ok(index.sources.every((source) => source.ok === false));
     assert.ok(index.sources.every((source) => source.error));
   } finally {
     restore();
