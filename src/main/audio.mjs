@@ -28,15 +28,37 @@ export class AudioOut extends EventEmitter {
   /** `{path, label, sublabel, position}` — everything the bar draws. */
   #source = null;
   #playing = false;
-  #volume = 1;
+  /** Null until asked for: the stored value cannot be read at construction. */
+  #volume = null;
   #error = '';
   /** Registered by a plugin: `{pluginId, buttons, handle(command)}`. */
   #transport = null;
 
-  constructor() {
-    super();
-    const stored = Number(config.get('audioVolume'));
-    this.#volume = Number.isFinite(stored) ? Math.min(1, Math.max(0, stored)) : 1;
+  /**
+   * The stored volume, read on first ask rather than in the constructor.
+   *
+   * This object is created at module scope — `ipc.mjs` imports it, `main.mjs`
+   * imports `ipc.mjs` — and an ESM import graph is evaluated in full *before*
+   * the importing module's body runs. So at construction `setDataRoot` has not
+   * been called yet, and `config.get` here read `config.json` from the platform
+   * default root: a path that does not exist under Electron, whose userData
+   * directory is somewhere else entirely. The read failed, the defaults were
+   * cached, and every later reader in the process got them — the real settings
+   * file was invisible for the whole session and then overwritten from those
+   * defaults by the first `config.update`. What that looked like was plugins
+   * asking to be approved again on every launch, having forgotten the music
+   * folder and the speech model along with it.
+   *
+   * `PluginHost.#states()` defers `pluginStateDir()` for exactly this reason.
+   * `config.mjs` now notices a root that arrives late as well, but the read
+   * that is never made too early is the one that cannot be got wrong.
+   */
+  #storedVolume() {
+    if (this.#volume === null) {
+      const stored = Number(config.get('audioVolume'));
+      this.#volume = Number.isFinite(stored) ? Math.min(1, Math.max(0, stored)) : 1;
+    }
+    return this.#volume;
   }
 
   status() {
@@ -51,7 +73,7 @@ export class AudioOut extends EventEmitter {
           }
         : null,
       playing: this.#playing,
-      volume: this.#volume,
+      volume: this.#storedVolume(),
       error: this.#error,
       // An empty list is what hides the transport buttons, so a plugin that
       // never registered one cannot leave dead controls on screen.

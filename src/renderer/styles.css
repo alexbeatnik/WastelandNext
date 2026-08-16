@@ -721,6 +721,38 @@ button.choice.chosen .choice-label::before {
   overflow-y: auto;
 }
 
+/* A heading over a run of rows. Not a border-box like a row: it has to read as
+   a label *on* the list rather than as another entry in it, so it is a rule with
+   words on it and no frame of its own. The first one loses its top margin —
+   otherwise every list opens with a gap nothing is above. */
+.plugin-section {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+  padding-bottom: 0.15rem;
+  border-bottom: 1px solid var(--amber-faint);
+}
+
+.plugin-section:first-child {
+  margin-top: 0;
+}
+
+.plugin-section-label {
+  letter-spacing: 0.12em;
+  font-size: 0.82rem;
+  color: var(--amber-dim);
+}
+
+/* The blurb goes first when there is no room for it beside the label: it is the
+   part that can be lost without the heading stopping meaning anything. */
+.plugin-section-blurb {
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Two columns: the toggle and its name take the width, the version and origin
    sit at the right; everything else spans both. */
 .plugin-item {

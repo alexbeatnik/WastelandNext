@@ -14,6 +14,7 @@ export const manifest = {
   description: 'Lets the model read one file at a time, read-only, from inside your home directory.',
   actions: ['read_file'],
   services: [],
+  category: 'capability',
   order: 30,
   legacy: ['allowReadFile'],
 };

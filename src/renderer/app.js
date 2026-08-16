@@ -10,6 +10,7 @@ import { describePlacement, formatDuration, formatSize, splitThinking, stripActi
 import { describeUpdate, isBusy, isReady } from '../shared/updates.mjs';
 import { parseMarkdown } from '../shared/markdown.mjs';
 import { formatTime } from '../shared/media.mjs';
+import { groupByCategory } from '../shared/categories.mjs';
 
 const api = window.wasteland;
 const $ = (id) => document.getElementById(id);
@@ -879,7 +880,15 @@ function paintPlugins(list = []) {
   const host = $('plugin-list');
   host.replaceChildren();
 
-  for (const plugin of list) {
+  // Grouped rather than one column: four capabilities, a music player, a
+  // language, a theme pack and a game are not a list, they are five lists
+  // printed on top of each other. `groupByCategory` leaves out a heading with
+  // nothing under it — an empty section is a promise of plugins that are not
+  // there, and on the narrow layout it costs a line to say nothing.
+  for (const section of groupByCategory(list)) {
+    host.append(sectionHeading(section));
+
+  for (const plugin of section.rows) {
     const row = el('div', 'plugin-item');
     // How a progress line finds its way back to the right row after the list
     // has been repainted out from under it.
@@ -1018,9 +1027,27 @@ function paintPlugins(list = []) {
 
     host.append(row);
   }
+  }
 
+  // Still the whole list, not the section: this line is what says how much of
+  // the app is switched on, and a count that reset per heading would answer a
+  // question nobody asked. It is also how a previous error message goes away.
   const active = list.filter((plugin) => plugin.active).length;
   $('plugin-status').textContent = list.length ? `${active} of ${list.length} active` : 'No plugins found.';
+}
+
+/**
+ * A heading over a group of rows.
+ *
+ * The blurb is the part that earns it. "GAMES" alone is a word; "GAMES —
+ * played in the chat window" is the answer to what a game is even doing in a
+ * list of capabilities, which is the question the heading raises.
+ */
+function sectionHeading(section) {
+  const heading = el('div', 'plugin-section');
+  heading.append(el('span', 'plugin-section-label', section.label));
+  if (section.blurb) heading.append(el('span', 'plugin-section-blurb muted', section.blurb));
+  return heading;
 }
 
 /**
@@ -1216,7 +1243,11 @@ function paintRegistries(list = []) {
       row.append(el('span', 'muted', reached.ok ? `${reached.count} plugin(s)` : reached.error));
     }
 
-    if (!source.primary) {
+    // `shipped`, not `primary`: the app ships with more than one index now, and
+    // only one of them is the primary. A remove button on the others would be
+    // refused by the main process — and even if it were not, they are part of
+    // the build and would be back at the next launch.
+    if (!source.shipped) {
       const remove = el('button', 'ghost danger', '×');
       remove.title = `Stop asking ${source.url}`;
       remove.addEventListener('click', async () => {
@@ -1317,7 +1348,12 @@ function paintStore() {
   const host = $('store-list');
   host.replaceChildren();
 
-  for (const entry of state.store.plugins) {
+  // Under the same headings as the installed list, and in the same order, so
+  // "where would this end up" is answered before it is downloaded.
+  for (const section of groupByCategory(state.store.plugins)) {
+    host.append(sectionHeading(section));
+
+  for (const entry of section.rows) {
     const installed = state.plugins.find((plugin) => plugin.id === entry.id);
     const row = el('div', 'plugin-item');
     if (!entry.compatible) row.classList.add('off');
@@ -1381,6 +1417,7 @@ function paintStore() {
     if (buttons.childElementCount) row.append(buttons);
 
     host.append(row);
+  }
   }
 
   if (state.store.error) $('store-status').textContent = state.store.error;

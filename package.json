@@ -1,7 +1,7 @@
 {
   "name": "wasteland-next",
   "productName": "Wasteland Next",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Local LLM terminal with browser control — amber CRT aesthetic, Electron, Manul browser engine.",
   "license": "Apache-2.0",
   "author": "Oleksii Poliakov",

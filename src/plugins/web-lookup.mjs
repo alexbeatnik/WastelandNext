@@ -14,6 +14,7 @@ export const manifest = {
   description: 'A background search for a fact the model does not know, in a browser the user never sees.',
   actions: ['web_lookup'],
   services: ['lookupBrowser'],
+  category: 'capability',
   order: 20,
   legacy: ['browserEnabled', 'allowWebLookup'],
 };

@@ -227,6 +227,18 @@ amount of changing imports will fix it.
 **Top-level `await app.whenReady()` deadlocks.** Electron holds the ready event until the ESM entry module finishes
 evaluating. Use `app.whenReady().then(...)`, as `main.mjs` and `scripts/smoke.mjs` both do.
 
+**Nothing constructed at module scope may read settings, because `setDataRoot` has not been called yet.** It is called
+in `main.mjs`'s *body*, and an ESM import graph is evaluated in full before that body runs — so a singleton created
+down in `ipc.mjs` resolves the platform default root rather than Electron's userData directory. `AudioOut` read the
+stored volume in its constructor: the read missed a `config.json` that only exists under the real root, the defaults it
+cached were what every later reader in the process got, and the first `config.update` then wrote those defaults over
+the real file. What that looked like from outside was every plugin asking to be approved again on each launch, having
+forgotten the music folder, the speech model and the language — settings that were sitting in `config.json`, correct,
+the whole time. `PluginHost.#states()` defers `pluginStateDir()` for the same reason; do likewise, and read settings on
+first ask. `config.mjs` now pins its cache to the path it was read from, so a root arriving late causes a re-read
+rather than a permanent wrong answer — but that is a backstop, not a licence: whatever read early has already acted on
+a default. `config.test.mjs` reproduces the reported case.
+
 **Electron on Windows has no attached console.** `console.log` from the main process goes nowhere when stdout is piped.
 `scripts/smoke.mjs` writes its report to a file (`SMOKE_REPORT`) for exactly this reason. Renderer console output is
 forwarded to the terminal only under `--dev`.

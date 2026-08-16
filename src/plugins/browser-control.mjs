@@ -19,6 +19,7 @@ export const manifest = {
   description: 'Lets the model drive your Chrome — open pages, click, fill forms, play a video.',
   actions: ['browser_steps', 'browser_close'],
   services: ['browser'],
+  category: 'capability',
   order: 10,
   // The two checkboxes this plugin replaced. Both had to be on for the action
   // to be offered, so both are read.

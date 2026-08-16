@@ -16,6 +16,7 @@ export const manifest = {
   description: 'Lets the model propose a shell command. Nothing runs until you approve it.',
   actions: ['system_shell'],
   services: [],
+  category: 'capability',
   order: 40,
   // The one capability that has always been off until asked for.
   enabledByDefault: false,
