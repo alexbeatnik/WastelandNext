@@ -440,6 +440,15 @@ export class Agent extends EventEmitter {
     this.#status('Waiting for approval…');
     this.#say('shell:request', { id, kind, command });
 
+    // Stop may have been pressed before the handler reached here. The abort
+    // event only fires once, so a listener added now would never resolve and
+    // the turn would hang with a live dialog and no way out.
+    if (this.#abort?.signal.aborted) {
+      this.#pendingApprovals.delete(id);
+      this.#say('shell:resolved', { id, approved: false });
+      return false;
+    }
+
     const approved = await new Promise((resolve) => {
       this.#pendingApprovals.set(id, resolve);
       this.#abort?.signal.addEventListener('abort', () => resolve(false), { once: true });
