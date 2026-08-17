@@ -27,6 +27,7 @@
  * a scene *is*, so it can be tested in plain Node.
  */
 import { EventEmitter } from 'node:events';
+import { pluginDataUrl } from '../shared/schemes.mjs';
 
 /**
  * Tone words a scene may use.
@@ -70,6 +71,9 @@ const MAX_ITEMS = 60;
  * cannot see to press, which is the same complaint the attachment chips answer.
  */
 const MAX_ACTIONS = 12;
+/** Places on a board, and the roads between them. */
+const MAX_POINTS = 24;
+const MAX_LINKS = 60;
 
 /**
  * The digits the app puts on the first nine actions.
@@ -107,6 +111,18 @@ function number(value, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+/**
+ * A file inside the plugin's own data directory, or ''.
+ *
+ * The protocol handler checks confinement again where it reads, but a path that
+ * could never work should fail here, where the plugin author can see why.
+ */
+function safeFile(value) {
+  const path = String(value ?? '').trim();
+  if (!path || path.startsWith('/') || path.startsWith('\\') || /^[a-zA-Z]:/.test(path)) return '';
+  return path.split(/[\\/]+/).every((part) => part && part !== '.' && part !== '..') ? path.slice(0, 120) : '';
+}
+
 function list(value, limit) {
   return (Array.isArray(value) ? value : []).slice(0, limit);
 }
@@ -139,6 +155,8 @@ export function normaliseScene(raw) {
     groups: [],
     /** The row of buttons above the composer. */
     actions: [],
+    /** A picture with pressable places on it, or null. */
+    board: null,
   };
 
   for (const entry of list(raw.meters, MAX_METERS)) {
@@ -196,6 +214,56 @@ export function normaliseScene(raw) {
       // the right sentence is "no items" or "the journal is blank".
       empty: text(entry?.empty, MAX_NOTE),
     });
+  }
+
+  /**
+   * A picture with pressable places on it.
+   *
+   * The image is scenery and nothing else: the markers, the roads and the
+   * labels are drawn by the app from this data, over the top. That is not
+   * tidiness — a game's map can differ from run to run (this one shuffles which
+   * places connect), and a picture cannot know that. Drawn from data, the roads
+   * are always the roads that exist, the labels are legible, and a marker is
+   * where the game says it is rather than where a painter happened to put it.
+   */
+  if (raw.board && typeof raw.board === 'object') {
+    const points = [];
+    for (const entry of list(raw.board.points, MAX_POINTS)) {
+      const id = text(entry?.id, MAX_ID);
+      const label = text(entry?.label, MAX_LABEL);
+      if (!id || !label) continue;
+      points.push({
+        id,
+        label,
+        note: text(entry?.note, MAX_NOTE),
+        // Percentages of the board, so the same numbers work at any size and
+        // nothing has to know how big the picture is.
+        x: Math.max(0, Math.min(100, number(entry?.x, 50))),
+        y: Math.max(0, Math.min(100, number(entry?.y, 50))),
+        tone: tone(entry?.tone),
+        /**
+         * You are here.
+         *
+         * Its own flag rather than a fourth tone word: "where the piece stands"
+         * is true of any board and is not a shade of good or bad, and the tone
+         * vocabulary is deliberately three words that mean how something is
+         * going.
+         */
+        here: entry?.here === true,
+        action: text(entry?.action, MAX_ID),
+      });
+    }
+
+    const known = new Set(points.map((point) => point.id));
+    const links = [];
+    for (const entry of list(raw.board.links, MAX_LINKS)) {
+      const from = text(entry?.from, MAX_ID);
+      const to = text(entry?.to, MAX_ID);
+      // A road to nowhere is a line drawn off the edge of the board.
+      if (from && to && from !== to && known.has(from) && known.has(to)) links.push({ from, to, tone: tone(entry?.tone) });
+    }
+
+    scene.board = { image: safeFile(raw.board.image), points, links };
   }
 
   for (const entry of list(raw.actions, MAX_ACTIONS)) {
@@ -259,9 +327,26 @@ export class Scene extends EventEmitter {
              * readable, honest end state — but it stops offering moves.
              */
             actions: this.#presenter ? this.#scene.actions : [],
+            board: this.#board(),
           }
         : null,
     };
+  }
+
+  /**
+   * The board, with its picture turned into something the page can load.
+   *
+   * Built here and never in the renderer, for the reason the audio bar records:
+   * the scheme and its encoding belong to the process that takes them apart
+   * again, and a second encoder is a second thing to get wrong about a filename.
+   * The file lives in the plugin's data directory, which updates do not wipe —
+   * a map the user generated must not vanish on a version bump.
+   */
+  #board() {
+    const board = this.#scene?.board;
+    if (!board) return null;
+    const id = this.#presenter?.pluginId ?? '';
+    return { ...board, src: board.image && id ? pluginDataUrl(id, board.image) : '' };
   }
 
   #announce() {
@@ -355,6 +440,7 @@ export class Scene extends EventEmitter {
     for (const group of this.#scene?.groups ?? []) {
       for (const item of group.items) if (item.action) ids.add(item.action);
     }
+    for (const point of this.#scene?.board?.points ?? []) if (point.action) ids.add(point.action);
     return ids;
   }
 
@@ -395,6 +481,13 @@ export class Scene extends EventEmitter {
        * bar would be a control that describes the thing it should have shown.
        */
       sheet: answer.sheet === true,
+      /**
+       * Ask for the board to be opened, as `sheet` asks for the lists.
+       *
+       * Two flags rather than one `open: 'sheet'|'board'` because `sheet`
+       * already shipped, and a plugin written against it must keep working.
+       */
+      board: answer.board === true,
     };
   }
 }

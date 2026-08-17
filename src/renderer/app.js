@@ -1848,6 +1848,9 @@ function syncSceneBusy() {
   // them send one — so they are refused on the same terms. The dialog can be
   // open while a turn runs, since reading the bag is not doing anything.
   for (const row of $('sheet-body').querySelectorAll('.sheet-item.pressable')) row.disabled = state.streaming;
+  // Walking somewhere is a move like any other, so the map is refused on the
+  // same terms as the row of buttons.
+  for (const point of $('board').querySelectorAll('.board-point.pressable')) point.disabled = state.streaming;
 }
 
 /**
@@ -1879,9 +1882,10 @@ function paintScene(status = { active: false, scene: null }) {
   actions.hidden = !scene?.actions?.length;
 
   if (!scene) {
-    // A game that ended takes its sheet with it, or the dialog goes on
-    // describing a hero who is no longer anywhere.
+    // A game that ended takes its dialogs with it, or they go on describing a
+    // hero who is no longer anywhere.
     $('sheet-modal').hidden = true;
+    $('board-modal').hidden = true;
     return;
   }
 
@@ -1911,6 +1915,9 @@ function paintScene(status = { active: false, scene: null }) {
   // sheet was open — which is every turn, since a move changes the inventory —
   // would otherwise shut the dialog the player was reading.
   if (!$('sheet-modal').hidden) paintSheet();
+  // The board moves with every step, so this is the case that matters most:
+  // walking into the forest must move the marker under the open map.
+  if (!$('board-modal').hidden) paintBoard();
 }
 
 function paintSheet() {
@@ -1949,6 +1956,86 @@ function paintSheet() {
   }
 }
 
+/**
+ * The board: a picture with pressable places on it.
+ *
+ * The markers, the roads and the labels are built here from data rather than
+ * read off the image. A game's map can differ from run to run — this one
+ * shuffles which places connect — and a painted map would be confidently wrong
+ * two runs in three. Drawn from data they are always the roads that exist, the
+ * labels are legible and localised, and a marker is where the game says it is
+ * rather than where a painter happened to put it.
+ */
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function paintBoard() {
+  const board = sceneShowing() ? state.scene.scene.board : null;
+  const host = $('board');
+  host.replaceChildren();
+  if (!board) return;
+
+  $('board-title').textContent = state.scene.scene.title;
+  $('board-sub').textContent = state.scene.scene.subtitle;
+
+  if (board.src) {
+    const art = el('img', 'board-art');
+    art.src = board.src;
+    art.alt = '';
+    host.append(art);
+  }
+
+  /**
+   * The roads, in their own coordinate space.
+   *
+   * `viewBox="0 0 100 100"` with `preserveAspectRatio: none` means the points'
+   * percentages are the SVG's units too, so nothing here has to know how big
+   * the picture is or what shape it ended up.
+   */
+  const at = new Map(board.points.map((point) => [point.id, point]));
+  if (board.links.length) {
+    const roads = document.createElementNS(SVG_NS, 'svg');
+    roads.setAttribute('class', 'board-roads');
+    roads.setAttribute('viewBox', '0 0 100 100');
+    roads.setAttribute('preserveAspectRatio', 'none');
+    for (const link of board.links) {
+      const from = at.get(link.from);
+      const to = at.get(link.to);
+      if (!from || !to) continue;
+      const line = document.createElementNS(SVG_NS, 'line');
+      line.setAttribute('x1', String(from.x));
+      line.setAttribute('y1', String(from.y));
+      line.setAttribute('x2', String(to.x));
+      line.setAttribute('y2', String(to.y));
+      line.setAttribute('class', `board-road ${link.tone}`.trim());
+      roads.append(line);
+    }
+    host.append(roads);
+  }
+
+  for (const point of board.points) {
+    const marker = el(point.action ? 'button' : 'div', 'board-point');
+    if (point.here) marker.classList.add('here');
+    if (point.tone) marker.classList.add(point.tone);
+    marker.style.left = `${point.x}%`;
+    marker.style.top = `${point.y}%`;
+    marker.append(el('span', 'board-dot'));
+    marker.append(el('span', 'board-label', point.label));
+    if (point.note) marker.title = point.note;
+    if (point.action) {
+      marker.classList.add('pressable');
+      marker.disabled = state.streaming;
+      marker.addEventListener('click', () => pressAction(point.action));
+    }
+    host.append(marker);
+  }
+}
+
+function setBoard(open) {
+  const show = Boolean(open) && Boolean(sceneShowing() && state.scene.scene.board);
+  if (show) paintBoard();
+  $('board-modal').hidden = !show;
+}
+
 function setSheet(open) {
   const groups = sceneShowing() ? state.scene.scene.groups : [];
   const show = Boolean(open) && groups.length > 0;
@@ -1972,6 +2059,7 @@ async function pressAction(actionId) {
     // Asked for before anything is sent: a game that opens the bag and then
     // takes a turn should show the bag first, not after the reply lands.
     if (answer.sheet) setSheet(true);
+    if (answer.board) setBoard(true);
     // Sent from here, not from the main process, so a pressed button is an
     // ordinary message in the conversation this window has open.
     if (answer.submit) await submitPrompt(answer.submit);
@@ -1984,6 +2072,10 @@ async function pressAction(actionId) {
 function wireScene() {
   $('btn-scene-sheet').addEventListener('click', () => setSheet($('sheet-modal').hidden));
   $('btn-sheet-close').addEventListener('click', () => setSheet(false));
+  $('btn-board-close').addEventListener('click', () => setBoard(false));
+  $('board-modal').addEventListener('click', (event) => {
+    if (event.target === $('board-modal')) setBoard(false);
+  });
   $('sheet-modal').addEventListener('click', (event) => {
     // Only the backdrop closes it, as with the About box: a click on the box
     // itself must not dismiss the thing being read.
@@ -1991,7 +2083,10 @@ function wireScene() {
   });
 
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') setSheet(false);
+    if (event.key === 'Escape') {
+      setSheet(false);
+      setBoard(false);
+    }
     // The digits belong to the game, so they belong to its conversation too: a
     // hidden panel must not still answer the keyboard.
     if (!sceneShowing()) return;
@@ -2011,19 +2106,24 @@ function wireScene() {
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName)) return;
 
     const sheetOpen = !$('sheet-modal').hidden;
+    const boardOpen = !$('board-modal').hidden;
+    const mine = sheetOpen || boardOpen;
     // Any other dialog owns the keyboard. The shell approval one is a question
     // that has to be answered before anything else happens, and a digit
     // pressed over it must not quietly do something behind it.
-    if (!sheetOpen && [...document.querySelectorAll('.modal')].some((modal) => !modal.hidden)) return;
+    if (!mine && [...document.querySelectorAll('.modal')].some((modal) => !modal.hidden)) return;
 
+    // 0 is the sheet's, whichever dialog happens to be up: reading the bag with
+    // the map open should show the bag, not toggle something invisible.
     if (event.key === '0') {
       event.preventDefault();
+      setBoard(false);
       setSheet(!sheetOpen);
       return;
     }
-    // With the sheet up, the digits belong to nothing: reading the inventory
-    // and swinging a sword are different activities.
-    if (sheetOpen) return;
+    // With a dialog up, the digits belong to nothing: reading the inventory and
+    // swinging a sword are different activities.
+    if (mine) return;
 
     const action = (state.scene.scene.actions ?? []).find((entry) => entry.key === event.key);
     if (!action) return;

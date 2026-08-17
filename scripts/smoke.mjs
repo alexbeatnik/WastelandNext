@@ -1104,6 +1104,8 @@ async function checkScene(window) {
       if (id === 'item-sword') return { status: 'The sword is in your hand.' };
       // The only way a plugin can open the sheet: the dialog is the app's.
       if (id === 'peek') return { sheet: true };
+      if (id === 'map') return { board: true };
+      if (id === 'go-forest') return { status: 'Walking to the forest.' };
       return { status: 'The bag is open.' };
     },
   });
@@ -1128,7 +1130,16 @@ async function checkScene(window) {
       { id: 'look', label: 'Look around', hint: 'costs a turn' },
       { id: 'bag', label: 'Inventory' },
       { id: 'peek', label: 'Open sheet' },
+      { id: 'map', label: 'Map' },
     ],
+    board: {
+      points: [
+        { id: 'village', label: 'Village', x: 50, y: 80, here: true },
+        { id: 'forest', label: 'Forest', x: 60, y: 45, tone: 'good', action: 'go-forest' },
+        { id: 'tower', label: 'Tower', x: 25, y: 15 },
+      ],
+      links: [{ from: 'village', to: 'forest', tone: 'good' }, { from: 'forest', to: 'tower' }],
+    },
   });
   await new Promise((r) => setTimeout(r, 300));
 
@@ -1164,7 +1175,7 @@ async function checkScene(window) {
   check('a tone reaches the class list', drawn.tags.join() === 'scene-tag bad', drawn.tags.join());
   check(
     `the app put digits on the moves — ${drawn.buttons.map((b) => `${b.key}:${b.label}`).join(' ')}`,
-    JSON.stringify(drawn.buttons.map((b) => b.key)) === '["1","2","3"]',
+    JSON.stringify(drawn.buttons.map((b) => b.key)) === '["1","2","3","4"]',
     JSON.stringify(drawn.buttons),
   );
   check('the sheet is offered', drawn.sheetButton !== 'none', drawn.sheetButton);
@@ -1272,6 +1283,58 @@ async function checkScene(window) {
     return getComputedStyle(document.getElementById('sheet-modal')).display;
   })()`);
   check('and Escape shuts it', shut === 'none', shut);
+
+  /**
+   * The board: a picture with pressable places drawn over it.
+   *
+   * No image in this fixture, on purpose — the markers and roads *are* the map,
+   * and they have to be usable before any artwork exists. What this catches is
+   * a marker drawn where the game did not put it, or one that cannot be pressed.
+   */
+  const map = await window.webContents.executeJavaScript(`(async () => {
+    [...document.querySelectorAll('#scene-actions .scene-action')][3].click();
+    await new Promise((r) => setTimeout(r, 400));
+    const points = [...document.querySelectorAll('#board .board-point')].map((node) => ({
+      label: node.querySelector('.board-label').textContent,
+      tag: node.tagName,
+      here: node.classList.contains('here'),
+      left: node.style.left,
+      top: node.style.top,
+    }));
+    return {
+      open: getComputedStyle(document.getElementById('board-modal')).display,
+      points,
+      roads: document.querySelectorAll('#board .board-road').length,
+    };
+  })()`);
+  check('a move can open the board', map.open !== 'none', map.open);
+  check(
+    `every place is drawn where the game put it — ${map.points.map((p) => p.label).join(', ')}`,
+    map.points.length === 3 && map.points[0].left === '50%' && map.points[0].top === '80%',
+    JSON.stringify(map.points),
+  );
+  check('the one you are standing on is marked', map.points[0].here === true, JSON.stringify(map.points[0]));
+  check(
+    'only a place you can reach is a button',
+    map.points[1].tag === 'BUTTON' && map.points[2].tag === 'DIV',
+    JSON.stringify(map.points.map((p) => p.tag)),
+  );
+  check(`the roads are drawn too — ${map.roads}`, map.roads === 2);
+
+  // Counted from here rather than from before the map was opened: opening it is
+  // itself a press, and the delta is the only thing that says the click landed.
+  const beforeWalk = pressed.length;
+  const walked = await window.webContents.executeJavaScript(`(async () => {
+    document.querySelector('#board .board-point.pressable').click();
+    await new Promise((r) => setTimeout(r, 400));
+    return document.getElementById('status-line').textContent;
+  })()`);
+  check(`pressing a place walks there — "${walked}"`, pressed.length === beforeWalk + 1 && pressed.at(-1) === 'go-forest', JSON.stringify(pressed));
+
+  await window.webContents.executeJavaScript(`(async () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 200));
+  })()`);
 
   // A game asking for the sheet, which is the only way a plugin can open it.
   const asked = await window.webContents.executeJavaScript(`(async () => {

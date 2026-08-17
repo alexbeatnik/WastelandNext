@@ -107,12 +107,64 @@ test('a list row can be pressed when the game gave it something to do', async ()
 
   // Pressable rows are on offer exactly as the moves are — the same guard, so a
   // stale click on a bag emptied three turns ago is refused the same way.
-  assert.deepEqual(await scene.act('item-sword'), { status: 'In hand.', submit: '', sheet: false });
+  assert.deepEqual(await scene.act('item-sword'), { status: 'In hand.', submit: '', sheet: false, board: false });
   await assert.rejects(() => scene.act('item-herb'), /no longer on offer/);
 
   // And a move may ask for the sheet, which is the only way a plugin can.
-  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: true });
+  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: true, board: false });
   assert.deepEqual(pressed, ['item-sword', 'bag']);
+});
+
+test('a board is a picture with pressable places on it', async () => {
+  /**
+   * The markers, the roads and the labels are data, not paint. A game's map can
+   * differ from run to run — the one this was built for shuffles which places
+   * connect — so a painted map would be confidently wrong most of the time, and
+   * a marker would be wherever the artist put it rather than where the game says.
+   */
+  const pressed = [];
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: (id) => (pressed.push(id), { status: 'walking' }) });
+  scene.show({
+    board: {
+      image: 'maps/world.png',
+      points: [
+        { id: 'village', label: 'Village', x: 50, y: 84, here: true },
+        { id: 'forest', label: 'Forest', x: 58, y: 56, tone: 'good', action: 'go-forest' },
+        { id: 'tower', label: 'Tower', x: 200, y: -9 },
+      ],
+      links: [{ from: 'village', to: 'forest' }, { from: 'village', to: 'nowhere' }, { from: 'forest', to: 'forest' }],
+    },
+  });
+
+  const board = scene.status().scene.board;
+  assert.equal(board.src, 'wasteland-plugin://fantasy-rpg/%40data/maps/world.png', 'served from the data directory, which updates do not wipe');
+  assert.equal(board.points[0].here, true, 'you are here is its own fact, not a shade of good or bad');
+  assert.deepEqual([board.points[2].x, board.points[2].y], [100, 0], 'a marker is kept on the board');
+  assert.deepEqual(board.links, [{ from: 'village', to: 'forest', tone: '' }], 'a road to nowhere is a line off the edge');
+
+  // A place is on offer exactly as a move is — one guard, so they cannot drift.
+  assert.equal((await scene.act('go-forest')).status, 'walking');
+  await assert.rejects(() => scene.act('go-tower'), /no longer on offer/);
+  assert.deepEqual(pressed, ['go-forest']);
+});
+
+test('a board picture cannot point outside the plugin', () => {
+  const scene = new Scene();
+  scene.present({ pluginId: 'game', act: () => ({}) });
+  for (const image of ['../../secrets.png', '/etc/passwd', String.raw`C:\Windows\win.ini`, 'a/../../b.png']) {
+    scene.show({ board: { image, points: [] } });
+    assert.equal(scene.status().scene.board.src, '', image);
+  }
+  scene.show({ board: { image: 'ok/map.png', points: [] } });
+  assert.ok(scene.status().scene.board.src.endsWith('ok/map.png'));
+});
+
+test('a move can ask for the board, as it can for the sheet', async () => {
+  const scene = new Scene();
+  scene.present({ pluginId: 'game', act: () => ({ board: true }) });
+  scene.show({ actions: [{ id: 'map', label: 'Map' }] });
+  assert.deepEqual(await scene.act('map'), { status: '', submit: '', sheet: false, board: true });
 });
 
 test('a scene belongs to the conversation it was painted in', () => {
@@ -195,7 +247,7 @@ test('a button that is not on screen cannot be pressed', async () => {
   });
   scene.show({ actions: [{ id: 'look', label: 'Look' }] });
 
-  assert.deepEqual(await scene.act('look'), { status: '', submit: 'I look', sheet: false });
+  assert.deepEqual(await scene.act('look'), { status: '', submit: 'I look', sheet: false, board: false });
   await assert.rejects(() => scene.act('attack'), /no longer on offer/);
 
   scene.show({ actions: [{ id: 'attack', label: 'Attack' }] });
@@ -214,7 +266,7 @@ test('a plugin answering with nothing is answered with nothing', async () => {
   const scene = new Scene();
   scene.present({ pluginId: 'game', act: () => undefined });
   scene.show({ actions: [{ id: 'bag', label: 'Bag' }] });
-  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: false });
+  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: false, board: false });
 });
 
 test('a game cannot start a turn on its own', () => {

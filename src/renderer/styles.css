@@ -895,6 +895,116 @@ button.choice.chosen .choice-label::before {
   opacity: 0.45;
 }
 
+/* ---- the board ---- */
+
+.board-box {
+  max-width: 52rem;
+  width: min(52rem, 94vw);
+}
+
+.board {
+  position: relative;
+  width: 100%;
+  /* A shape to hold when there is no picture yet: the markers and the roads are
+     the map, and they must be usable before any artwork exists. */
+  aspect-ratio: 3 / 2;
+  border: 1px solid var(--amber-faint);
+  background: var(--bg-deep);
+  overflow: hidden;
+}
+
+.board-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Scenery, and it must read as scenery: the markers and labels on top are the
+     part that carries meaning. */
+  opacity: 0.55;
+}
+
+.board-roads {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.board-road {
+  stroke: var(--amber-faint);
+  stroke-width: 0.4;
+  stroke-dasharray: 2 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.board-road.good {
+  stroke: var(--ok);
+  stroke-width: 0.7;
+}
+
+.board-point {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.2rem 0.35rem;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--amber-dim);
+  font: inherit;
+  font-size: 0.78em;
+  white-space: nowrap;
+  text-shadow: 0 0 4px #000, 0 0 4px #000;
+}
+
+.board-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border: 1px solid currentColor;
+  background: var(--bg-deep);
+  border-radius: 50%;
+}
+
+/* Somewhere you can walk to from here. */
+.board-point.good {
+  color: var(--ok);
+}
+
+.board-point.good .board-dot {
+  background: var(--ok);
+}
+
+/* Where the piece stands. Deliberately the one colour on screen that is not
+   part of the amber palette — "you are here" has to be findable at a glance
+   among a dozen markers, and a brighter amber would only be another amber. */
+.board-point.here {
+  color: #5cc8ff;
+  border-color: #5cc8ff;
+}
+
+.board-point.here .board-dot {
+  background: #5cc8ff;
+  box-shadow: 0 0 8px #5cc8ff;
+}
+
+.board-point.pressable {
+  cursor: pointer;
+}
+
+.board-point.pressable:hover:not(:disabled) {
+  border-color: currentColor;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.board-point:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ---- the sheet ---- */
 
 .sheet-box {

@@ -18,6 +18,7 @@ import { server } from './llm/server.mjs';
 import { downloadLlamaServer, llamaServerStatus } from './llm/tools.mjs';
 import { BrowserBridge, browser, engineAvailable } from './browser/manul-browser.mjs';
 import { PluginHost } from './plugins/host.mjs';
+import { pluginDataDir } from './paths.mjs';
 import { serveProtocols } from './plugins/protocol.mjs';
 import * as registry from './plugins/registry.mjs';
 import { audio } from './audio.mjs';
@@ -68,6 +69,9 @@ const agent = new Agent({ server, plugins });
 export function serveAssets() {
   serveProtocols({
     pluginDir: (id) => plugins.dirFor(id),
+    // The tree updates do not wipe. Only asked for by name, so a plugin that
+    // never wanted one never causes an empty directory to be created.
+    pluginData: (id) => (plugins.dirFor(id) ? pluginDataDir(id) : null),
     mediaAllows: (path) => audio.allows(path),
   });
 }

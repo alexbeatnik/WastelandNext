@@ -534,6 +534,35 @@ Optional on purpose — a journal is not an inventory, and an entry that could b
 one that plainly cannot be. Those ids are on offer exactly as the moves are, so a row from a bag emptied three turns ago
 is refused with the same sentence.
 
+**A board is a picture with pressable places on it.** For a map, a chart, anything positional:
+
+```js
+board: {
+  image: 'map.png',                     // a file in ctx.dataDir(), or omit it
+  points: [
+    { id: 'village', label: 'Village', x: 50, y: 84, here: true },
+    { id: 'forest',  label: 'Forest',  x: 58, y: 56, tone: 'good', action: 'go-forest' },
+    { id: 'tower',   label: 'Tower',   x: 55, y: 11 },              // seen, not reachable
+  ],
+  links: [{ from: 'village', to: 'forest', tone: 'good' }],
+}
+```
+
+`x` and `y` are percentages, so the same numbers work at any size. `here` marks where the piece stands — its own fact
+rather than a fourth tone, because "you are here" is not a shade of good or bad. A point with an `action` is a button;
+one without is a label. A link naming a point that is not on the board is dropped rather than drawn off the edge.
+
+**The picture is scenery and nothing else.** The markers, the roads and the labels are drawn by the app over the top,
+from this data. Do not paint them into the image: a game whose map differs from run to run — a shuffled layout, a road
+that opens later — would be showing something false, and a marker would land where the artist put it rather than where
+you said. Generate a background, and let this be the map.
+
+`image` names a file in **`ctx.dataDir()`**, not in your installed tree: that tree is deleted and rewritten on every
+update, so a map the user generated themselves would disappear on a version bump. Omit it entirely and the board still
+works — the markers and roads are the map, the picture only makes it pleasant.
+
+**`act` may answer `{board: true}`** to open it, exactly as `{sheet: true}` opens the lists.
+
 **`act` may answer `{sheet: true}`** to open the sheet. It is the only way you can: the dialog belongs to the app, so an
 inventory button that merely wrote a line in the status bar would be a control describing the thing it should have
 shown. Honoured before `submit`, so a move that opens the bag *and* takes a turn shows the bag first.
@@ -803,6 +832,7 @@ Declare the **lowest** version that has everything you use. Declaring a higher o
 | 5 | The `mic` service, `select` settings, `ctx.progress`, `ctx.dataDir()` |
 | 6 | The `scene` service — a drawn panel, a pinned row of moves and their hotkeys |
 | 7 | Pressable list rows (`item.action`) and `act` answering `{sheet: true}` |
+| 8 | `board` — a picture with pressable places, and files served from `ctx.dataDir()` |
 
 **Not every addition moves the number.** `category` arrived after 5 and did not: a build that has never heard of the
 field ignores it and loads the plugin exactly as before, so declaring 6 for it would lock your plugin out of every
