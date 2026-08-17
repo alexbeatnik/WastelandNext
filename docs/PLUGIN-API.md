@@ -529,6 +529,15 @@ all, which is the point: opening an inventory should not cost a turn or a single
 
 Nothing here can start a turn on its own. A move goes out because somebody pressed a key, and `act` is the only way in.
 
+**The panel lives in the conversation the game is played in.** A scene shown during a turn is claimed by that turn's
+chat and drawn only there; open another conversation and it is gone, along with its hotkeys. You are never told which
+chat that is and never need to be — the app stamps it.
+
+The corollary is that **a scene shown outside a turn claims no conversation and is drawn nowhere.** Painting at
+activation therefore shows nothing: at that moment nothing in the app knows where the game is being played, and
+guessing would put your panel over somebody's unrelated chat. Draw when a turn runs. Your state is not at risk either
+way — it is in `ctx.state`, and your `ctx.context()` fragment reaches the model whether or not a panel is on screen.
+
 One plugin drives the panel at a time and the newcomer wins, as with the audio transport. When yours is switched off
 the panel goes with it — and an action id that is no longer on screen is refused, so a stale click cannot make a move
 in a world that has moved on.

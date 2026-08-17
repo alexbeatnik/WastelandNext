@@ -229,6 +229,12 @@ different from anything, so the weaker check passed on the bug.
 
 **`submitPrompt` gives the composer its text back only when the composer is where it came from.** A move made by pressing a button has nowhere to return to, and dropping the game's own phrasing into the box the player types in is worse than losing it.
 
+**A game is played in a conversation, and the panel belongs there with it.** The first version tied the scene to nothing, so the strip and the row of moves were drawn over every chat in the app: opening a new conversation gave an empty transcript under a character sheet and a list of moves, offering a game that was not being played. `show()` stamps the scene with the conversation the turn is running in, `ipc.mjs` supplies that off `turn:start` because it is the only place that sees both, and the renderer draws nothing unless the open chat is that one. Both ids must be non-empty rather than merely equal — `state.chatId` is `''` on a new conversation, and "no chat" must not match "no game".
+
+**A scene painted outside a turn claims no conversation, and one that claimed none is drawn nowhere.** Activation and timers both land there. Nothing outside a turn knows which chat a game is being played in, and taking "whichever is open" is exactly how the panel got everywhere in the first place. The cost is that a run reopened after a restart has no panel until the first move; that is a smaller wrong answer than a hero on screen for somebody who opened the app to ask about something else, and the run itself is never at risk — it is in the plugin's save, and `context()` hands it to the model whether or not anything is drawn.
+
+**The hotkeys are hidden with the panel.** A digit answered by a panel the user cannot see would make a move in a conversation the game is not being played in. `sceneShowing()` is the single answer to "is this game on screen", and the keyboard, the sheet and the paint all ask it.
+
 **A scene with no presenter offers no moves.** Same rule as the transport's button list: a driver that went away takes its buttons with it. What the hero looked like stays on screen — that is a readable end state — but a control that is drawn and cannot work is worse than one that is absent.
 
 **A button that is not on screen cannot be pressed.** `act` refuses an id that is not in the current scene. A click carries an id the renderer read off a button, and a button can outlive the scene that drew it; a stale one firing a move in a world three turns further on is impossible to reproduce and easy to refuse.

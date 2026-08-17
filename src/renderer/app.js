@@ -258,6 +258,9 @@ async function loadChat(id) {
   // across a switch — but whether *this* chat already holds it changes with the
   // chat, and that is what the chips say.
   paintAttachments(state.attachments);
+  // A game belongs to the conversation it is played in, so the panel goes with
+  // the switch — same reason the transcript and the meter do.
+  paintScene(state.scene);
   $('chat-log').replaceChildren();
   if (state.chatId) {
     const chat = await api.chats.read(state.chatId);
@@ -1843,9 +1846,28 @@ function syncSceneBusy() {
   for (const button of $('scene-actions').querySelectorAll('.scene-action')) button.disabled = state.streaming;
 }
 
+/**
+ * Does this scene belong to the conversation that is open?
+ *
+ * A game is played in a conversation, and the panel belongs there with it. The
+ * first version drew the strip over every chat in the app, because the scene
+ * lives in the main process and nothing tied it to anything: open a new
+ * conversation with an empty transcript and there was still a character sheet
+ * and a row of moves, offering a game that was not being played.
+ *
+ * An unclaimed scene — one painted outside any turn, which is what activation
+ * does — shows nowhere. `state.chatId` is '' on a new conversation, so the two
+ * must both be non-empty rather than merely equal, or "no chat" and "no game"
+ * would match each other.
+ */
+function sceneShowing() {
+  const owner = state.scene?.chatId ?? '';
+  return Boolean(state.scene?.scene && owner && owner === state.chatId);
+}
+
 function paintScene(status = { active: false, scene: null }) {
   state.scene = status;
-  const scene = status.scene;
+  const scene = sceneShowing() ? status.scene : null;
 
   $('scene').hidden = !scene;
   const actions = $('scene-actions');
@@ -1916,7 +1938,7 @@ function paintSheet() {
 }
 
 function setSheet(open) {
-  const groups = state.scene?.scene?.groups ?? [];
+  const groups = sceneShowing() ? state.scene.scene.groups : [];
   const show = Boolean(open) && groups.length > 0;
   if (show) paintSheet();
   $('sheet-modal').hidden = !show;
@@ -1955,7 +1977,9 @@ function wireScene() {
 
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') setSheet(false);
-    if (!state.scene?.scene) return;
+    // The digits belong to the game, so they belong to its conversation too: a
+    // hidden panel must not still answer the keyboard.
+    if (!sceneShowing()) return;
     if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || event.isComposing) return;
 
     /**
@@ -2555,6 +2579,10 @@ function handleEvent(payload) {
       // The first message of a session is what creates the chat, so this is
       // where a new conversation gets its id.
       if (payload.chatId) state.chatId = payload.chatId;
+      // A game started in a fresh conversation is claimed by the id that only
+      // arrives here; without this the panel would stay hidden for the whole
+      // turn that summoned it.
+      paintScene(state.scene);
       break;
 
     case 'reply:start':

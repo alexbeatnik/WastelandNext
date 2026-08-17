@@ -149,7 +149,15 @@ function showDesktopNotice(notice) {
 export function registerIpc(windowGetter) {
   getWindow = windowGetter;
 
-  agent.on('event', ({ event, ...payload }) => send(event, payload));
+  agent.on('event', ({ event, ...payload }) => {
+    // Which conversation a turn belongs to is knowable here and nowhere else:
+    // the agent announces it, the scene service must not learn what a chat is,
+    // and a plugin is never told. Stamped on the scene so a game panel stays in
+    // the conversation the game is played in.
+    if (event === 'turn:start') scene.setTurn(payload.chatId);
+    else if (event === 'turn:end') scene.setTurn('');
+    send(event, payload);
+  });
   plugins.on('changed', (list) =>
     send('plugins:changed', { plugins: list, themes: plugins.themes(), locales: plugins.locales() }),
   );

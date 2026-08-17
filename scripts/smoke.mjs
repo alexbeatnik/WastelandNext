@@ -1073,6 +1073,25 @@ async function checkScene(window) {
   say('');
   say('The game panel');
 
+  /**
+   * A game is played in a conversation, so one has to be open.
+   *
+   * The panel is drawn only in the chat the scene was painted in, and a scene
+   * painted outside a turn belongs to nobody — so the seeded conversation is
+   * opened first and the service is told a turn is running in it, which is what
+   * `ipc.mjs` does off `turn:start` when there is a real one.
+   */
+  const chatId = await window.webContents.executeJavaScript(`(async () => {
+    const list = await window.wasteland.chats.list();
+    const pick = document.querySelector('#chat-menu .chat-row .chat-pick');
+    if (!pick || !list.length) return '';
+    pick.click();
+    await new Promise((r) => setTimeout(r, 400));
+    return list[0].id;
+  })()`);
+  check('a conversation to play in', Boolean(chatId), 'no seeded chat to open');
+  scene.setTurn(chatId);
+
   const pressed = [];
   scene.present({
     pluginId: 'smoke-game',
@@ -1260,6 +1279,49 @@ async function checkScene(window) {
   check(`the transcript survives a game on a 900×700 window — log ${narrow.log}px`, narrow.log >= 200, JSON.stringify(narrow));
   check('and the row of moves wraps rather than widening the page', narrow.overflow <= 1, `${narrow.overflow}px`);
   window.setContentSize(1280, 860);
+
+  /**
+   * A game does not follow you into another conversation.
+   *
+   * The reported bug: the strip and the moves were drawn over every chat in the
+   * app, so opening a new conversation left a character sheet and a row of
+   * moves above an empty transcript, offering a game that was not being played.
+   * NEW CHAT is the shortest way to be somewhere else.
+   */
+  await window.webContents.executeJavaScript(`document.getElementById('btn-new-chat').click()`);
+  await new Promise((r) => setTimeout(r, 400));
+  const elsewhere = await window.webContents.executeJavaScript(`(() => ({
+    panel: getComputedStyle(document.getElementById('scene')).display,
+    row: getComputedStyle(document.getElementById('scene-actions')).display,
+    sheet: getComputedStyle(document.getElementById('sheet-modal')).display,
+  }))()`);
+  check(
+    'a new conversation has no game in it',
+    elsewhere.panel === 'none' && elsewhere.row === 'none',
+    JSON.stringify(elsewhere),
+  );
+
+  // And the keyboard goes with it: a hidden panel that still answered a digit
+  // would make a move in a conversation the game is not being played in.
+  const beforeKeys = pressed.length;
+  await window.webContents.executeJavaScript(`(async () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '0', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+  })()`);
+  const quiet = await window.webContents.executeJavaScript(
+    `getComputedStyle(document.getElementById('sheet-modal')).display`,
+  );
+  check('and its hotkeys are silent there', pressed.length === beforeKeys, JSON.stringify(pressed));
+  check('including the one that opens the sheet', quiet === 'none', quiet);
+
+  // Back where the game is, the panel is back with it.
+  const back = await window.webContents.executeJavaScript(`(async () => {
+    document.querySelector('#chat-menu .chat-row .chat-pick').click();
+    await new Promise((r) => setTimeout(r, 500));
+    return getComputedStyle(document.getElementById('scene')).display;
+  })()`);
+  check('returning to the game brings the panel back', back !== 'none', back);
 
   // Switching the game off takes the panel with it — the same rule the audio
   // bar follows, and the reason `releasePlugin` exists on every service.

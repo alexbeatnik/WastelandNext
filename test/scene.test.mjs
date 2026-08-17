@@ -80,6 +80,43 @@ test('a label is one line, however it was written', () => {
   assert.ok(scene.actions[0].label.length < 100);
 });
 
+test('a scene belongs to the conversation it was painted in', () => {
+  // The first version drew the strip over every chat in the app: open a new
+  // conversation with an empty transcript and there was still a character sheet
+  // and a row of moves, offering a game that was not being played.
+  const scene = new Scene();
+  scene.present({ pluginId: 'game', act: () => ({}) });
+
+  scene.show({ title: 'before any turn' });
+  assert.equal(scene.status().chatId, '', 'nothing outside a turn knows which chat this is');
+
+  scene.setTurn('chat-a');
+  scene.show({ title: 'a move' });
+  assert.equal(scene.status().chatId, 'chat-a');
+
+  // Between turns the claim stands: a timer redrawing the panel must not hand
+  // the game to whichever conversation happens to be open.
+  scene.setTurn('');
+  scene.show({ title: 'a tick' });
+  assert.equal(scene.status().chatId, 'chat-a');
+
+  // A turn in a different conversation only moves it if the game draws there.
+  scene.setTurn('chat-b');
+  assert.equal(scene.status().chatId, 'chat-a', 'a turn elsewhere is not a move in this game');
+  scene.show({ title: 'played here now' });
+  assert.equal(scene.status().chatId, 'chat-b');
+});
+
+test('a cleared scene belongs to nobody', () => {
+  const scene = new Scene();
+  scene.present({ pluginId: 'game', act: () => ({}) });
+  scene.setTurn('chat-a');
+  scene.show({ title: 'a place' });
+  scene.clear();
+  assert.equal(scene.status().chatId, '');
+  assert.equal(scene.status().active, false);
+});
+
 test('a scene with no presenter offers no moves', () => {
   // The rule the audio bar already follows: a driver that went away takes its
   // buttons with it. What the hero looked like is still worth showing — that is
@@ -152,7 +189,7 @@ test('a game cannot start a turn on its own', () => {
   const surface = Object.getOwnPropertyNames(Object.getPrototypeOf(scene));
   assert.deepEqual(
     surface.filter((name) => name !== 'constructor').sort(),
-    ['act', 'clear', 'present', 'releasePlugin', 'show', 'status'],
+    ['act', 'clear', 'present', 'releasePlugin', 'setTurn', 'show', 'status'],
   );
 });
 

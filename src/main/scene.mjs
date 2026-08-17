@@ -198,12 +198,31 @@ export class Scene extends EventEmitter {
   #scene = null;
   /** `{pluginId, pluginName, act}` — whoever is driving. */
   #presenter = null;
+  /**
+   * The conversation a turn is running in, while one is.
+   *
+   * Set from `ipc.mjs`, which is the only place that sees both a turn starting
+   * and this object. The service itself has no idea what a conversation is and
+   * should not learn: it draws a panel.
+   */
+  #turnChat = '';
+  /**
+   * The conversation this scene was last painted in.
+   *
+   * A game is played in a conversation, and the panel belongs there with it.
+   * Without this the strip was drawn over every chat in the app — including a
+   * brand new one with an empty transcript, where a character sheet and a row
+   * of moves are an offer to play a game that is not there.
+   */
+  #chatId = '';
 
   status() {
     return {
       active: Boolean(this.#scene),
       pluginId: this.#presenter?.pluginId ?? '',
       pluginName: this.#presenter?.pluginName ?? '',
+      /** Empty means "no conversation has claimed this", which draws nothing. */
+      chatId: this.#chatId,
       scene: this.#scene
         ? {
             ...this.#scene,
@@ -240,11 +259,35 @@ export class Scene extends EventEmitter {
     this.#announce();
   }
 
-  /** Put a scene on screen, replacing whatever was there. */
+  /**
+   * Which conversation a turn is running in, or '' between turns.
+   *
+   * Told rather than asked, because the answer lives in the agent and this file
+   * must stay free of everything but the panel.
+   */
+  setTurn(chatId) {
+    this.#turnChat = String(chatId ?? '');
+  }
+
+  /**
+   * Put a scene on screen, replacing whatever was there.
+   *
+   * A scene painted during a turn belongs to that turn's conversation. One
+   * painted outside a turn — at activation, off a timer — keeps whichever
+   * conversation claimed it last, and claims none if there has not been one:
+   * nothing outside a turn knows which chat a game is being played in, and
+   * guessing "the one that happens to be open" would put a hero on screen for
+   * somebody who opened the app to ask about something else.
+   *
+   * The cost is that a run reopened after a restart shows no panel until the
+   * first move, which is a smaller wrong answer than a panel over every
+   * conversation in the app.
+   */
   show(scene) {
     const next = normaliseScene(scene);
     if (!next) return this.status();
     this.#scene = next;
+    if (this.#turnChat) this.#chatId = this.#turnChat;
     this.#announce();
     return this.status();
   }
@@ -252,6 +295,7 @@ export class Scene extends EventEmitter {
   /** No game running, panel gone. */
   clear() {
     this.#scene = null;
+    this.#chatId = '';
     this.#announce();
     return this.status();
   }
