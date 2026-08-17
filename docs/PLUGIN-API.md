@@ -518,6 +518,26 @@ A meter with no `max` is drawn as a bare number, not as a bar filled to an imagi
 **[ SHEET ]** button and in no other place, so a long inventory never competes with the transcript; `empty` is your
 words for an empty one, since only you know whether the sentence is "nothing on you" or "the journal is blank".
 
+**A list row can be a control.** Give an item an `action` and it is drawn as a button that calls `act` with that id:
+
+```js
+groups: [{
+  label: 'ITEMS',
+  items: [
+    { label: 'Notched sword', note: 'in hand — press to put away', tone: 'good', action: 'item-sword' },
+    { label: 'Herb',          note: 'press to use',                 action: 'item-herb' },
+  ],
+}]
+```
+
+Optional on purpose — a journal is not an inventory, and an entry that could be clicked and did nothing is worse than
+one that plainly cannot be. Those ids are on offer exactly as the moves are, so a row from a bag emptied three turns ago
+is refused with the same sentence.
+
+**`act` may answer `{sheet: true}`** to open the sheet. It is the only way you can: the dialog belongs to the app, so an
+inventory button that merely wrote a line in the status bar would be a control describing the thing it should have
+shown. Honoured before `submit`, so a move that opens the bag *and* takes a turn shows the bag first.
+
 **The app assigns the hotkeys.** The first nine actions get `1`–`9` by position; you do not ask for a key, and two
 actions cannot collide over one. `0` opens the sheet. Every digit is ignored while the composer has focus — a typed
 sentence must not make a move.
@@ -782,6 +802,7 @@ Declare the **lowest** version that has everything you use. Declaring a higher o
 | 4 | The `notify` service, and `ctx.state` — the plugin's own JSON document |
 | 5 | The `mic` service, `select` settings, `ctx.progress`, `ctx.dataDir()` |
 | 6 | The `scene` service — a drawn panel, a pinned row of moves and their hotkeys |
+| 7 | Pressable list rows (`item.action`) and `act` answering `{sheet: true}` |
 
 **Not every addition moves the number.** `category` arrived after 5 and did not: a build that has never heard of the
 field ignores it and loads the plugin exactly as before, so declaring 6 for it would lock your plugin out of every

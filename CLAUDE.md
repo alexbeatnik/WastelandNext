@@ -235,6 +235,10 @@ different from anything, so the weaker check passed on the bug.
 
 **The hotkeys are hidden with the panel.** A digit answered by a panel the user cannot see would make a move in a conversation the game is not being played in. `sceneShowing()` is the single answer to "is this game on screen", and the keyboard, the sheet and the paint all ask it.
 
+**A list row is a control only when the game gave it one.** An inventory is what `action` on an item exists for: putting the sword in your hand is a thing to do to a row, not a move to pick off a bar. It is optional because a journal is not an inventory, and an entry that could be clicked and did nothing would be worse than one that plainly cannot be. `#offered()` folds those ids in with the moves', so a stale click on a bag emptied three turns ago is refused exactly as a stale move is.
+
+**`sheet: true` is the only way a plugin can open the dialog.** The sheet is the app's, so a game asking to "look in the bag" had no way to show one — an inventory button that only wrote a line in the status bar would be a control describing the thing it should have shown. It is honoured before `submit`, so a move that opens the bag *and* takes a turn shows the bag first rather than after the reply lands.
+
 **A scene with no presenter offers no moves.** Same rule as the transport's button list: a driver that went away takes its buttons with it. What the hero looked like stays on screen — that is a readable end state — but a control that is drawn and cannot work is worse than one that is absent.
 
 **A button that is not on screen cannot be pressed.** `act` refuses an id that is not in the current scene. A click carries an id the renderer read off a button, and a button can outlive the scene that drew it; a stale one firing a move in a world three turns further on is impossible to reproduce and easy to refuse.

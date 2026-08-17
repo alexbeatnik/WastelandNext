@@ -80,6 +80,41 @@ test('a label is one line, however it was written', () => {
   assert.ok(scene.actions[0].label.length < 100);
 });
 
+test('a list row can be pressed when the game gave it something to do', async () => {
+  // A list is not always only a list. An inventory is the case: putting the
+  // sword in your hand is a thing to do to a row, not a move to pick off a bar.
+  const pressed = [];
+  const scene = new Scene();
+  scene.present({
+    pluginId: 'game',
+    act: (id) => {
+      pressed.push(id);
+      return id === 'bag' ? { sheet: true } : { status: 'In hand.' };
+    },
+  });
+  scene.show({
+    actions: [{ id: 'bag', label: 'Inventory' }],
+    groups: [
+      { label: 'ITEMS', items: [{ label: 'Sword', action: 'item-sword' }, { label: 'Herb' }] },
+      { label: 'JOURNAL', items: [{ label: 'Day 1', note: 'arrived' }] },
+    ],
+  });
+
+  const drawn = scene.status().scene;
+  assert.equal(drawn.groups[0].items[0].action, 'item-sword');
+  assert.equal(drawn.groups[0].items[1].action, '', 'a row with nothing to do stays a row');
+  assert.equal(drawn.groups[1].items[0].action, '');
+
+  // Pressable rows are on offer exactly as the moves are — the same guard, so a
+  // stale click on a bag emptied three turns ago is refused the same way.
+  assert.deepEqual(await scene.act('item-sword'), { status: 'In hand.', submit: '', sheet: false });
+  await assert.rejects(() => scene.act('item-herb'), /no longer on offer/);
+
+  // And a move may ask for the sheet, which is the only way a plugin can.
+  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: true });
+  assert.deepEqual(pressed, ['item-sword', 'bag']);
+});
+
 test('a scene belongs to the conversation it was painted in', () => {
   // The first version drew the strip over every chat in the app: open a new
   // conversation with an empty transcript and there was still a character sheet
@@ -160,7 +195,7 @@ test('a button that is not on screen cannot be pressed', async () => {
   });
   scene.show({ actions: [{ id: 'look', label: 'Look' }] });
 
-  assert.deepEqual(await scene.act('look'), { status: '', submit: 'I look' });
+  assert.deepEqual(await scene.act('look'), { status: '', submit: 'I look', sheet: false });
   await assert.rejects(() => scene.act('attack'), /no longer on offer/);
 
   scene.show({ actions: [{ id: 'attack', label: 'Attack' }] });
@@ -179,7 +214,7 @@ test('a plugin answering with nothing is answered with nothing', async () => {
   const scene = new Scene();
   scene.present({ pluginId: 'game', act: () => undefined });
   scene.show({ actions: [{ id: 'bag', label: 'Bag' }] });
-  assert.deepEqual(await scene.act('bag'), { status: '', submit: '' });
+  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: false });
 });
 
 test('a game cannot start a turn on its own', () => {
@@ -188,7 +223,7 @@ test('a game cannot start a turn on its own', () => {
   const scene = new Scene();
   const surface = Object.getOwnPropertyNames(Object.getPrototypeOf(scene));
   assert.deepEqual(
-    surface.filter((name) => name !== 'constructor').sort(),
+    surface.filter((name) => name !== 'constructor' && !name.startsWith('#')).sort(),
     ['act', 'clear', 'present', 'releasePlugin', 'setTurn', 'show', 'status'],
   );
 });

@@ -1844,6 +1844,10 @@ function actionNode(action) {
  */
 function syncSceneBusy() {
   for (const button of $('scene-actions').querySelectorAll('.scene-action')) button.disabled = state.streaming;
+  // The sheet's pressable rows are the same kind of thing as a move — some of
+  // them send one — so they are refused on the same terms. The dialog can be
+  // open while a turn runs, since reading the bag is not doing anything.
+  for (const row of $('sheet-body').querySelectorAll('.sheet-item.pressable')) row.disabled = state.streaming;
 }
 
 /**
@@ -1927,9 +1931,17 @@ function paintSheet() {
       box.append(el('div', 'sheet-empty', group.empty || '—'));
     } else {
       for (const item of group.items) {
-        const row = el('div', `sheet-item ${item.tone}`.trim());
+        // A row is a button only when the game gave it something to do. A
+        // journal entry that could be clicked and did nothing would be worse
+        // than one that plainly cannot be.
+        const row = el(item.action ? 'button' : 'div', `sheet-item ${item.tone}`.trim());
         row.append(el('span', 'sheet-item-label', item.label));
         if (item.note) row.append(el('span', 'sheet-item-note', item.note));
+        if (item.action) {
+          row.classList.add('pressable');
+          row.disabled = state.streaming;
+          row.addEventListener('click', () => pressAction(item.action));
+        }
         box.append(row);
       }
     }
@@ -1957,6 +1969,9 @@ async function pressAction(actionId) {
   try {
     const answer = await api.scene.act(actionId);
     if (answer.status) status(answer.status);
+    // Asked for before anything is sent: a game that opens the bag and then
+    // takes a turn should show the bag first, not after the reply lands.
+    if (answer.sheet) setSheet(true);
     // Sent from here, not from the main process, so a pressed button is an
     // ordinary message in the conversation this window has open.
     if (answer.submit) await submitPrompt(answer.submit);

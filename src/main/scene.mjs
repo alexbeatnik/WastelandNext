@@ -164,7 +164,22 @@ export function normaliseScene(raw) {
     const items = [];
     for (const item of list(entry?.items, MAX_ITEMS)) {
       const itemLabel = text(item?.label, MAX_LABEL);
-      if (itemLabel) items.push({ label: itemLabel, note: text(item?.note, MAX_NOTE), tone: tone(item?.tone) });
+      if (!itemLabel) continue;
+      items.push({
+        label: itemLabel,
+        note: text(item?.note, MAX_NOTE),
+        tone: tone(item?.tone),
+        /**
+         * An action id, which turns the row into something pressable.
+         *
+         * A list is not always only a list: an inventory is the case that made
+         * this necessary, where "wearing the sword" is a thing to do to a row
+         * rather than a move to pick off a bar. Optional, so a journal stays a
+         * journal — an entry that could be clicked and did nothing would be
+         * worse than one that plainly cannot.
+         */
+        action: text(item?.action, MAX_ID),
+      });
     }
     scene.groups.push({
       label,
@@ -326,12 +341,21 @@ export class Scene extends EventEmitter {
    * on is exactly the class of bug that is impossible to reproduce and easy to
    * prevent.
    */
+  /** Every id currently pressable: the moves, and any list row that is one. */
+  #offered() {
+    const ids = new Set((this.#scene?.actions ?? []).map((action) => action.id));
+    for (const group of this.#scene?.groups ?? []) {
+      for (const item of group.items) if (item.action) ids.add(item.action);
+    }
+    return ids;
+  }
+
   async act(actionId) {
     const presenter = this.#presenter;
     if (!presenter) throw new Error('no game is running');
 
     const id = text(actionId, MAX_ID);
-    if (!this.#scene?.actions.some((action) => action.id === id)) {
+    if (!this.#offered().has(id)) {
       throw new Error('that action is no longer on offer');
     }
 
@@ -355,6 +379,14 @@ export class Scene extends EventEmitter {
        * its own.
        */
       submit: text(answer.submit, MAX_SUBMIT),
+      /**
+       * Ask for the sheet to be opened.
+       *
+       * The dialog is the app's, so a plugin has no other way to say "look in
+       * the bag" — and an inventory button that only wrote a line in the status
+       * bar would be a control that describes the thing it should have shown.
+       */
+      sheet: answer.sheet === true,
     };
   }
 }

@@ -938,6 +938,32 @@ button.choice.chosen .choice-label::before {
   padding: 0.05rem 0;
 }
 
+/* A row the game gave something to do. It is a real <button>, so it keeps the
+   keyboard and the focus ring; everything the base button rule would impose on
+   a list is taken back off, because this has to read as a line in an inventory
+   rather than as a control bolted into one. */
+.sheet-item.pressable {
+  width: 100%;
+  text-align: left;
+  align-items: baseline;
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 0.05rem 0.3rem;
+  margin: 0 -0.3rem;
+  font: inherit;
+  white-space: normal;
+}
+
+.sheet-item.pressable:hover:not(:disabled) {
+  background: var(--btn-bg);
+  border-color: var(--amber-dim);
+}
+
+.sheet-item.pressable:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .sheet-item-label {
   flex: 0 0 auto;
 }

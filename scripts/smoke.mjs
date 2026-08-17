@@ -1100,7 +1100,11 @@ async function checkScene(window) {
       pressed.push(id);
       // One move that costs a turn and one that only redraws — the two kinds a
       // game has, and the whole reason `submit` is optional.
-      return id === 'look' ? { submit: 'I look around' } : { status: 'The bag is open.' };
+      if (id === 'look') return { submit: 'I look around' };
+      if (id === 'item-sword') return { status: 'The sword is in your hand.' };
+      // The only way a plugin can open the sheet: the dialog is the app's.
+      if (id === 'peek') return { sheet: true };
+      return { status: 'The bag is open.' };
     },
   });
   scene.show({
@@ -1114,12 +1118,16 @@ async function checkScene(window) {
     fields: [{ label: 'QUEST', value: 'find the hunters' }],
     tags: [{ label: 'BLEEDING', tone: 'bad' }],
     groups: [
-      { label: 'ITEMS', items: [{ label: 'Notched sword', note: 'a weapon' }, { label: 'Herb' }] },
+      // One row the game gave something to do, one it did not. A journal entry
+      // that could be clicked and did nothing would be worse than one that
+      // plainly cannot be.
+      { label: 'ITEMS', items: [{ label: 'Notched sword', note: 'a weapon', action: 'item-sword' }, { label: 'Herb' }] },
       { label: 'JOURNAL', items: [], empty: 'nothing written down yet' },
     ],
     actions: [
       { id: 'look', label: 'Look around', hint: 'costs a turn' },
       { id: 'bag', label: 'Inventory' },
+      { id: 'peek', label: 'Open sheet' },
     ],
   });
   await new Promise((r) => setTimeout(r, 300));
@@ -1156,7 +1164,7 @@ async function checkScene(window) {
   check('a tone reaches the class list', drawn.tags.join() === 'scene-tag bad', drawn.tags.join());
   check(
     `the app put digits on the moves — ${drawn.buttons.map((b) => `${b.key}:${b.label}`).join(' ')}`,
-    JSON.stringify(drawn.buttons.map((b) => b.key)) === '["1","2"]',
+    JSON.stringify(drawn.buttons.map((b) => b.key)) === '["1","2","3"]',
     JSON.stringify(drawn.buttons),
   );
   check('the sheet is offered', drawn.sheetButton !== 'none', drawn.sheetButton);
@@ -1224,12 +1232,58 @@ async function checkScene(window) {
     JSON.stringify(sheet.empty),
   );
 
+  /**
+   * A list row that is also a control.
+   *
+   * An inventory is the case this exists for: putting the sword in your hand is
+   * a thing to do to a row, not a move to pick off a bar. The row next to it has
+   * no action and must stay a row — a journal entry that could be clicked and
+   * did nothing would be worse than one that plainly cannot be.
+   */
+  const rows = await window.webContents.executeJavaScript(`(() => {
+    const items = [...document.querySelectorAll('#sheet-body .sheet-item')];
+    return items.map((node) => ({ tag: node.tagName, pressable: node.classList.contains('pressable') }));
+  })()`);
+  check(
+    'a row with something to do is a button, and one without is not',
+    rows[0]?.tag === 'BUTTON' && rows[0]?.pressable === true && rows[1]?.tag === 'DIV',
+    JSON.stringify(rows),
+  );
+
+  const beforeItem = pressed.length;
+  const itemPress = await window.webContents.executeJavaScript(`(async () => {
+    document.querySelector('#sheet-body .sheet-item.pressable').click();
+    await new Promise((r) => setTimeout(r, 400));
+    return {
+      status: document.getElementById('status-line').textContent,
+      sheet: getComputedStyle(document.getElementById('sheet-modal')).display,
+    };
+  })()`);
+  check(
+    `pressing a row reaches the game — "${itemPress.status}"`,
+    pressed.length === beforeItem + 1 && pressed.at(-1) === 'item-sword',
+    JSON.stringify(pressed),
+  );
+  check('and the sheet stays open to be read', itemPress.sheet !== 'none', itemPress.sheet);
+
   const shut = await window.webContents.executeJavaScript(`(async () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await new Promise((r) => setTimeout(r, 200));
     return getComputedStyle(document.getElementById('sheet-modal')).display;
   })()`);
   check('and Escape shuts it', shut === 'none', shut);
+
+  // A game asking for the sheet, which is the only way a plugin can open it.
+  const asked = await window.webContents.executeJavaScript(`(async () => {
+    [...document.querySelectorAll('#scene-actions .scene-action')][2].click();
+    await new Promise((r) => setTimeout(r, 400));
+    return getComputedStyle(document.getElementById('sheet-modal')).display;
+  })()`);
+  check('a move can ask for the sheet to be opened', asked !== 'none', asked);
+  await window.webContents.executeJavaScript(`(async () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 200));
+  })()`);
 
   /**
    * A move that costs a turn, with no model loaded.
