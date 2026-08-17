@@ -40,6 +40,14 @@ const state = {
   audio: { source: null },
   /** Whether anything can transcribe, and whether it is doing so right now. */
   mic: { available: false, listening: false, working: false },
+  /**
+   * The game panel, exactly as the main process reports it.
+   *
+   * Kept whole rather than unpacked: the hotkey handler needs the action list
+   * to answer "what does 3 mean right now", and reading it back off the buttons
+   * would make the DOM the source of truth for something the main process owns.
+   */
+  scene: { active: false, scene: null },
   /** `id → {text, received, total}` for a plugin that is fetching something. */
   pluginProgress: {},
   /**
@@ -1787,6 +1795,204 @@ function wirePlayer() {
   });
 }
 
+/* ============================ the game panel ============================ */
+
+/**
+ * A game, drawn from a document the main process holds.
+ *
+ * Nothing here is markup from a plugin. Every string arrives as data and is put
+ * into a `textContent`; the only field that becomes a class name is `tone`, and
+ * `scene.mjs` has already reduced that to one of three words. This is the same
+ * rule model output lives under, and it applies for the same reason — most of
+ * what a game shows is model output that a plugin wrote down on the way past.
+ */
+function meterNode(meter) {
+  // No maximum means no bar: a health bar filled against an imaginary limit
+  // says something false, where a bare number says only what is known.
+  const row = el('div', `scene-meter${meter.max > 0 ? '' : ' plain'}`);
+  row.append(el('span', 'scene-meter-label', meter.label));
+
+  const bar = el('div', `meter ${meter.tone}`.trim());
+  const fill = el('i');
+  const share = meter.max > 0 ? (meter.value / meter.max) * 100 : 0;
+  fill.style.width = `${Math.max(0, Math.min(100, share))}%`;
+  bar.append(fill);
+  row.append(bar);
+
+  row.append(el('span', 'scene-meter-value', meter.max > 0 ? `${meter.value}/${meter.max}` : String(meter.value)));
+  return row;
+}
+
+function actionNode(action) {
+  const button = el('button', `scene-action ${action.tone}`.trim());
+  if (action.key) button.append(el('span', 'scene-key', action.key));
+  button.append(el('span', 'scene-action-label', action.label));
+  if (action.hint) button.title = action.hint;
+  button.addEventListener('click', () => pressAction(action.id));
+  return button;
+}
+
+/**
+ * Grey the moves out while a turn is running.
+ *
+ * The keyboard is refused separately, in the hotkey handler: a disabled button
+ * cannot be clicked but a digit is still a digit, and the two have to agree or
+ * the keyboard becomes a way to do what the buttons say is impossible.
+ */
+function syncSceneBusy() {
+  for (const button of $('scene-actions').querySelectorAll('.scene-action')) button.disabled = state.streaming;
+}
+
+function paintScene(status = { active: false, scene: null }) {
+  state.scene = status;
+  const scene = status.scene;
+
+  $('scene').hidden = !scene;
+  const actions = $('scene-actions');
+  actions.replaceChildren();
+  actions.hidden = !scene?.actions?.length;
+
+  if (!scene) {
+    // A game that ended takes its sheet with it, or the dialog goes on
+    // describing a hero who is no longer anywhere.
+    $('sheet-modal').hidden = true;
+    return;
+  }
+
+  $('scene-title').textContent = scene.title;
+  $('scene-sub').textContent = scene.subtitle;
+  // A button that opens an empty dialog is a dead control.
+  $('btn-scene-sheet').hidden = scene.groups.length === 0;
+
+  const meters = $('scene-meters');
+  meters.replaceChildren();
+  for (const meter of scene.meters) meters.append(meterNode(meter));
+
+  const facts = $('scene-facts');
+  facts.replaceChildren();
+  for (const field of scene.fields) {
+    const box = el('span', `scene-field ${field.tone}`.trim());
+    box.append(el('span', 'scene-field-label', `${field.label} `));
+    box.append(el('span', 'scene-field-value', field.value));
+    facts.append(box);
+  }
+  for (const tag of scene.tags) facts.append(el('span', `scene-tag ${tag.tone}`.trim(), tag.label));
+
+  for (const action of scene.actions) actions.append(actionNode(action));
+  syncSceneBusy();
+
+  // Repainted in place rather than closed: a game that redrew itself while the
+  // sheet was open — which is every turn, since a move changes the inventory —
+  // would otherwise shut the dialog the player was reading.
+  if (!$('sheet-modal').hidden) paintSheet();
+}
+
+function paintSheet() {
+  const scene = state.scene?.scene;
+  if (!scene) return;
+
+  $('sheet-title').textContent = scene.title || state.scene.pluginName || '';
+  $('sheet-sub').textContent = scene.subtitle;
+
+  const body = $('sheet-body');
+  body.replaceChildren();
+  for (const group of scene.groups) {
+    const box = el('div', 'sheet-group');
+    box.append(el('div', 'sheet-group-label', group.label));
+    if (group.items.length === 0) {
+      // The plugin's own words for an empty list. It knows whether the sentence
+      // is "no items" or "the journal is blank"; we only know there is nothing.
+      box.append(el('div', 'sheet-empty', group.empty || '—'));
+    } else {
+      for (const item of group.items) {
+        const row = el('div', `sheet-item ${item.tone}`.trim());
+        row.append(el('span', 'sheet-item-label', item.label));
+        if (item.note) row.append(el('span', 'sheet-item-note', item.note));
+        box.append(row);
+      }
+    }
+    body.append(box);
+  }
+}
+
+function setSheet(open) {
+  const groups = state.scene?.scene?.groups ?? [];
+  const show = Boolean(open) && groups.length > 0;
+  if (show) paintSheet();
+  $('sheet-modal').hidden = !show;
+}
+
+/**
+ * One move.
+ *
+ * The plugin answers with a line for the status bar, words to send, or both.
+ * A move that only redraws the panel — opening the inventory, reading the
+ * journal — costs nothing and involves no model at all, which is most of what
+ * made those commands slow and unreliable when they had to be typed at one.
+ */
+async function pressAction(actionId) {
+  if (state.streaming) return status('A turn is running — wait for it to finish.');
+  try {
+    const answer = await api.scene.act(actionId);
+    if (answer.status) status(answer.status);
+    // Sent from here, not from the main process, so a pressed button is an
+    // ordinary message in the conversation this window has open.
+    if (answer.submit) await submitPrompt(answer.submit);
+  } catch (err) {
+    status(err.message);
+    activity(err.message, 'bad');
+  }
+}
+
+function wireScene() {
+  $('btn-scene-sheet').addEventListener('click', () => setSheet($('sheet-modal').hidden));
+  $('btn-sheet-close').addEventListener('click', () => setSheet(false));
+  $('sheet-modal').addEventListener('click', (event) => {
+    // Only the backdrop closes it, as with the About box: a click on the box
+    // itself must not dismiss the thing being read.
+    if (event.target === $('sheet-modal')) setSheet(false);
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') setSheet(false);
+    if (!state.scene?.scene) return;
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || event.isComposing) return;
+
+    /**
+     * Typing is typing, whatever the character is.
+     *
+     * The composer is where this game is played from, so without this every
+     * digit in a sentence would make a move — and the move would go out while
+     * the half-written message sat in the box. `isContentEditable` is checked
+     * too: it is not a tag name, and an element can be one without being an
+     * input.
+     */
+    const target = event.target;
+    if (target?.isContentEditable) return;
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName)) return;
+
+    const sheetOpen = !$('sheet-modal').hidden;
+    // Any other dialog owns the keyboard. The shell approval one is a question
+    // that has to be answered before anything else happens, and a digit
+    // pressed over it must not quietly do something behind it.
+    if (!sheetOpen && [...document.querySelectorAll('.modal')].some((modal) => !modal.hidden)) return;
+
+    if (event.key === '0') {
+      event.preventDefault();
+      setSheet(!sheetOpen);
+      return;
+    }
+    // With the sheet up, the digits belong to nothing: reading the inventory
+    // and swinging a sword are different activities.
+    if (sheetOpen) return;
+
+    const action = (state.scene.scene.actions ?? []).find((entry) => entry.key === event.key);
+    if (!action) return;
+    event.preventDefault();
+    pressAction(action.id);
+  });
+}
+
 /* ============================ dictation ============================ */
 
 /**
@@ -2246,18 +2452,24 @@ function setStreaming(on) {
   send.textContent = on ? '■' : '▶';
   send.classList.toggle('stop', on);
   send.title = on ? 'Stop' : 'Send';
+  // The moves on the action row are refused while a turn runs, and have to look
+  // refused: a button that silently does nothing reads as a broken game.
+  syncSceneBusy();
 }
 
-async function send() {
-  if (state.streaming) {
-    await api.agent.stop();
-    return;
-  }
-  const input = $('input');
-  const prompt = input.value.trim();
-  if (!prompt) return;
-
-  input.value = '';
+/**
+ * Run one turn for `prompt`.
+ *
+ * Split out from `send` because a pressed action button is the same event as a
+ * typed message and must not become a second implementation of it — the busy
+ * check, the transcript entry and what happens when a send fails are all
+ * subtle enough once.
+ *
+ * `restoreTo` is the composer, when the words came from it. A move made by
+ * pressing a button has nowhere to go back to, and dropping the game's own
+ * phrasing into the box the player types in would be worse than losing it.
+ */
+async function submitPrompt(prompt, { restoreTo = null } = {}) {
   const userTurn = addTurn('user', prompt);
   scrollChat();
   setStreaming(true);
@@ -2278,12 +2490,25 @@ async function send() {
     status(err.message);
     activity(err.message, 'bad');
     if (!state.turnStarted) {
-      if (!input.value) input.value = prompt;
+      if (restoreTo && !restoreTo.value) restoreTo.value = prompt;
       userTurn.remove();
     }
   } finally {
     setStreaming(false);
   }
+}
+
+async function send() {
+  if (state.streaming) {
+    await api.agent.stop();
+    return;
+  }
+  const input = $('input');
+  const prompt = input.value.trim();
+  if (!prompt) return;
+
+  input.value = '';
+  await submitPrompt(prompt, { restoreTo: input });
 }
 
 /* ============================ event stream ============================ */
@@ -2480,6 +2705,13 @@ function handleEvent(payload) {
 
     case 'audio:state':
       paintPlayer(payload);
+      break;
+
+    // A game redrawing itself. It arrives on the same stream as everything
+    // else, so a plugin that changed the world outside a turn — a timer, a
+    // button that only opens the inventory — reaches the panel without one.
+    case 'scene:state':
+      paintScene(payload);
       break;
 
     // A plugin appearing, going away, or finishing a download is what makes the
@@ -2773,6 +3005,7 @@ function wire() {
 
   wirePlayer();
   wireMic();
+  wireScene();
 
   $('set-crt').addEventListener('change', (event) => document.body.classList.toggle('no-crt', !event.target.checked));
 }
@@ -2809,6 +3042,10 @@ async function boot() {
   paintLocales(snapshot.locales ?? []);
   paintPlayer(snapshot.audio ?? { source: null });
   paintMic(snapshot.mic ?? { available: false });
+  // A game outlives this window: the scene lives in the main process, so a
+  // reload comes back to the panel it left rather than to an empty one that
+  // fills in whenever the plugin next happens to redraw.
+  paintScene(snapshot.scene ?? { active: false, scene: null });
 
   // Attachments outlive a reload — they live in the main process — so the row
   // is painted from what is actually pending, not assumed empty.

@@ -217,6 +217,24 @@ message goes away; the first version of the toggle handler cleared the line imme
 count it had just written. The smoke check asserts the number, not that the text changed — an empty string is
 different from anything, so the weaker check passed on the bug.
 
+**A scene is data, and the app draws it.** The `scene` service is the same bargain the audio bar struck: a plugin cannot run code in this window, so it holds the game and says what the panel *contains*, while every node on screen is built here from a document with a fixed set of keys. `normaliseScene` is where "whatever the plugin passed" becomes that document, and the reason it is strict is that most of what a game shows is model output at one remove — an item a language model named, a journal line it wrote, stored by the plugin on the way past and no more trustworthy for having been stored.
+
+**`tone` is the only field that becomes a class name, so it is the only field taken from a list.** Everything else in a scene lands in a `textContent`, where the worst a hostile string can do is look silly. A tone passed through would let a plugin — or the model writing through it — name any class in the stylesheet.
+
+**The app assigns the hotkeys, by position.** Two actions asking for the same key is a conflict with no good resolution, and a key that silently did nothing because something else had claimed it is indistinguishable from a broken button. The cost is that `3` means a different move after the list changes, which is true of the buttons themselves anyway.
+
+**A digit typed into the composer is a digit.** The hotkey handler is on `document`, and the composer is where the game is played from — without the check for an input, a typed sentence would fire a move on every numeral in it, while the half-written message sat in the box. `isContentEditable` is tested as well as the tag name: an element can be an editing host without being an `<input>`. The smoke check types into the composer and asserts both that nothing was pressed and that the text is untouched; nothing in the source distinguishes the working handler from the broken one.
+
+**A move is sent by the renderer, and `scene.act` only hands the words back.** A turn belongs to a conversation and the main process does not have a current one — the same fact `attach.mjs` records. Routing a pressed button back through the window that does know also means it goes down exactly the path typed text takes, so `submitPrompt` is shared and the busy check, the transcript entry and the hand-back on failure are not implemented twice. It is also the whole of what stops a game looping: nothing in the service can start a turn, so a move happens because a person pressed a key.
+
+**`submitPrompt` gives the composer its text back only when the composer is where it came from.** A move made by pressing a button has nowhere to return to, and dropping the game's own phrasing into the box the player types in is worse than losing it.
+
+**A scene with no presenter offers no moves.** Same rule as the transport's button list: a driver that went away takes its buttons with it. What the hero looked like stays on screen — that is a readable end state — but a control that is drawn and cannot work is worse than one that is absent.
+
+**A button that is not on screen cannot be pressed.** `act` refuses an id that is not in the current scene. A click carries an id the renderer read off a button, and a button can outlive the scene that drew it; a stale one firing a move in a world three turns further on is impossible to reproduce and easy to refuse.
+
+**The game panel is inside the chat column, not a fourth grid column.** The workspace picks its column count by aspect ratio, and a 4:3 panel has two — a game needing the third would be unplayable on half the shapes the layout already supports. So the strip and the action row sit in the chat column and the lists go in a dialog, which costs the transcript some height: the smoke run checks a 900×700 window with a game up and asserts the log still has 200px, because that is the shape where it is paid for.
+
 ## Traps
 
 **`ELECTRON_RUN_AS_NODE`.** VS Code's integrated terminal sets this. With it set, `npx electron .` runs the binary as

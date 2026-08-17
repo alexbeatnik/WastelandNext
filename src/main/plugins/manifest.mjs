@@ -18,7 +18,7 @@ import { normaliseCategory } from '../../shared/categories.mjs';
  * function. Bumped only when the shape of `activate(ctx)` changes in a way a
  * plugin can notice.
  */
-export const PLUGIN_API_VERSION = 5;
+export const PLUGIN_API_VERSION = 6;
 
 /**
  * Services a plugin may ask the host for.
@@ -27,7 +27,7 @@ export const PLUGIN_API_VERSION = 5;
  * is legible from the manifest alone rather than from reading its code. A name
  * that is not on this list is a manifest error, not a runtime `undefined`.
  */
-export const KNOWN_SERVICES = new Set(['browser', 'lookupBrowser', 'audio', 'notify', 'mic']);
+export const KNOWN_SERVICES = new Set(['browser', 'lookupBrowser', 'audio', 'notify', 'mic', 'scene']);
 
 /** Setting kinds the plugin row knows how to draw. */
 export const SETTING_TYPES = new Set(['folder', 'text', 'toggle', 'select']);

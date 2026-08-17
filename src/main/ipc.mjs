@@ -23,6 +23,7 @@ import * as registry from './plugins/registry.mjs';
 import { audio } from './audio.mjs';
 import { mic } from './mic.mjs';
 import { notify } from './notify.mjs';
+import { scene } from './scene.mjs';
 import { Agent } from './agent/agent.mjs';
 import { Updater } from './updater.mjs';
 
@@ -53,7 +54,7 @@ const lookupBrowser = new BrowserBridge();
  * fact readable from a manifest, and what lets the host be tested with a stub
  * browser and no Chrome anywhere.
  */
-const plugins = new PluginHost({ services: { browser, lookupBrowser, audio, notify, mic } });
+const plugins = new PluginHost({ services: { browser, lookupBrowser, audio, notify, mic, scene } });
 const agent = new Agent({ server, plugins });
 
 /**
@@ -96,6 +97,15 @@ function snapshot() {
     locales: plugins.locales(),
     audio: audio.status(),
     mic: mic.status(),
+    /**
+     * Whatever game is on screen.
+     *
+     * In the snapshot rather than fetched afterwards because it survives a
+     * reload: the scene lives in the main process, so a window that came back
+     * has to come back to the same panel it left, not to an empty one that
+     * fills in whenever the plugin next happens to redraw.
+     */
+    scene: scene.status(),
     /**
      * Anything said before the window was listening.
      *
@@ -148,6 +158,7 @@ export function registerIpc(windowGetter) {
   plugins.on('progress', (detail) => send('plugins:working', detail));
   audio.on('state', (status) => send('audio:state', status));
   mic.on('state', (status) => send('mic:state', status));
+  scene.on('state', (status) => send('scene:state', status));
   notify.on('notice', (notice) => {
     send('notice', { notice });
     if (notice.desktop) showDesktopNotice(notice);
@@ -533,6 +544,22 @@ export function registerIpc(windowGetter) {
   /** The renderer reporting what only it can know. */
   handle('audio:ended', () => audio.command('ended'));
   handle('audio:failed', (message) => audio.fail(message));
+
+  /* ---------- the game panel ---------- */
+
+  handle('scene:status', () => scene.status());
+  /**
+   * A button on the action row.
+   *
+   * The answer may carry `submit` — the words that button stands for — and the
+   * renderer is what sends them, as an ordinary message in the conversation it
+   * has open. Deliberately not sent from here: a turn belongs to a chat, and the
+   * main process has no current one. Routing it back through the window also
+   * means a pressed button goes down exactly the path typed text does, rather
+   * than a second one that would have to re-learn the busy check, the transcript
+   * entry and what to do when a send fails.
+   */
+  handle('scene:act', (actionId) => scene.act(actionId));
 
   /* ---------- dictation ---------- */
 

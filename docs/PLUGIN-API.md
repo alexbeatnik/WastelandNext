@@ -476,6 +476,63 @@ audio.setTransport({
 There is no queue in the service on purpose: what "next" means is your business, and two plugins with different ideas
 can drive the same bar. The bar's second line is your words — "3 of 47", "shuffled" — because only you know them.
 
+### `scene`
+
+A panel the app draws from a document you fill in, and a row of buttons above the composer. For a game, a tracker,
+anything with state a user needs to see at a glance and act on without typing a sentence.
+
+```js
+const scene = ctx.service('scene');
+
+scene.present({
+  pluginId: ctx.id,
+  pluginName: 'Fantasy RPG',
+  act: async (actionId) => {
+    if (actionId === 'bag') {
+      scene.show(sheetFor(state));            // redraws the panel, costs nothing
+      return { status: 'Inventory.' };
+    }
+    return { submit: 'I look around' };       // sent as if the player typed it
+  },
+});
+
+scene.show({
+  title: 'Village of Mara — day 4',
+  subtitle: 'the common room',
+  meters: [{ label: 'HP', value: 12, max: 20, tone: 'bad' }, { label: 'GOLD', value: 14 }],
+  fields: [{ label: 'QUEST', value: 'find the hunters' }],
+  tags:   [{ label: 'BLEEDING', tone: 'bad' }],
+  groups: [{ label: 'ITEMS', items: [{ label: 'Notched sword', note: 'a weapon' }], empty: 'nothing on you' }],
+  actions: [{ id: 'look', label: 'Look around', hint: 'costs a turn' }, { id: 'bag', label: 'Inventory' }],
+});
+
+scene.clear();                                 // the game is over; the panel goes
+```
+
+Every field is optional and every one has a shape. What does not fit is dropped rather than thrown over: a game that
+stops working because one label was a number is worse than a game with one label missing. Labels are collapsed to one
+line, because they are drawn in a flex row. `tone` is `good`, `warn` or `bad` — anything else becomes plain, and it is
+the only field that reaches a class name.
+
+A meter with no `max` is drawn as a bare number, not as a bar filled to an imaginary limit. `groups` appear behind the
+**[ SHEET ]** button and in no other place, so a long inventory never competes with the transcript; `empty` is your
+words for an empty one, since only you know whether the sentence is "nothing on you" or "the journal is blank".
+
+**The app assigns the hotkeys.** The first nine actions get `1`–`9` by position; you do not ask for a key, and two
+actions cannot collide over one. `0` opens the sheet. Every digit is ignored while the composer has focus — a typed
+sentence must not make a move.
+
+**`act` returns, it does not send.** `{status}` writes a line in the status bar; `{submit}` is sent as an ordinary
+message in whatever conversation is open, exactly as if the player had typed it — same busy check, same transcript
+entry, same handling when a send fails. Both are optional, and a move that only redraws the panel involves no model at
+all, which is the point: opening an inventory should not cost a turn or a single token.
+
+Nothing here can start a turn on its own. A move goes out because somebody pressed a key, and `act` is the only way in.
+
+One plugin drives the panel at a time and the newcomer wins, as with the audio transport. When yours is switched off
+the panel goes with it — and an action id that is no longer on screen is refused, so a stale click cannot make a move
+in a world that has moved on.
+
 ### `browser` and `lookupBrowser`
 
 The visible Chrome and a headless one. `lookupBrowser` exists so a lookup never disturbs the tab the user is looking
@@ -715,6 +772,7 @@ Declare the **lowest** version that has everything you use. Declaring a higher o
 | 3 | Interactive `choices` and `choose`, language packs |
 | 4 | The `notify` service, and `ctx.state` — the plugin's own JSON document |
 | 5 | The `mic` service, `select` settings, `ctx.progress`, `ctx.dataDir()` |
+| 6 | The `scene` service — a drawn panel, a pinned row of moves and their hotkeys |
 
 **Not every addition moves the number.** `category` arrived after 5 and did not: a build that has never heard of the
 field ignores it and loads the plugin exactly as before, so declaring 6 for it would lock your plugin out of every

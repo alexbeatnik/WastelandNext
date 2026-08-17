@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { setDataRoot, pluginStateDir, pluginsDir } from '../src/main/paths.mjs';
+import { scene } from '../src/main/scene.mjs';
 import { registerSchemes } from '../src/main/plugins/protocol.mjs';
 import { registerIpc, serveAssets } from '../src/main/ipc.mjs';
 
@@ -1055,6 +1056,223 @@ async function checkDictation(window) {
 }
 
 /**
+ * A game on screen, driven through the real service.
+ *
+ * Not a synthetic event: `scene` here is the same singleton `ipc.mjs` handed to
+ * the plugin host, so this exercises the whole chain a plugin would — show,
+ * the `state` event, the IPC relay, the paint, the click, and the answer coming
+ * back. What only this can catch is a panel that draws and does nothing, which
+ * looks exactly like one that works.
+ *
+ * The keyboard half matters more than it looks. The composer is where this game
+ * is played from, so a digit typed into a sentence must not make a move — and
+ * that failure is invisible in the source, where the handler reads perfectly
+ * well either way.
+ */
+async function checkScene(window) {
+  say('');
+  say('The game panel');
+
+  const pressed = [];
+  scene.present({
+    pluginId: 'smoke-game',
+    pluginName: 'Smoke game',
+    act: (id) => {
+      pressed.push(id);
+      // One move that costs a turn and one that only redraws — the two kinds a
+      // game has, and the whole reason `submit` is optional.
+      return id === 'look' ? { submit: 'I look around' } : { status: 'The bag is open.' };
+    },
+  });
+  scene.show({
+    title: 'Village of Mara — day 4',
+    subtitle: 'the common room',
+    meters: [
+      { label: 'HP', value: 12, max: 20, tone: 'bad' },
+      { label: 'MANA', value: 4, max: 4 },
+      { label: 'GOLD', value: 14 },
+    ],
+    fields: [{ label: 'QUEST', value: 'find the hunters' }],
+    tags: [{ label: 'BLEEDING', tone: 'bad' }],
+    groups: [
+      { label: 'ITEMS', items: [{ label: 'Notched sword', note: 'a weapon' }, { label: 'Herb' }] },
+      { label: 'JOURNAL', items: [], empty: 'nothing written down yet' },
+    ],
+    actions: [
+      { id: 'look', label: 'Look around', hint: 'costs a turn' },
+      { id: 'bag', label: 'Inventory' },
+    ],
+  });
+  await new Promise((r) => setTimeout(r, 300));
+
+  const drawn = await window.webContents.executeJavaScript(`(() => {
+    const panel = document.getElementById('scene');
+    const row = document.getElementById('scene-actions');
+    const hp = document.querySelector('#scene-meters .scene-meter .meter > i');
+    return {
+      // Asserted on the computed style, never on the attribute: what \`hidden\`
+      // says and what the user sees are different questions, and only the
+      // second one is worth a check.
+      panel: getComputedStyle(panel).display,
+      row: getComputedStyle(row).display,
+      title: document.getElementById('scene-title').textContent,
+      meters: [...document.querySelectorAll('#scene-meters .scene-meter-value')].map((n) => n.textContent),
+      plain: document.querySelectorAll('#scene-meters .scene-meter.plain').length,
+      hpWidth: hp ? hp.style.width : '',
+      tags: [...document.querySelectorAll('#scene-facts .scene-tag')].map((n) => n.className),
+      buttons: [...row.querySelectorAll('.scene-action')].map((b) => ({
+        key: b.querySelector('.scene-key')?.textContent ?? '',
+        label: b.querySelector('.scene-action-label').textContent,
+      })),
+      sheetButton: getComputedStyle(document.getElementById('btn-scene-sheet')).display,
+      sheet: getComputedStyle(document.getElementById('sheet-modal')).display,
+    };
+  })()`);
+
+  check(`the panel is on screen — "${drawn.title}"`, drawn.panel !== 'none', JSON.stringify(drawn.panel));
+  check('and so is the row of moves', drawn.row !== 'none', drawn.row);
+  check(`meters read as values — ${drawn.meters.join(' ')}`, JSON.stringify(drawn.meters) === '["12/20","4/4","14"]');
+  check('a meter with no maximum is a number, not a bar', drawn.plain === 1, `${drawn.plain} plain`);
+  check(`the bar is filled to the value — ${drawn.hpWidth}`, drawn.hpWidth === '60%');
+  check('a tone reaches the class list', drawn.tags.join() === 'scene-tag bad', drawn.tags.join());
+  check(
+    `the app put digits on the moves — ${drawn.buttons.map((b) => `${b.key}:${b.label}`).join(' ')}`,
+    JSON.stringify(drawn.buttons.map((b) => b.key)) === '["1","2"]',
+    JSON.stringify(drawn.buttons),
+  );
+  check('the sheet is offered', drawn.sheetButton !== 'none', drawn.sheetButton);
+  check('and is shut until it is asked for', drawn.sheet === 'none', drawn.sheet);
+
+  // A move that only redraws the panel. No model is loaded in a smoke run, so
+  // this is also the proof that such a move needs none.
+  const local = await window.webContents.executeJavaScript(`(async () => {
+    [...document.querySelectorAll('#scene-actions .scene-action')][1].click();
+    await new Promise((r) => setTimeout(r, 400));
+    return document.getElementById('status-line').textContent;
+  })()`);
+  check(`a move that needs no model runs without one — "${local}"`, /bag is open/i.test(local), local);
+  check('and reached the plugin', pressed.at(-1) === 'bag', JSON.stringify(pressed));
+
+  // The trap: the composer is where the game is played from, and every digit in
+  // a typed sentence arrives at the same document-level handler.
+  const typed = await window.webContents.executeJavaScript(`(async () => {
+    const input = document.getElementById('input');
+    input.focus();
+    input.value = 'I say 1 thing';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    const value = input.value;
+    input.value = '';
+    input.blur();
+    return value;
+  })()`);
+  check('a digit typed into the composer is a digit, not a move', pressed.at(-1) === 'bag', JSON.stringify(pressed));
+  check('and the message being written is left alone', typed === 'I say 1 thing', typed);
+
+  // The hotkey itself, from the document, where a player's keystroke lands.
+  // Counted rather than read off the last entry: pressing the same move twice
+  // leaves the same id at the end either way, so only the delta says whether
+  // the key did anything at all.
+  const beforeKey = pressed.length;
+  const hotkeyed = await window.webContents.executeJavaScript(`(async () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 400));
+    return document.getElementById('status-line').textContent;
+  })()`);
+  check(
+    `pressing 2 makes the move — "${hotkeyed}"`,
+    pressed.length === beforeKey + 1 && pressed.at(-1) === 'bag',
+    JSON.stringify(pressed),
+  );
+
+  // The sheet: 0 opens it, and the lists are the plugin's, empty ones included.
+  const sheet = await window.webContents.executeJavaScript(`(async () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '0', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    return {
+      display: getComputedStyle(document.getElementById('sheet-modal')).display,
+      groups: [...document.querySelectorAll('#sheet-body .sheet-group-label')].map((n) => n.textContent),
+      items: [...document.querySelectorAll('#sheet-body .sheet-item-label')].map((n) => n.textContent),
+      empty: [...document.querySelectorAll('#sheet-body .sheet-empty')].map((n) => n.textContent),
+    };
+  })()`);
+  check('0 opens the sheet', sheet.display !== 'none', sheet.display);
+  check(`with the game's own headings — ${sheet.groups.join(', ')}`, JSON.stringify(sheet.groups) === '["ITEMS","JOURNAL"]');
+  check(`and its items — ${sheet.items.join(', ')}`, sheet.items.length === 2, JSON.stringify(sheet.items));
+  check(
+    `an empty list says so in the game's words — "${sheet.empty[0]}"`,
+    sheet.empty[0] === 'nothing written down yet',
+    JSON.stringify(sheet.empty),
+  );
+
+  const shut = await window.webContents.executeJavaScript(`(async () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 200));
+    return getComputedStyle(document.getElementById('sheet-modal')).display;
+  })()`);
+  check('and Escape shuts it', shut === 'none', shut);
+
+  /**
+   * A move that costs a turn, with no model loaded.
+   *
+   * The failure is the point: it proves the words reached the agent by the same
+   * path a typed message takes, and that the turn it could not start left
+   * nothing behind in the transcript.
+   */
+  const before = await window.webContents.executeJavaScript(
+    `document.querySelectorAll('#chat-log .turn.user').length`,
+  );
+  const move = await window.webContents.executeJavaScript(`(async () => {
+    [...document.querySelectorAll('#scene-actions .scene-action')][0].click();
+    await new Promise((r) => setTimeout(r, 600));
+    return {
+      status: document.getElementById('status-line').textContent,
+      turns: document.querySelectorAll('#chat-log .turn.user').length,
+      composer: document.getElementById('input').value,
+    };
+  })()`);
+  check('a move that costs a turn reaches the plugin', pressed.at(-1) === 'look', JSON.stringify(pressed));
+  check(`and goes out as an ordinary message — "${move.status}"`, /model/i.test(move.status), move.status);
+  check('a turn that never started leaves nothing in the transcript', move.turns === before, `${before} → ${move.turns}`);
+  check("and does not put the game's words in the composer", move.composer === '', move.composer);
+
+  /**
+   * A game must not eat the transcript.
+   *
+   * The strip and the action row both sit inside the chat column, so they come
+   * out of the reading area — and the shortest shape the layout supports is
+   * where that is paid for. Checked here rather than in `checkLayouts`, which
+   * runs with no game on screen.
+   */
+  window.setContentSize(900, 700);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+    const width = await window.webContents.executeJavaScript('window.innerWidth');
+    if (Math.abs(width - 900) <= 4) break;
+  }
+  const narrow = await window.webContents.executeJavaScript(`(() => {
+    const root = document.documentElement;
+    return {
+      log: Math.round(document.getElementById('chat-log').getBoundingClientRect().height),
+      overflow: root.scrollWidth - root.clientWidth,
+    };
+  })()`);
+  check(`the transcript survives a game on a 900×700 window — log ${narrow.log}px`, narrow.log >= 200, JSON.stringify(narrow));
+  check('and the row of moves wraps rather than widening the page', narrow.overflow <= 1, `${narrow.overflow}px`);
+  window.setContentSize(1280, 860);
+
+  // Switching the game off takes the panel with it — the same rule the audio
+  // bar follows, and the reason `releasePlugin` exists on every service.
+  scene.releasePlugin('smoke-game');
+  await new Promise((r) => setTimeout(r, 300));
+  const gone = await window.webContents.executeJavaScript(`(() => ({
+    panel: getComputedStyle(document.getElementById('scene')).display,
+    row: getComputedStyle(document.getElementById('scene-actions')).display,
+  }))()`);
+  check('switching the game off takes the panel away', gone.panel === 'none' && gone.row === 'none', JSON.stringify(gone));
+}
+
+/**
  * Options an action put in the transcript, and a click on one.
  *
  * The event is synthetic — there is no model here to emit an action — but
@@ -1658,6 +1876,7 @@ app.whenReady().then(async () => {
     await checkThemes(window);
     await checkLanguages(window);
     await checkPlayer(window, wavPath);
+    await checkScene(window);
     await checkChatControls(window);
     await checkAttachments(window);
     await checkNotices(window);

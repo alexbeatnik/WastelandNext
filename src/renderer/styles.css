@@ -711,6 +711,252 @@ button.choice.chosen .choice-label::before {
   }
 }
 
+/* ============================ The game panel ============================
+
+   A strip above the context row and a row of moves above the composer. Both
+   live inside the chat column rather than in a fourth grid column, because the
+   workspace picks its column count by aspect ratio and a 4:3 panel has only
+   two — a game that needed the third would be unplayable on half the shapes
+   the layout already supports. The lists that do not fit in a strip are in the
+   sheet dialog instead. */
+
+.scene {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.35rem 0.6rem;
+  border-top: 1px dashed var(--amber-faint);
+  font-size: 0.82em;
+}
+
+/* The same rule `.player[hidden]` needs, for the same reason: `hidden` is only
+   the UA declaration `[hidden] { display: none }`, and the flex above outranks
+   the whole UA sheet. */
+.scene[hidden] {
+  display: none;
+}
+
+.scene-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.scene-title {
+  color: var(--amber-bright);
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+}
+
+.scene-sub {
+  color: var(--amber-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* The part that gives way: the sheet button has a fixed width and must not
+     be pushed off the row by a long location name. */
+  flex: 1 1 4rem;
+}
+
+.scene-head button {
+  flex: none;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.9em;
+}
+
+/* The base `button` rule sets no display, so `hidden` would work through the UA
+   sheet alone — but a theme is free to add one, and the failure mode is a sheet
+   button sitting over a game that has no sheet. One line, stated rather than
+   relied upon. */
+.scene-head button[hidden] {
+  display: none;
+}
+
+.scene-meters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.9rem;
+}
+
+.scene-meter {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 1 1 8rem;
+  min-width: 6rem;
+}
+
+.scene-meter-label {
+  color: var(--amber-dim);
+  white-space: nowrap;
+}
+
+.scene-meter .meter {
+  flex: 1;
+  min-width: 2rem;
+}
+
+.scene-meter-value {
+  color: var(--amber);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* A meter with no maximum is a number, not a bar filled to an imaginary limit. */
+.scene-meter.plain .meter {
+  display: none;
+}
+
+.meter.good > i { background: var(--ok); }
+.meter.bad > i { background: var(--warn); }
+
+.scene-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.8rem;
+}
+
+.scene-field {
+  white-space: nowrap;
+}
+
+.scene-field-label {
+  color: var(--amber-dim);
+}
+
+.scene-tag {
+  padding: 0 0.3rem;
+  border: 1px solid var(--amber-faint);
+  color: var(--amber-dim);
+  white-space: nowrap;
+}
+
+.scene-field.good .scene-field-value,
+.scene-tag.good {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.scene-field.warn .scene-field-value,
+.scene-tag.warn {
+  color: var(--add);
+  border-color: var(--add);
+}
+
+.scene-field.bad .scene-field-value,
+.scene-tag.bad {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+/* ---- the moves ---- */
+
+.scene-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  padding: 0.3rem 0.6rem;
+  border-top: 1px solid var(--amber-faint);
+  /* Wraps rather than scrolling sideways, and is capped so a game offering ten
+     moves cannot push the composer off a short window. Same bargain as the
+     attachment chips: a control out of sight is one that cannot be used. */
+  max-height: 6rem;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.scene-actions[hidden] {
+  display: none;
+}
+
+.scene-action {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.88em;
+}
+
+/* The digit the app assigned. Dim, because it is a shortcut for the label
+   beside it rather than a second thing to read. */
+.scene-action .scene-key {
+  color: var(--amber-faint);
+  font-size: 0.9em;
+}
+
+.scene-action.good { border-color: var(--ok); }
+.scene-action.warn { border-color: var(--add); }
+.scene-action.bad { border-color: var(--warn); }
+
+.scene-action[disabled] {
+  opacity: 0.45;
+}
+
+/* ---- the sheet ---- */
+
+.sheet-box {
+  max-width: 40rem;
+  max-height: 86vh;
+  overflow-y: auto;
+}
+
+.sheet-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--amber-faint);
+  padding-bottom: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+
+.sheet-title {
+  color: var(--amber-bright);
+  letter-spacing: 0.08em;
+}
+
+.sheet-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.sheet-group-label {
+  color: var(--amber-dim);
+  letter-spacing: 0.1em;
+  border-bottom: 1px dashed var(--amber-faint);
+  margin-bottom: 0.25rem;
+}
+
+.sheet-item {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.05rem 0;
+}
+
+.sheet-item-label {
+  flex: 0 0 auto;
+}
+
+.sheet-item-note {
+  color: var(--amber-dim);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sheet-item.good .sheet-item-label { color: var(--ok); }
+.sheet-item.warn .sheet-item-label { color: var(--add); }
+.sheet-item.bad .sheet-item-label { color: var(--warn); }
+
+.sheet-empty {
+  color: var(--amber-faint);
+}
+
 /* ============================ Plugins ============================ */
 
 .plugin-list {

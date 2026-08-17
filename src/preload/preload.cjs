@@ -101,6 +101,18 @@ contextBridge.exposeInMainWorld('wasteland', {
     failed: (message) => call('audio:failed', message),
   },
 
+  scene: {
+    status: () => call('scene:status'),
+    /**
+     * Press one of the buttons a game put on the action row.
+     *
+     * Answers `{status, submit}`. Anything in `submit` is the move the button
+     * stands for, and sending it is the renderer's job — that is what keeps a
+     * pressed button and a typed message the same thing.
+     */
+    act: (actionId) => call('scene:act', actionId),
+  },
+
   updates: {
     status: () => call('update:status'),
     check: () => call('update:check'),

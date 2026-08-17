@@ -255,6 +255,19 @@
                  title="Volume" aria-label="Volume" />
         </div>
 
+        <!-- Whatever plugin is driving the scene service. Absent until one is,
+             so an app with no game running looks exactly as it did. The strip
+             is what stays on screen; the lists behind it open in the sheet. -->
+        <div class="scene" id="scene" hidden>
+          <div class="scene-head">
+            <span class="scene-title" id="scene-title"></span>
+            <span class="scene-sub" id="scene-sub"></span>
+            <button id="btn-scene-sheet" class="ghost" title="Character sheet — 0">[ SHEET ]</button>
+          </div>
+          <div class="scene-meters" id="scene-meters"></div>
+          <div class="scene-facts" id="scene-facts"></div>
+        </div>
+
         <div class="ctx-row">
           <span id="ctx-label" class="muted">CTX: 0 / 8192 (0%)</span>
           <div class="meter ctx" id="ctx-meter"><i></i></div>
@@ -270,6 +283,11 @@
           <div class="attach-chips" id="attach-chips"></div>
           <button id="btn-attach-clear" class="ghost danger" title="Remove everything attached" hidden>×</button>
         </div>
+
+        <!-- The moves on offer, pinned. They were choices in the transcript
+             first, which scroll away the moment the reply is longer than the
+             window — a move you have to scroll back up to make is not a move. -->
+        <div class="scene-actions" id="scene-actions" hidden></div>
 
         <div class="composer" id="composer">
           <span class="caret">&gt;</span>
@@ -302,6 +320,24 @@
         <div class="row">
           <button id="btn-shell-approve" class="approve">[ APPROVE ]</button>
           <button id="btn-shell-reject" class="danger">[ REJECT ]</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== CHARACTER SHEET =====================
+         The lists a game keeps — items, journal, who is standing here. In a
+         dialog rather than a fourth column because the workspace already
+         chooses its column count by aspect ratio, and a game has to be
+         playable on a 4:3 panel where there is no third column at all. -->
+    <div class="modal" id="sheet-modal" hidden>
+      <div class="modal-box sheet-box">
+        <div class="sheet-head">
+          <span class="sheet-title" id="sheet-title"></span>
+          <span class="muted" id="sheet-sub"></span>
+        </div>
+        <div class="sheet-body" id="sheet-body"></div>
+        <div class="row">
+          <button id="btn-sheet-close">[ CLOSE ]</button>
         </div>
       </div>
     </div>
