@@ -127,6 +127,46 @@ export function fitToWindow(messages, budget) {
   return { messages: system ? [system, ...rest] : rest, dropped, trimmed };
 }
 
+/**
+ * Make a message list every chat template will accept.
+ *
+ * Mistral's — and it is not alone — refuses anything but strict alternation
+ * after the system message, by raising from inside the template: the request
+ * comes back 500 with a Jinja traceback and no hint that the problem is the
+ * shape of the conversation. A real session hit it with two `tool` messages in
+ * a row, because one reply had emitted two action blocks and each result is
+ * appended separately. After that every retry appended another user turn onto a
+ * list that could no longer be sent, so the conversation was permanently dead:
+ * eleven messages ending `user, user, user`.
+ *
+ * Neighbours that go over the wire as the same role are therefore joined. The
+ * model sees the same text in the same order — the boundary was ours, not the
+ * protocol's — and because this runs on the way out rather than in storage, a
+ * conversation already wedged by the bug is repaired the next time it is sent.
+ *
+ * A leading assistant turn goes too. Nothing produces one directly, but
+ * `fitToWindow` drops oldest-first and can uncover one, and "the first message
+ * must be from the user" is the other half of the same rule.
+ */
+export function shapeForTemplate(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  const system = list[0]?.role === 'system' ? list[0] : null;
+  const rest = system ? list.slice(1) : list.slice();
+
+  while (rest.length && rest[0].role === 'assistant') rest.shift();
+
+  const out = [];
+  for (const message of rest) {
+    const last = out.at(-1);
+    if (last && last.role === message.role) {
+      out[out.length - 1] = { ...last, content: `${last.content}\n\n${message.content}` };
+    } else {
+      out.push({ ...message });
+    }
+  }
+  return system ? [system, ...out] : out;
+}
+
 export class Agent extends EventEmitter {
   #server;
   /** The plugin host. Every action the model may emit comes from it. */
@@ -194,7 +234,9 @@ export class Agent extends EventEmitter {
       } else if (message.role === 'tool') messages.push({ role: 'user', content: message.content });
       else messages.push({ role: 'user', content: message.content });
     }
-    return messages;
+    // Shaped here rather than at the point of sending, so the context meter and
+    // the compaction threshold measure what actually goes over the wire.
+    return shapeForTemplate(messages);
   }
 
   #contextUsage(messages) {
@@ -318,7 +360,13 @@ export class Agent extends EventEmitter {
     // This is what happens when it could not shrink enough — without it the
     // oversized prompt went out anyway and llama.cpp decided what to lose.
     const window = this.#contextUsage(built).max;
-    const { messages, dropped, trimmed } = fitToWindow(built, promptBudget(window));
+    const fitted = fitToWindow(built, promptBudget(window));
+    // Again after the trim: dropping oldest-first can leave the list starting on
+    // an assistant turn, which the strict templates refuse for the same reason
+    // they refuse two user turns in a row. Idempotent, so this costs nothing
+    // when nothing was dropped.
+    const { dropped, trimmed } = fitted;
+    const messages = shapeForTemplate(fitted.messages);
     if (dropped || trimmed) {
       const what = [dropped ? `dropped ${dropped} older message(s)` : '', trimmed ? 'trimmed the newest' : '']
         .filter(Boolean)

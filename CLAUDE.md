@@ -417,6 +417,8 @@ The feedback says so in those words, because an earlier "All N step(s) succeeded
 applied when it had not, and repeat the identical batch five times. `BatchGuard` refuses an exact repeat within a turn
 and names a way forward; a bare refusal tends to produce the same batch again, apologetically.
 
+**Messages that go over the wire as the same role are joined before sending.** Mistral's chat template — and it is not alone — refuses anything but strict alternation after the system message, and it refuses by *raising inside the Jinja*: the request comes back 500 with a template traceback and nothing saying the conversation's shape is the problem. A real session hit it with two `tool` results in a row, because one reply emitted two action blocks and each result is appended separately. Every retry then appended another user turn to a list that could no longer be sent, so the chat was permanently dead — eleven messages ending `user, user, user`. `shapeForTemplate` runs on the way out and not in storage, which is what lets a conversation already wedged by this be sent again rather than lost. It also drops a leading assistant turn, since `fitToWindow` drops oldest-first and can uncover one, and it is idempotent so it can be applied again after that trim.
+
 **The follow-up loop is bounded** (`MAX_FOLLOW_UPS = 3`). A model that keeps emitting actions after every result will
 otherwise loop forever.
 
