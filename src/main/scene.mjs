@@ -52,7 +52,15 @@ const MAX_SUBMIT = 400;
 const MAX_METERS = 8;
 const MAX_FIELDS = 10;
 const MAX_TAGS = 10;
-const MAX_GROUPS = 6;
+/**
+ * Lists behind the sheet button.
+ *
+ * Six was an arbitrary guess and a game outgrew it: quest, inventory, wounds,
+ * who is here, journal, map and graveyard is seven, and the seventh was being
+ * dropped in silence. The dialog scrolls, so the real limit is what a reader
+ * will scan, not what fits.
+ */
+const MAX_GROUPS = 10;
 const MAX_ITEMS = 60;
 /**
  * Buttons on the action row.
