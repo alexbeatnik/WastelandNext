@@ -1305,6 +1305,15 @@ async function checkScene(window) {
       open: getComputedStyle(document.getElementById('board-modal')).display,
       points,
       roads: document.querySelectorAll('#board .board-road').length,
+      casings: document.querySelectorAll('#board .board-road-casing').length,
+      // How wide a road actually is, in pixels. The first version set a stroke
+      // width of 0.4 alongside a non-scaling stroke, which means device pixels,
+      // so every road was drawn four tenths of a pixel wide and the map arrived
+      // with none on it. Counting the elements said everything was fine.
+      roadWidth: parseFloat(getComputedStyle(document.querySelector('#board .board-road')).strokeWidth),
+      // A name on a busy drawing needs a plate under it, or it smears.
+      labelPlate: getComputedStyle(document.querySelector('#board .board-label')).backgroundColor,
+      art: getComputedStyle(document.querySelector('#board')).width,
     };
   })()`);
   check('a move can open the board', map.open !== 'none', map.open);
@@ -1320,6 +1329,14 @@ async function checkScene(window) {
     JSON.stringify(map.points.map((p) => p.tag)),
   );
   check(`the roads are drawn too — ${map.roads}`, map.roads === 2);
+  check('each one over a dark casing, so it survives a busy drawing', map.casings === map.roads, `${map.casings} casings`);
+  check(`and wide enough to see — ${map.roadWidth}px`, map.roadWidth >= 1.5, String(map.roadWidth));
+  check(
+    `each name sits on a plate rather than on the picture — ${map.labelPlate}`,
+    /rgba?\(0, 0, 0/.test(map.labelPlate),
+    map.labelPlate,
+  );
+  check(`and the map gets the window — ${map.art}`, parseFloat(map.art) > 500, map.art);
 
   // Counted from here rather than from before the map was opened: opening it is
   // itself a press, and the delta is the only thing that says the click landed.
@@ -1327,14 +1344,32 @@ async function checkScene(window) {
   const walked = await window.webContents.executeJavaScript(`(async () => {
     document.querySelector('#board .board-point.pressable').click();
     await new Promise((r) => setTimeout(r, 400));
-    return document.getElementById('status-line').textContent;
+    return {
+      status: document.getElementById('status-line').textContent,
+      open: getComputedStyle(document.getElementById('board-modal')).display,
+    };
   })()`);
-  check(`pressing a place walks there — "${walked}"`, pressed.length === beforeWalk + 1 && pressed.at(-1) === 'go-forest', JSON.stringify(pressed));
+  check(`pressing a place walks there — "${walked.status}"`, pressed.length === beforeWalk + 1 && pressed.at(-1) === 'go-forest', JSON.stringify(pressed));
+  // The fixture's `go-forest` answers with a status and no words to send, so the
+  // map stays; the closing is checked where a move actually sends something.
+  check('and the map is still there when nothing was sent', walked.open !== 'none', walked.open);
 
-  await window.webContents.executeJavaScript(`(async () => {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 200));
+  /**
+   * A move made from the map closes it.
+   *
+   * Pressing a place and then watching the reply arrive behind the still-open
+   * map is the map refusing to get out of the way of the thing it was used for.
+   * `look` is the fixture's move that sends words.
+   */
+  const closed = await window.webContents.executeJavaScript(`(async () => {
+    [...document.querySelectorAll('#scene-actions .scene-action')][3].click();
+    await new Promise((r) => setTimeout(r, 300));
+    const before = getComputedStyle(document.getElementById('board-modal')).display;
+    [...document.querySelectorAll('#scene-actions .scene-action')][0].click();
+    await new Promise((r) => setTimeout(r, 600));
+    return { before, after: getComputedStyle(document.getElementById('board-modal')).display };
   })()`);
+  check('a move that sends words shuts the map behind it', closed.before !== 'none' && closed.after === 'none', JSON.stringify(closed));
 
   // A game asking for the sheet, which is the only way a plugin can open it.
   const asked = await window.webContents.executeJavaScript(`(async () => {

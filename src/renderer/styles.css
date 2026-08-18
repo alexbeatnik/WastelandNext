@@ -898,8 +898,10 @@ button.choice.chosen .choice-label::before {
 /* ---- the board ---- */
 
 .board-box {
-  max-width: 52rem;
-  width: min(52rem, 94vw);
+  /* A map is looked at, not skimmed. This is the one dialog that wants the
+     window it is given. */
+  width: min(78rem, 96vw);
+  max-width: none;
 }
 
 .board {
@@ -919,9 +921,9 @@ button.choice.chosen .choice-label::before {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  /* Scenery, and it must read as scenery: the markers and labels on top are the
-     part that carries meaning. */
-  opacity: 0.55;
+  /* Drawn at full strength. Fading it was meant to keep the markers legible and
+     only made the map muddy — legibility belongs to the labels, which carry
+     their own dark plate, not to washing out the thing being read. */
 }
 
 .board-roads {
@@ -932,16 +934,33 @@ button.choice.chosen .choice-label::before {
   pointer-events: none;
 }
 
+/* Drawn under every road so a thin dashed line does not vanish wherever the
+   landscape beneath it happens to match its brightness. Same trick as the dark
+   plate under a place name. */
+.board-road-casing {
+  stroke: rgba(0, 0, 0, 0.65);
+  stroke-width: 6;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+/* `non-scaling-stroke` means the width is in *device* pixels, not in the
+   viewBox's units — so the first version's `0.4` drew every road half a pixel
+   wide and the map came out with no roads on it at all. The dash lengths are in
+   the same units and were as invisible. */
 .board-road {
-  stroke: var(--amber-faint);
-  stroke-width: 0.4;
-  stroke-dasharray: 2 2;
+  stroke: #d8b26a;
+  stroke-width: 2;
+  stroke-dasharray: 7 6;
+  stroke-linecap: round;
+  opacity: 0.75;
   vector-effect: non-scaling-stroke;
 }
 
 .board-road.good {
   stroke: var(--ok);
-  stroke-width: 0.7;
+  stroke-width: 3;
+  opacity: 1;
 }
 
 .board-point {
@@ -950,23 +969,36 @@ button.choice.chosen .choice-label::before {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.15rem;
-  padding: 0.2rem 0.35rem;
+  gap: 0.2rem;
+  padding: 0;
   background: transparent;
-  border: 1px solid transparent;
+  border: 0;
   color: var(--amber-dim);
   font: inherit;
-  font-size: 0.78em;
+  font-size: 0.9em;
   white-space: nowrap;
-  text-shadow: 0 0 4px #000, 0 0 4px #000;
+  /* No glow. The body's amber text-shadow is what made these smear over a busy
+     drawing; a name on a map has to be read, not to look lit. */
+  text-shadow: none;
+}
+
+/* The name sits on its own dark plate rather than floating over whatever the
+   picture happens to have underneath it, which is the whole of why the labels
+   were hard to read. */
+.board-label {
+  padding: 0.05rem 0.35rem;
+  background: rgba(0, 0, 0, 0.78);
+  border: 1px solid currentColor;
+  letter-spacing: 0.02em;
 }
 
 .board-dot {
-  width: 0.6rem;
-  height: 0.6rem;
-  border: 1px solid currentColor;
-  background: var(--bg-deep);
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 2px solid #000;
+  background: currentColor;
   border-radius: 50%;
+  box-shadow: 0 0 0 1px currentColor;
 }
 
 /* Somewhere you can walk to from here. */
@@ -974,9 +1006,7 @@ button.choice.chosen .choice-label::before {
   color: var(--ok);
 }
 
-.board-point.good .board-dot {
-  background: var(--ok);
-}
+
 
 /* Where the piece stands. Deliberately the one colour on screen that is not
    part of the amber palette — "you are here" has to be findable at a glance
@@ -987,17 +1017,16 @@ button.choice.chosen .choice-label::before {
 }
 
 .board-point.here .board-dot {
-  background: #5cc8ff;
-  box-shadow: 0 0 8px #5cc8ff;
+  box-shadow: 0 0 0 1px currentColor, 0 0 10px #5cc8ff;
 }
 
 .board-point.pressable {
   cursor: pointer;
 }
 
-.board-point.pressable:hover:not(:disabled) {
-  border-color: currentColor;
-  background: rgba(0, 0, 0, 0.6);
+.board-point.pressable:hover:not(:disabled) .board-label {
+  background: #000;
+  color: var(--amber-bright);
 }
 
 .board-point:disabled {

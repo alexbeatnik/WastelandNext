@@ -2001,13 +2001,22 @@ function paintBoard() {
       const from = at.get(link.from);
       const to = at.get(link.to);
       if (!from || !to) continue;
-      const line = document.createElementNS(SVG_NS, 'line');
-      line.setAttribute('x1', String(from.x));
-      line.setAttribute('y1', String(from.y));
-      line.setAttribute('x2', String(to.x));
-      line.setAttribute('y2', String(to.y));
-      line.setAttribute('class', `board-road ${link.tone}`.trim());
-      roads.append(line);
+      /**
+       * Each road twice: a dark casing, then the road on top.
+       *
+       * A thin dashed line over a drawn landscape disappears wherever the
+       * landscape happens to be the same brightness, which on a hand-drawn map
+       * is most of it. The casing is the same trick as the plate under a label.
+       */
+      for (const kind of ['board-road-casing', `board-road ${link.tone}`.trim()]) {
+        const line = document.createElementNS(SVG_NS, 'line');
+        line.setAttribute('x1', String(from.x));
+        line.setAttribute('y1', String(from.y));
+        line.setAttribute('x2', String(to.x));
+        line.setAttribute('y2', String(to.y));
+        line.setAttribute('class', kind);
+        roads.append(line);
+      }
     }
     host.append(roads);
   }
@@ -2062,7 +2071,13 @@ async function pressAction(actionId) {
     if (answer.board) setBoard(true);
     // Sent from here, not from the main process, so a pressed button is an
     // ordinary message in the conversation this window has open.
-    if (answer.submit) await submitPrompt(answer.submit);
+    if (answer.submit) {
+      // A move made from a dialog closes it. Pressing a place on the map and
+      // then watching the reply arrive behind the still-open map is the map
+      // refusing to get out of the way of the thing it was used to do.
+      setBoard(false);
+      await submitPrompt(answer.submit);
+    }
   } catch (err) {
     status(err.message);
     activity(err.message, 'bad');
