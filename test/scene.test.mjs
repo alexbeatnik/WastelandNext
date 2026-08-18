@@ -107,11 +107,11 @@ test('a list row can be pressed when the game gave it something to do', async ()
 
   // Pressable rows are on offer exactly as the moves are — the same guard, so a
   // stale click on a bag emptied three turns ago is refused the same way.
-  assert.deepEqual(await scene.act('item-sword'), { status: 'In hand.', submit: '', sheet: false, board: false });
+  assert.deepEqual(await scene.act('item-sword'), { status: 'In hand.', submit: '', sheet: false, board: false, cards: false });
   await assert.rejects(() => scene.act('item-herb'), /no longer on offer/);
 
   // And a move may ask for the sheet, which is the only way a plugin can.
-  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: true, board: false });
+  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: true, board: false, cards: false });
   assert.deepEqual(pressed, ['item-sword', 'bag']);
 });
 
@@ -164,7 +164,50 @@ test('a move can ask for the board, as it can for the sheet', async () => {
   const scene = new Scene();
   scene.present({ pluginId: 'game', act: () => ({ board: true }) });
   scene.show({ actions: [{ id: 'map', label: 'Map' }] });
-  assert.deepEqual(await scene.act('map'), { status: '', submit: '', sheet: false, board: true });
+  assert.deepEqual(await scene.act('map'), { status: '', submit: '', sheet: false, board: true, cards: false });
+});
+
+test('a chooser is cards, and a card is on offer like anything else', async () => {
+  /**
+   * Picking who you are at the start of a run is not the same act as reading an
+   * inventory, so it is not the same window. Cards are equal by construction —
+   * the grid gives each the same width — so a longer paragraph cannot make one
+   * of them look like the recommended answer.
+   */
+  const pressed = [];
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: (id) => (pressed.push(id), { status: 'chosen' }) });
+  scene.show({
+    cards: {
+      label: 'Кто ты',
+      items: [
+        { label: 'Воин', note: 'тяжёлый и живучий', image: 'class-warrior.jpg', action: 'class-warrior' },
+        { label: 'Маг', note: 'хрупкий', image: 'class-mage.jpg', action: 'class-mage' },
+        { label: '', note: 'no name, no card' },
+      ],
+    },
+  });
+
+  const cards = scene.status().scene.cards;
+  assert.equal(cards.label, 'Кто ты');
+  assert.equal(cards.items.length, 2, 'a card with no name has nothing to choose');
+  assert.equal(cards.items[0].src, 'wasteland-plugin://fantasy-rpg/%40data/class-warrior.jpg');
+
+  assert.equal((await scene.act('class-mage')).status, 'chosen');
+  await assert.rejects(() => scene.act('class-rogue'), /no longer on offer/);
+
+  // Answering is what closes it: a scene redrawn without cards has nothing left
+  // to ask, and the renderer keys on exactly that.
+  scene.show({ title: 'Мира, Маг' });
+  assert.equal(scene.status().scene.cards, null);
+  assert.deepEqual(pressed, ['class-mage']);
+});
+
+test('a move can ask for the chooser', async () => {
+  const scene = new Scene();
+  scene.present({ pluginId: 'game', act: () => ({ cards: true }) });
+  scene.show({ actions: [{ id: 'who', label: 'Who' }] });
+  assert.deepEqual(await scene.act('who'), { status: '', submit: '', sheet: false, board: false, cards: true });
 });
 
 test('a scene belongs to the conversation it was painted in', () => {
@@ -247,7 +290,7 @@ test('a button that is not on screen cannot be pressed', async () => {
   });
   scene.show({ actions: [{ id: 'look', label: 'Look' }] });
 
-  assert.deepEqual(await scene.act('look'), { status: '', submit: 'I look', sheet: false, board: false });
+  assert.deepEqual(await scene.act('look'), { status: '', submit: 'I look', sheet: false, board: false, cards: false });
   await assert.rejects(() => scene.act('attack'), /no longer on offer/);
 
   scene.show({ actions: [{ id: 'attack', label: 'Attack' }] });
@@ -266,7 +309,7 @@ test('a plugin answering with nothing is answered with nothing', async () => {
   const scene = new Scene();
   scene.present({ pluginId: 'game', act: () => undefined });
   scene.show({ actions: [{ id: 'bag', label: 'Bag' }] });
-  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: false, board: false });
+  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: false, board: false, cards: false });
 });
 
 test('a game cannot start a turn on its own', () => {

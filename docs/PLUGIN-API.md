@@ -600,6 +600,27 @@ works — the markers and roads are the map, the picture only makes it pleasant.
 
 **`act` may answer `{board: true}`** to open it, exactly as `{sheet: true}` opens the lists.
 
+**A chooser is cards.** For the question a run opens with, or any other point where a handful of options each want a
+picture and a paragraph:
+
+```js
+cards: {
+  label: 'Who are you',
+  items: [
+    { label: 'Ranger', note: 'a bow and a long memory for tracks', image: 'class-ranger.jpg', action: 'class-ranger' },
+    { label: 'Warrior', note: 'heavy, and hard to put down',       image: 'class-warrior.jpg', action: 'class-warrior' },
+  ],
+}
+```
+
+Pictures come from `ctx.dataDir()`, as the board's does. Cards are equal by construction — the grid gives each the same
+width — so a longer description cannot quietly make one of them look like the recommended answer. Eight at most: more
+than that is a list, and a list is the sheet.
+
+**`act` answers `{cards: true}` to open it, and the answer is what closes it.** There is no close button and no Escape:
+this is a question, and a question with a way out leaves your game waiting for an answer that never arrives. Redraw the
+scene without `cards` and the dialog goes — which is what answering does anyway.
+
 **`act` may answer `{sheet: true}`** to open the sheet. It is the only way you can: the dialog belongs to the app, so an
 inventory button that merely wrote a line in the status bar would be a control describing the thing it should have
 shown. Honoured before `submit`, so a move that opens the bag *and* takes a turn shows the bag first.
@@ -863,6 +884,7 @@ Declare the **lowest** version that has everything you use. Declaring a higher o
 | 6 | The `scene` service — a drawn panel, a pinned row of moves and their hotkeys |
 | 7 | Pressable list rows (`item.action`) and `act` answering `{sheet: true}` |
 | 8 | `board` — a picture with pressable places, and files served from `ctx.dataDir()` |
+| 10 | `cards` — a chooser of equal cards, each with a picture, a name and a paragraph |
 | 9 | `panel` — your settings as a section of the left panel. The `browser` and `lookupBrowser` services are **removed** |
 
 **Not every addition moves the number.** `category` arrived after 5 and did not: a build that has never heard of the

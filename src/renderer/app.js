@@ -1958,6 +1958,7 @@ function syncSceneBusy() {
   // Walking somewhere is a move like any other, so the map is refused on the
   // same terms as the row of buttons.
   for (const point of $('board').querySelectorAll('.board-point.pressable')) point.disabled = state.streaming;
+  for (const card of $('cards').querySelectorAll('button.card')) card.disabled = state.streaming;
 }
 
 /**
@@ -1993,6 +1994,7 @@ function paintScene(status = { active: false, scene: null }) {
     // hero who is no longer anywhere.
     $('sheet-modal').hidden = true;
     $('board-modal').hidden = true;
+    $('cards-modal').hidden = true;
     return;
   }
 
@@ -2025,6 +2027,10 @@ function paintScene(status = { active: false, scene: null }) {
   // The board moves with every step, so this is the case that matters most:
   // walking into the forest must move the marker under the open map.
   if (!$('board-modal').hidden) paintBoard();
+  // The chooser closes itself when the answer arrives: a scene redrawn without
+  // cards has nothing left to ask.
+  if (!scene.cards) $('cards-modal').hidden = true;
+  else if (!$('cards-modal').hidden) paintCards();
 }
 
 function paintSheet() {
@@ -2146,6 +2152,45 @@ function paintBoard() {
   }
 }
 
+/**
+ * The chooser: equal cards, each a picture over a name over a paragraph.
+ *
+ * No close button on purpose. This window is a question — who are you — and a
+ * question with a way to dismiss it leaves the game waiting for an answer that
+ * is never coming. The plugin closes it by redrawing the scene without cards,
+ * which is what answering does.
+ */
+function paintCards() {
+  const cards = sceneShowing() ? state.scene.scene.cards : null;
+  const host = $('cards');
+  host.replaceChildren();
+  if (!cards) return;
+
+  $('cards-title').textContent = cards.label;
+  for (const card of cards.items) {
+    const button = el(card.action ? 'button' : 'div', `card ${card.tone}`.trim());
+    if (card.src) {
+      const art = el('img', 'card-art');
+      art.src = card.src;
+      art.alt = '';
+      button.append(art);
+    }
+    button.append(el('span', 'card-label', card.label));
+    if (card.note) button.append(el('span', 'card-note', card.note));
+    if (card.action) {
+      button.disabled = state.streaming;
+      button.addEventListener('click', () => pressAction(card.action));
+    }
+    host.append(button);
+  }
+}
+
+function setCards(open) {
+  const show = Boolean(open) && Boolean(sceneShowing() && state.scene.scene.cards);
+  if (show) paintCards();
+  $('cards-modal').hidden = !show;
+}
+
 function setBoard(open) {
   const show = Boolean(open) && Boolean(sceneShowing() && state.scene.scene.board);
   if (show) paintBoard();
@@ -2176,6 +2221,7 @@ async function pressAction(actionId) {
     // takes a turn should show the bag first, not after the reply lands.
     if (answer.sheet) setSheet(true);
     if (answer.board) setBoard(true);
+    if (answer.cards) setCards(true);
     // Sent from here, not from the main process, so a pressed button is an
     // ordinary message in the conversation this window has open.
     if (answer.submit) {
@@ -2183,6 +2229,7 @@ async function pressAction(actionId) {
       // then watching the reply arrive behind the still-open map is the map
       // refusing to get out of the way of the thing it was used to do.
       setBoard(false);
+      setCards(false);
       await submitPrompt(answer.submit);
     }
   } catch (err) {
@@ -2228,8 +2275,10 @@ function wireScene() {
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName)) return;
 
     const sheetOpen = !$('sheet-modal').hidden;
-    const boardOpen = !$('board-modal').hidden;
-    const mine = sheetOpen || boardOpen;
+    // The chooser counts as ours so the digits stay quiet over it — and it has
+    // no Escape either: it is a question, and dismissing a question leaves the
+    // game waiting for an answer that never comes.
+    const mine = sheetOpen || !$('board-modal').hidden || !$('cards-modal').hidden;
     // Any other dialog owns the keyboard. The shell approval one is a question
     // that has to be answered before anything else happens, and a digit
     // pressed over it must not quietly do something behind it.

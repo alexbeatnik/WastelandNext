@@ -908,7 +908,12 @@ button.choice.chosen .choice-label::before {
  * and the close button their room at 1920x1080, 1600x900, 1366x768 and
  * 1280x1024 alike.
  */
-.board-box {
+/* `.modal-box` sizes every dialog in the app and is declared further down this
+   file, so a bare `.board-box` loses to it on order alone — the map spent a
+   build at 46rem while the rule that was supposed to widen it sat right here,
+   reading perfectly. Naming both classes wins on specificity instead, which
+   does not care what order they are in. */
+.modal-box.board-box {
   width: min(90rem, 96vw, 112vh);
   max-width: none;
 }
@@ -1043,9 +1048,80 @@ button.choice.chosen .choice-label::before {
   cursor: default;
 }
 
+/* ---- the chooser ---- */
+
+.modal-box.cards-box {
+  width: min(78rem, 96vw);
+  max-width: none;
+}
+
+/**
+ * Equal by construction.
+ *
+ * `1fr` columns give every card the same width whatever its paragraph says, so
+ * a longer description cannot make one of them look like the recommended
+ * answer. `auto-fit` is what lets five cards become three and two on a narrow
+ * window instead of scrolling off the side.
+ */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.7rem;
+  max-height: 76vh;
+  overflow-y: auto;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  text-align: left;
+  background: var(--bg-deep);
+  border: 1px solid var(--amber-faint);
+  color: var(--amber);
+  font: inherit;
+  white-space: normal;
+}
+
+.card-art {
+  width: 100%;
+  /* The pictures are 2:3 portraits. Naming the ratio here means a card keeps
+     its shape before the image has loaded, so the grid does not jump. */
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border: 1px solid var(--amber-faint);
+}
+
+.card-label {
+  color: var(--amber-bright);
+  letter-spacing: 0.06em;
+}
+
+.card-note {
+  color: var(--amber-dim);
+  font-size: 0.86em;
+  line-height: 1.3;
+}
+
+.card.good { border-color: var(--ok); }
+.card.warn { border-color: var(--add); }
+.card.bad { border-color: var(--warn); }
+
+button.card:hover:not(:disabled) {
+  border-color: var(--amber);
+  background: var(--btn-bg);
+}
+
+button.card:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* ---- the sheet ---- */
 
-.sheet-box {
+.modal-box.sheet-box {
   max-width: 40rem;
   max-height: 86vh;
   overflow-y: auto;

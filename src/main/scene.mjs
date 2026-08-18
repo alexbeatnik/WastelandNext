@@ -74,6 +74,8 @@ const MAX_ACTIONS = 12;
 /** Places on a board, and the roads between them. */
 const MAX_POINTS = 24;
 const MAX_LINKS = 60;
+/** Cards in a chooser. More than eight is a list, and a list is the sheet. */
+const MAX_CARDS = 8;
 
 /**
  * The digits the app puts on the first nine actions.
@@ -157,6 +159,8 @@ export function normaliseScene(raw) {
     actions: [],
     /** A picture with pressable places on it, or null. */
     board: null,
+    /** A row of pressable cards — a picture, a name, a paragraph — or null. */
+    cards: null,
   };
 
   for (const entry of list(raw.meters, MAX_METERS)) {
@@ -266,6 +270,35 @@ export function normaliseScene(raw) {
     scene.board = { image: safeFile(raw.board.image), points, links };
   }
 
+  /**
+   * A chooser: equal cards, each with a picture over a name over a paragraph.
+   *
+   * The sheet could hold the same information as a list of rows, and that is
+   * exactly why this exists separately — picking who you are at the start of a
+   * run is not the same act as reading your inventory, and a choice that
+   * matters reads better as a handful of things side by side than as lines down
+   * a column. Cards are equal by construction: the grid gives every one the
+   * same width, so a long description cannot make its card look like the
+   * recommended answer.
+   */
+  if (raw.cards && typeof raw.cards === 'object') {
+    const items = [];
+    for (const entry of list(raw.cards.items, MAX_CARDS)) {
+      const label = text(entry?.label, MAX_LABEL);
+      if (!label) continue;
+      items.push({
+        label,
+        // Longer than a list row's note: this is the paragraph somebody reads
+        // before choosing, not a line of detail beside a name.
+        note: text(entry?.note, MAX_HINT),
+        image: safeFile(entry?.image),
+        tone: tone(entry?.tone),
+        action: text(entry?.action, MAX_ID),
+      });
+    }
+    if (items.length) scene.cards = { label: text(raw.cards.label, MAX_TITLE), items };
+  }
+
   for (const entry of list(raw.actions, MAX_ACTIONS)) {
     const id = text(entry?.id, MAX_ID);
     const label = text(entry?.label, MAX_LABEL);
@@ -328,6 +361,7 @@ export class Scene extends EventEmitter {
              */
             actions: this.#presenter ? this.#scene.actions : [],
             board: this.#board(),
+            cards: this.#cards(),
           }
         : null,
     };
@@ -347,6 +381,17 @@ export class Scene extends EventEmitter {
     if (!board) return null;
     const id = this.#presenter?.pluginId ?? '';
     return { ...board, src: board.image && id ? pluginDataUrl(id, board.image) : '' };
+  }
+
+  /** The chooser, with each card's picture turned into something loadable. */
+  #cards() {
+    const cards = this.#scene?.cards;
+    if (!cards) return null;
+    const id = this.#presenter?.pluginId ?? '';
+    return {
+      ...cards,
+      items: cards.items.map((item) => ({ ...item, src: item.image && id ? pluginDataUrl(id, item.image) : '' })),
+    };
   }
 
   #announce() {
@@ -441,6 +486,7 @@ export class Scene extends EventEmitter {
       for (const item of group.items) if (item.action) ids.add(item.action);
     }
     for (const point of this.#scene?.board?.points ?? []) if (point.action) ids.add(point.action);
+    for (const card of this.#scene?.cards?.items ?? []) if (card.action) ids.add(card.action);
     return ids;
   }
 
@@ -488,6 +534,8 @@ export class Scene extends EventEmitter {
        * already shipped, and a plugin written against it must keep working.
        */
       board: answer.board === true,
+      /** Ask for the chooser, as `sheet` and `board` ask for theirs. */
+      cards: answer.cards === true,
     };
   }
 }

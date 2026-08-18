@@ -1169,11 +1169,12 @@ async function checkScene(window) {
       // The only way a plugin can open the sheet: the dialog is the app's.
       if (id === 'peek') return { sheet: true };
       if (id === 'map') return { board: true };
+      if (id === 'who') return { cards: true };
       if (id === 'go-forest') return { status: 'Walking to the forest.' };
       return { status: 'The bag is open.' };
     },
   });
-  scene.show({
+  const SCENE = {
     title: 'Village of Mara — day 4',
     subtitle: 'the common room',
     meters: [
@@ -1195,7 +1196,16 @@ async function checkScene(window) {
       { id: 'bag', label: 'Inventory' },
       { id: 'peek', label: 'Open sheet' },
       { id: 'map', label: 'Map' },
+      { id: 'who', label: 'Who' },
     ],
+    cards: {
+      label: 'Who are you',
+      items: [
+        { label: 'Ranger', note: 'a bow and a long memory for tracks', image: 'class-ranger.jpg', action: 'class-ranger' },
+        { label: 'Warrior', note: 'heavy, and hard to put down', image: 'class-warrior.jpg', action: 'class-warrior' },
+        { label: 'Nobody', note: 'no picture, and nothing to press' },
+      ],
+    },
     board: {
       points: [
         { id: 'village', label: 'Village', x: 50, y: 80, here: true },
@@ -1204,7 +1214,8 @@ async function checkScene(window) {
       ],
       links: [{ from: 'village', to: 'forest', tone: 'good' }, { from: 'forest', to: 'tower' }],
     },
-  });
+  };
+  scene.show(SCENE);
   await new Promise((r) => setTimeout(r, 300));
 
   const drawn = await window.webContents.executeJavaScript(`(() => {
@@ -1239,7 +1250,7 @@ async function checkScene(window) {
   check('a tone reaches the class list', drawn.tags.join() === 'scene-tag bad', drawn.tags.join());
   check(
     `the app put digits on the moves — ${drawn.buttons.map((b) => `${b.key}:${b.label}`).join(' ')}`,
-    JSON.stringify(drawn.buttons.map((b) => b.key)) === '["1","2","3","4"]',
+    JSON.stringify(drawn.buttons.map((b) => b.key)) === '["1","2","3","4","5"]',
     JSON.stringify(drawn.buttons),
   );
   check('the sheet is offered', drawn.sheetButton !== 'none', drawn.sheetButton);
@@ -1377,7 +1388,10 @@ async function checkScene(window) {
       roadWidth: parseFloat(getComputedStyle(document.querySelector('#board .board-road')).strokeWidth),
       // A name on a busy drawing needs a plate under it, or it smears.
       labelPlate: getComputedStyle(document.querySelector('#board .board-label')).backgroundColor,
-      art: getComputedStyle(document.querySelector('#board')).width,
+      // The dialog, against what an ordinary dialog would have been: comparing
+      // two measurements survives a change of font size, where a number does not.
+      boxWidth: Math.round(document.querySelector('.board-box').getBoundingClientRect().width),
+      ordinary: Math.round(46 * parseFloat(getComputedStyle(document.documentElement).fontSize)),
     };
   })()`);
   check('a move can open the board', map.open !== 'none', map.open);
@@ -1400,7 +1414,19 @@ async function checkScene(window) {
     /rgba?\(0, 0, 0/.test(map.labelPlate),
     map.labelPlate,
   );
-  check(`and the map gets the window — ${map.art}`, parseFloat(map.art) > 500, map.art);
+  /**
+   * Wider than an ordinary dialog, not merely "wide".
+   *
+   * The first version asked for more than 500px, which `.modal-box` clears on
+   * its own — so it kept passing through a build where the rule meant to widen
+   * the map was being overridden by `.modal-box` further down the stylesheet,
+   * and the map sat at 46rem the whole time.
+   */
+  check(
+    `and the map gets the window — ${map.boxWidth}px against an ordinary ${map.ordinary}px`,
+    map.boxWidth > map.ordinary * 1.2,
+    `${map.boxWidth} vs ${map.ordinary}`,
+  );
 
   // Counted from here rather than from before the map was opened: opening it is
   // itself a press, and the delta is the only thing that says the click landed.
@@ -1434,6 +1460,55 @@ async function checkScene(window) {
     return { before, after: getComputedStyle(document.getElementById('board-modal')).display };
   })()`);
   check('a move that sends words shuts the map behind it', closed.before !== 'none' && closed.after === 'none', JSON.stringify(closed));
+
+  /**
+   * The chooser: equal cards, a picture over a name over a paragraph.
+   *
+   * Equal by construction is the part worth checking. The grid gives every card
+   * the same width, so a longer description cannot quietly make one of them
+   * look like the recommended answer.
+   */
+  const beforeCards = pressed.length;
+  const chooser = await window.webContents.executeJavaScript(`(async () => {
+    [...document.querySelectorAll('#scene-actions .scene-action')][4].click();
+    await new Promise((r) => setTimeout(r, 400));
+    const cards = [...document.querySelectorAll('#cards .card')];
+    return {
+      open: getComputedStyle(document.getElementById('cards-modal')).display,
+      title: document.getElementById('cards-title').textContent,
+      tags: cards.map((c) => c.tagName),
+      widths: cards.map((c) => Math.round(c.getBoundingClientRect().width)),
+      art: cards.map((c) => Boolean(c.querySelector('.card-art'))),
+      notes: cards.map((c) => (c.querySelector('.card-note')?.textContent ?? '').length),
+    };
+  })()`);
+  check(`the chooser opens — "${chooser.title}"`, chooser.open !== 'none', chooser.open);
+  check(`three cards drawn — ${chooser.tags.join(', ')}`, chooser.tags.length === 3, JSON.stringify(chooser.tags));
+  check(
+    'one with nothing to press is not a button',
+    chooser.tags[0] === 'BUTTON' && chooser.tags[2] === 'DIV',
+    JSON.stringify(chooser.tags),
+  );
+  check(`and every card is the same width — ${chooser.widths.join(', ')}`, new Set(chooser.widths).size === 1, JSON.stringify(chooser.widths));
+  check('a picture where there is one, and none where there is not', chooser.art[0] && !chooser.art[2], JSON.stringify(chooser.art));
+
+  const chose = await window.webContents.executeJavaScript(`(async () => {
+    document.querySelector('#cards .card').click();
+    await new Promise((r) => setTimeout(r, 400));
+    return document.getElementById('status-line').textContent;
+  })()`);
+  check(`pressing one reaches the game — "${chose}"`, pressed.length === beforeCards + 2 && pressed.at(-1) === 'class-ranger', JSON.stringify(pressed));
+
+  // Answering is what closes it: a scene without cards has nothing left to ask.
+  scene.show({ title: 'Chosen', actions: [{ id: 'look', label: 'Look around' }] });
+  await new Promise((r) => setTimeout(r, 300));
+  const answered = await window.webContents.executeJavaScript(
+    `getComputedStyle(document.getElementById('cards-modal')).display`,
+  );
+  check('and a scene without cards closes it', answered === 'none', answered);
+  // Put the game back: every check after this one reads the scene above.
+  scene.show(SCENE);
+  await new Promise((r) => setTimeout(r, 200));
 
   // A game asking for the sheet, which is the only way a plugin can open it.
   const asked = await window.webContents.executeJavaScript(`(async () => {
