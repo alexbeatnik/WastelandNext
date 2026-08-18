@@ -49,11 +49,16 @@ export const DEFAULT_REGISTRY = 'https://raw.githubusercontent.com/alexbeatnik/w
  * Further indexes the app ships knowing about.
  *
  * One repository per plugin is a reasonable way to publish something large —
- * Space Trader carries a bundled game engine and has its own release cycle —
- * and asking every user to paste a URL to find a plugin the app already knows
+ * Space Trader carries a bundled game engine, browser control carries a
+ * compiled browser engine, and both have release cycles of their own — and
+ * asking every user to paste a URL to find a plugin the app already knows
  * exists is a worse answer than listing it. These are asked *as well as* the
  * primary and, like the primary, cannot be removed: they are part of the build,
  * so a remove button on one would come back at the next launch.
+ *
+ * Browser control is here for a second reason. It used to be built in, and a
+ * capability that disappears in an upgrade with no way to find it again reads
+ * as one that was taken away. It is one row in GET PLUGINS instead.
  *
  * Adding to this list is a decision about what this build vouches for, and it
  * is not the same act as a user adding a registry. Everything downstream is
@@ -61,7 +66,8 @@ export const DEFAULT_REGISTRY = 'https://raw.githubusercontent.com/alexbeatnik/w
  * it is unpacked, and code still runs only once somebody switches it on.
  */
 export const BUNDLED_REGISTRIES = [
-  'https://raw.githubusercontent.com/alexbeatnik/-wasteland-plugin-space-trader/main/index.json',
+  'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-space-trader/main/index.json',
+  'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-manul-browser/main/index.json',
 ];
 
 /** A plugin archive is manifest, code and a stylesheet; megabytes are a mistake. */

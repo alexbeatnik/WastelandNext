@@ -600,17 +600,17 @@ async function checkPlugins(window) {
     start.sections[0]?.label === 'CAPABILITIES',
     JSON.stringify(start.sections[0]),
   );
-  // Four built-ins, the theme pack, and the code plugin awaiting approval.
-  check(`every plugin is listed — ${start.rows.length}`, start.rows.length === 6, JSON.stringify(start.rows.map((r) => r.name)));
-  check(`the section says how many are running — ${start.status}`, /^4 of 6 active$/.test(start.status), start.status);
+  // Two built-ins, the theme pack, and the code plugin awaiting approval.
+  check(`every plugin is listed — ${start.rows.length}`, start.rows.length === 4, JSON.stringify(start.rows.map((r) => r.name)));
+  check(`the section says how many are running — ${start.status}`, /^2 of 4 active$/.test(start.status), start.status);
 
-  const browser = start.rows.find((row) => row.name === 'Browser control');
+  const reader = start.rows.find((row) => row.name === 'File reading');
   const shell = start.rows.find((row) => row.name === 'Shell commands');
-  check('browser control is on by default', browser?.checked === true && browser?.off === false, JSON.stringify(browser));
+  check('file reading is on by default', reader?.checked === true && reader?.off === false, JSON.stringify(reader));
   // The one capability that has always been off until asked for.
   check('shell is off by default, and looks it', shell?.checked === false && shell?.off === true, JSON.stringify(shell));
-  check(`a row names the actions it adds — ${browser?.adds}`, /browser_steps/.test(browser?.adds ?? ''), browser?.adds);
-  check('a working plugin has nothing to explain', browser?.note === '', browser?.note);
+  check(`a row names the actions it adds — ${reader?.adds}`, /read_file/.test(reader?.adds ?? ''), reader?.adds);
+  check('a working plugin has nothing to explain', reader?.note === '', reader?.note);
 
   // A theme pack is manifest and CSS: there is no code to run, so there is
   // nothing to approve, and it must be active on the strength of being enabled.
@@ -643,7 +643,7 @@ async function checkPlugins(window) {
   // Asserted against the number, not merely against "it changed": the first
   // version of this check passed because the handler blanked the status line it
   // had just written, and an empty string is different from anything.
-  check(`and in the count — ${off.status}`, /^3 of 6 active$/.test(off.status), `${start.status} → ${off.status}`);
+  check(`and in the count — ${off.status}`, /^1 of 4 active$/.test(off.status), `${start.status} → ${off.status}`);
 
   // The state must survive a round trip through the main process, not merely
   // live in the checkbox that was clicked.
@@ -998,6 +998,70 @@ async function checkApproval(window) {
   })()`);
   check('choosing one stores it', stored.value === 'large', JSON.stringify(stored));
   check('and a value it never offered is refused', /not one of the choices/.test(stored.refused), stored.refused);
+
+  await checkPluginPanel(window);
+}
+
+/**
+ * A plugin's own section in the left panel.
+ *
+ * Reported: a music folder and a browser choice were reachable only by opening
+ * PLUGINS and reading a dozen rows to find which control was which — for
+ * settings that get touched daily. A plugin can now ask for a section of its
+ * own, and the app draws its declared settings there as well as on its row.
+ *
+ * Checked on screen rather than through the list, because everything
+ * interesting about it is in the drawing: the section exists, it is a real
+ * section rather than a hidden one, the control inside it works the same as
+ * the one on the row, and switching the plugin off takes it away.
+ */
+async function checkPluginPanel(window) {
+  say('A plugin section in the panel');
+
+  const read = async () =>
+    window.webContents.executeJavaScript(`(() => {
+      const section = document.querySelector('#plugin-panels details[data-plugin-panel="smoke-code"]');
+      const select = section?.querySelector('.plugin-setting select');
+      return {
+        there: Boolean(section),
+        heading: section?.querySelector('summary')?.textContent ?? '',
+        // The attribute and the pixels are different questions, and only the
+        // second one is worth a check: an author-level display outranks the UA
+        // rule behind [hidden], which is how the drop veil once shipped visible
+        // with its attribute faithfully set the whole time.
+        display: section ? getComputedStyle(section).display : 'none',
+        control: Boolean(select),
+        value: select?.value ?? '',
+        // Where it sits. Above PLUGINS, because this is the daily control and
+        // that is the occasional one.
+        beforePlugins: section
+          ? Boolean(
+              section.compareDocumentPosition(document.getElementById('plugin-list')) &
+                Node.DOCUMENT_POSITION_FOLLOWING,
+            )
+          : false,
+      };
+    })()`);
+
+  const shown = await read();
+  check('the plugin has a section of its own', shown.there === true, JSON.stringify(shown));
+  check(`and it is headed the way the manifest asked — ${shown.heading}`, shown.heading === 'SMOKE', shown.heading);
+  check('and it is actually drawn', shown.display !== 'none', shown.display);
+  check('its settings are in it', shown.control === true && shown.value === 'large', JSON.stringify(shown));
+  check('and it sits above the plugin list', shown.beforePlugins === true, JSON.stringify(shown));
+
+  // The same rule the audio transport and the game panel follow: a driver that
+  // went away takes its controls with it. A section left behind would offer
+  // settings for something that is not running.
+  await window.webContents.executeJavaScript(`window.wasteland.plugins.setEnabled('smoke-code', false)`);
+  await new Promise((r) => setTimeout(r, 400));
+  const gone = await read();
+  check('switching the plugin off takes its section away', gone.there === false, JSON.stringify(gone));
+
+  await window.webContents.executeJavaScript(`window.wasteland.plugins.setEnabled('smoke-code', true)`);
+  await new Promise((r) => setTimeout(r, 400));
+  const back = await read();
+  check('switching it back on brings it back', back.there === true, JSON.stringify(back));
 }
 
 /**
@@ -1820,6 +1884,11 @@ app.whenReady().then(async () => {
         // Asked for, so the whole chain is exercised from a manifest: declared
         // here, handed over by name, and used to put something on screen.
         services: ['notify', 'mic'],
+        // Its settings, drawn a second time as a section of the left panel.
+        // The row is where a plugin is decided about; a section is where one is
+        // used, and a setting somebody changes daily should not be behind a
+        // list of a dozen rows.
+        panel: 'SMOKE',
         settings: [
           { key: 'size', type: 'select', label: 'Size', options: [{ value: 'small', label: 'Small' }, { value: 'large', label: 'Large' }] },
         ],
@@ -1903,7 +1972,8 @@ app.whenReady().then(async () => {
       vault: document.getElementById('vault-list').textContent.trim().length,
       sections: document.querySelectorAll('.section').length,
       status: document.getElementById('status-line').textContent,
-      engine: document.getElementById('stat-engine').textContent,
+      browserChip: Boolean(document.getElementById('stat-browser')),
+      engineChip: Boolean(document.getElementById('stat-engine')),
       model: document.getElementById('stat-model').textContent,
       ctx: document.getElementById('ctx-label').textContent,
       composer: Boolean(document.getElementById('input')),
@@ -1934,7 +2004,7 @@ app.whenReady().then(async () => {
     // Nothing has been searched for yet, so an empty result list is correct.
     check('search results start empty', probe.results === 0, `${probe.results} entries`);
     check('vault section rendered', probe.vault > 0);
-    check('all left-panel sections present', probe.sections === 8, `${probe.sections} sections`);
+    check('all left-panel sections present', probe.sections === 7, `${probe.sections} sections`);
     check('composer present', probe.composer);
     check('model search controls present', probe.search);
     check('the open-a-file control is present', probe.openFile);
@@ -2078,9 +2148,14 @@ app.whenReady().then(async () => {
     check('an empty search is a quiet no-op', searched.results === 0 && searched.enabled, JSON.stringify(searched));
     check('boot reached Ready', probe.status === 'Ready', probe.status);
     check('context meter initialised', /^CTX: \d+ \/ \d+/.test(probe.ctx), probe.ctx);
-    // The status text is in the label, not just the detail: both values pass
-    // the check, and which one appeared is the interesting part.
-    check(`engine status resolved — ${probe.engine}`, /ENGINE: (MANUL-BROWSER|MISSING)$/.test(probe.engine));
+    // The browser chips are gone with the browser: nothing in this app owns a
+    // Chrome any more, and a status line for a capability that may not be
+    // installed is one that reads as broken to everyone who never wanted it.
+    check(
+      'no status chip is left over from the browser',
+      !probe.browserChip && !probe.engineChip,
+      JSON.stringify({ browser: probe.browserChip, engine: probe.engineChip }),
+    );
     check(`model status resolved — ${probe.model}`, /MODEL:/.test(probe.model));
     check('both columns have width', probe.leftWidth > 100 && probe.chatWidth > 300, `${probe.leftWidth}/${probe.chatWidth}`);
     check('no renderer errors', errors.length === 0, errors.join(' | '));

@@ -28,8 +28,6 @@
       <span class="stat" id="stat-sys"><i class="pulse"></i>SYS: ONLINE</span>
       <span class="stat" id="stat-model">MODEL: NONE</span>
       <span class="stat" id="stat-compute" hidden>RUN: —</span>
-      <span class="stat" id="stat-browser">BROWSER: IDLE</span>
-      <span class="stat" id="stat-engine">ENGINE: —</span>
       <button class="ghost" id="btn-about" title="About Wasteland Next">[ ABOUT ]</button>
       <button class="ghost" id="toggle-panel" title="Toggle the left panel">☰</button>
     </header>
@@ -124,6 +122,12 @@
 
         <!-- What the model may do. Every row is a plugin: the four that ship
              with the app, and whatever else has been installed. -->
+        <!-- Sections belonging to plugins, built from `panel` in their
+             manifests. Above PLUGINS on purpose: this is where a setting gets
+             used, while the row down there is where it gets decided, and the
+             daily thing should not be under the occasional one. -->
+        <div id="plugin-panels"></div>
+
         <details class="section" open>
           <summary>PLUGINS</summary>
           <div class="section-body">
@@ -156,21 +160,6 @@
                 <input id="registry-url" type="text" placeholder="https://github.com/owner/repo" />
                 <button id="btn-registry-add">[ ADD ]</button>
               </div>
-            </div>
-          </div>
-        </details>
-
-        <details class="section" open>
-          <summary>BROWSER</summary>
-          <div class="section-body">
-            <label class="check"><input type="checkbox" id="set-browser-headless" /> <span>Headless</span></label>
-            <label class="field">
-              <span>CHROME PATH</span>
-              <input id="set-chrome" type="text" placeholder="leave empty to auto-detect" />
-            </label>
-            <div class="row">
-              <button id="btn-browser-open">[ OPEN ]</button>
-              <button id="btn-browser-close" class="danger">[ CLOSE ]</button>
             </div>
           </div>
         </details>
@@ -368,7 +357,7 @@
         </div>
 
         <p>
-          A local LLM terminal that can drive your browser. Amber-on-black CRT interface, Electron, no cloud
+          A local LLM terminal you can teach new tricks. Amber-on-black CRT interface, Electron, no cloud
           required — the model runs on your machine and the conversation never leaves it.
         </p>
 
@@ -383,7 +372,7 @@
           <li><b>LOCAL VAULT</b> — <b>[ LOAD ]</b> it. <code>llama-server</code> is fetched automatically if you have none.</li>
           <li>Type. <code>Enter</code> sends, <code>Shift+Enter</code> makes a newline.</li>
           <li>Drop a file or a folder on the window — or <b>[ + FILE ]</b> / <b>[ + DIR ]</b> — to ask about your own code.</li>
-          <li>Switch on <b>Browser control</b> in <b>CAPABILITIES</b> and it can open pages for you.</li>
+          <li><b>GET PLUGINS</b> — install <b>Browser control</b> and it can open pages for you, or a game, or a voice.</li>
         </ol>
 
         <div class="about-links">
@@ -395,7 +384,7 @@
 
         <p class="muted about-powered">
           Inference by <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noreferrer">llama.cpp</a> ·
-          browser control by <a href="https://github.com/alexbeatnik/manul-browser" target="_blank" rel="noreferrer">manul-browser</a> ·
+          browser control, as a plugin, by <a href="https://github.com/alexbeatnik/manul-browser" target="_blank" rel="noreferrer">manul-browser</a> ·
           interface carried over from <a href="https://github.com/alexbeatnik/wasteland" target="_blank" rel="noreferrer">Wasteland Terminal</a>.
           Models are yours; nothing is uploaded anywhere.
         </p>

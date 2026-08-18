@@ -1269,6 +1269,47 @@ button.choice.chosen .choice-label::before {
   padding: 0.05rem 0.3rem;
 }
 
+/**
+ * A plugin's own section in the left panel.
+ *
+ * The same controls the plugin's row draws, restyled to read as part of the
+ * panel rather than as a row's afterthought: no dashed rail, the panel's own
+ * type size, and the label above its control the way every field the app owns
+ * is laid out. A section that looked like a transplant would be read as one.
+ */
+#plugin-panels .plugin-settings {
+  border-left: none;
+  margin-top: 0;
+  padding-left: 0;
+  gap: 0.5rem;
+}
+
+#plugin-panels .plugin-setting {
+  align-items: stretch;
+  flex-direction: column;
+  font-size: 0.84em;
+  gap: 0.15rem;
+}
+
+#plugin-panels .plugin-setting-label {
+  color: var(--amber-dim);
+  text-transform: uppercase;
+}
+
+/* A toggle is the exception: a checkbox under its own caption reads as a
+   heading with a stray box beneath it, so it stays on one line. */
+#plugin-panels .plugin-setting:has(input[type='checkbox']) {
+  align-items: center;
+  flex-direction: row-reverse;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+#plugin-panels .plugin-setting select,
+#plugin-panels .plugin-setting input[type='text'] {
+  width: 100%;
+}
+
 .plugin-meta {
   color: var(--amber-dim);
   font-size: 0.72em;

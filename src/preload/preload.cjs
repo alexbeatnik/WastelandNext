@@ -61,12 +61,6 @@ contextBridge.exposeInMainWorld('wasteland', {
     answerShell: (id, approved) => call('shell:respond', id, approved),
   },
 
-  browser: {
-    status: () => call('browser:status'),
-    open: () => call('browser:open'),
-    close: () => call('browser:close'),
-  },
-
   plugins: {
     list: () => call('plugins:list'),
     setEnabled: (id, enabled) => call('plugins:setEnabled', id, enabled),

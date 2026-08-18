@@ -28,8 +28,9 @@ the whole indirection is for; do not add an action type to `prompts.mjs`.
 `audio-player`'s first fragment did exactly that and never said "I can't play music" was false, and the first request
 to play a song got "I can't directly play music. However, I can search for it on YouTube" — from a model holding
 `play_music`. That is the same failure as answering "I have no access to real-time information" with `web_lookup` in
-hand, and the same cure applies. It is worse inside this app than most, because `BROWSER` is long, prescriptive and
-carries a worked example of playing a song on YouTube; a fragment that does not push back is competing with that.
+hand, and the same cure applies. It is worse inside this app than most, because a fragment competes with whatever else is
+installed — browser control's is long, prescriptive and carries a worked example of playing a song on YouTube, and one
+that does not push back loses to it.
 
 **Built-ins are imported statically from `src/plugins/index.mjs`, never discovered on disk.** They are part of the
 build, so there is nothing to discover — and a packaged app keeps `src/` inside `app.asar`, where whether a dynamic
@@ -157,6 +158,25 @@ changes, since the text arrives as if typed, and describing a microphone it cann
 has run, and so what a plugin may be set to stays readable without reading it. `setSetting` refuses a value that was
 not offered: a row displaying a state the plugin has no code for is worse than a refused click, and the plugin reading
 it back would be entitled to assume otherwise.
+
+**A plugin's settings can be drawn twice, and `panel` is the whole of what it takes.** A row in PLUGINS is where a
+plugin is *decided* about — beside its description, its version and the switch that turns it off — and a poor place to
+*use* a setting: reported of a music folder and a browser choice, both changed almost daily, that reaching either meant
+opening the section and reading a dozen rows to remember which control was which. The manifest declares the settings
+once; `panel` only says to draw them in the left panel as well, so there is no second way to define a control and
+nothing for the plugin's code to do. A `panel` with no `settings` is refused at load, for the same reason an empty
+category heading is left out: a section promises controls, and one that opens onto nothing is a worse lie than none.
+
+**A panel section belongs to a plugin that is running.** `paintPluginPanels` skips anything not `active`, which is the
+rule the audio transport and the game panel already follow — a driver that went away takes its controls with it, and a
+control that is drawn and cannot work is worse than one that is absent.
+
+**Which sections are open lives in `state`, and so does the caret.** Saving a setting repaints the whole plugin list,
+which throws away the `<details>` that was open and the input being typed into. Both are read back afterwards:
+`state.pluginPanels` for the open sections, and `focusedSetting`/`restoreFocus` for the control that had focus, keyed
+by plugin, setting and *which copy* — the same setting exists on the row and in the panel, and putting the caret in the
+wrong one scrolls the panel out from under the user. Without the second half a text setting loses the caret half a
+second after typing starts and the rest of the word goes into the page, with nothing on screen saying why.
 
 **`ctx.progress` draws on the plugin's own row, and the renderer keeps it in `state`.** The activity log is the wrong
 place for a 1.5 GB download — it scrolls, the narrow layout hides that column, and a percentage that has to be hunted
@@ -395,18 +415,6 @@ returns plain objects; the renderer turns them into elements. A reply containing
 displayed rather than run, and the smoke test checks exactly that. Emphasis requires its delimiters to hug the text,
 or `2 * 3 * 4 = 24` comes out italicised.
 
-**There is no attach-to-an-existing-browser mode.** The app always launches its own Chrome. Driving tabs the user is
-working in, and leaving that browser open afterwards, makes every failure look like the app interfering with their
-session.
-
-**"Look it up before saying you do not know" lives inside the lookup section, not in the base rules.** A model that
-answers "I have no access to real-time information" while holding a search action is describing a session it is not in
-— it did exactly that for the date, two messages after using the same action for the weather. The instruction names the
-class (anything that moves with time: the date, weather, prices, scores, versions, who holds an office) rather than
-listing questions, and it is part of `WEB_LOOKUP`, so a session with lookup switched off never sees it. `prompts.test.mjs`
-asserts both halves — present with the capability, absent without it — because encouraging a tool that is not there is
-the same bug as forbidding one that is.
-
 **A disabled capability is absent from the system prompt, not forbidden in it.** A model told about a tool reaches for
 it, and the resulting refusal reads to the user as a bug. `buildSystemPrompt` assembles from parts; `prompts.test.mjs`
 guards this.
@@ -417,21 +425,10 @@ guards this.
 **Roles are stored structurally.** The original stored a flat `> prompt\nreply` transcript because C had no JSON; here a
 reply that itself begins with `> ` cannot be mistaken for a new turn. There is a test for that specific case.
 
-**`web_lookup` uses a second, headless browser.** Its entire purpose is not disturbing the tab the user is looking at, so
-it must never share the visible session.
-
-**A step reporting `ok` means the engine resolved a target and acted on it — not that the page did what was wanted.**
-The feedback says so in those words, because an earlier "All N step(s) succeeded" let a model conclude a sort had
-applied when it had not, and repeat the identical batch five times. `BatchGuard` refuses an exact repeat within a turn
-and names a way forward; a bare refusal tends to produce the same batch again, apologetically.
-
 **Messages that go over the wire as the same role are joined before sending.** Mistral's chat template — and it is not alone — refuses anything but strict alternation after the system message, and it refuses by *raising inside the Jinja*: the request comes back 500 with a template traceback and nothing saying the conversation's shape is the problem. A real session hit it with two `tool` results in a row, because one reply emitted two action blocks and each result is appended separately. Every retry then appended another user turn to a list that could no longer be sent, so the chat was permanently dead — eleven messages ending `user, user, user`. `shapeForTemplate` runs on the way out and not in storage, which is what lets a conversation already wedged by this be sent again rather than lost. It also drops a leading assistant turn, since `fitToWindow` drops oldest-first and can uncover one, and it is idempotent so it can be applied again after that trim.
 
 **The follow-up loop is bounded** (`MAX_FOLLOW_UPS = 3`). A model that keeps emitting actions after every result will
 otherwise loop forever.
-
-**A failed browser step stops the batch.** Every following step assumes a page state that no longer holds; carrying on
-only piles up noise.
 
 **`reply:start` owes a `reply:end` on every path, including the failing one.** The start event puts a live,
 cursor-blinking element on screen; without the matching end a dead endpoint leaves a blinking cursor in the transcript
@@ -568,25 +565,6 @@ payloads rather than materialising them.
 
 With AUTO off the slider value is passed through **exactly**, including one the model cannot honour. An explicit
 setting that is silently overridden is worse than one that fails loudly.
-
-**Detecting an element by selector and then clicking it by label is not sound, and must not be reintroduced.** The
-engine offers both, but nothing ties them together: the label is re-resolved by the scorer and may land on a different
-element. The YouTube ad skipper was built this way and withdrawn — on a page where an ad overlays the player it clicked
-the ad, opening the advertiser in a new tab every 2.5 seconds. A convenience whose failure mode is worse than the
-problem it solves does not ship. Doing it properly needs a click-by-selector command in the engine.
-
-**`readText` falls back to the whole page body when its selector matches
-nothing** — the engine documents this in `page_text_probe.js`. Presence cannot be inferred from a non-empty answer:
-the ad watcher reads `body` as well and treats an identical answer as "not found". Without that it picked the first
-short line off YouTube and clicked it every few seconds. `scripts/adskip-live.mjs` has a bystander button that proves
-it does not.
-
-**The engine has no top-level JS evaluation.** `page.eval` and `page.url` exist only inside a handler callback, so an
-injected page-side watcher is not possible; detection has to go through `readText`/`read`/`state` and a DSL step. The
-binding exposes `session.pageEval`, which the engine answers with `unknown cmd`.
-
-**manul reuses one Chrome per profile.** Two `BrowserBridge` instances open at once look at the same page — which made
-a live check "fail" with nothing wrong in the code under test. Close one before opening another.
 
 **A chat id becomes a filename, so it is validated first.** `isSafeId` in `chats.mjs` admits only `[A-Za-z0-9_-]`.
 Ids arrive from IPC and are interpolated into a path; without the check a `../` in one would reach outside `chats/`.
@@ -741,39 +719,19 @@ them; `applySettings` used to, and the label read `999` while AUTO was deciding.
 predates a flag we pass and the server exits with "invalid argument". `PINNED_TAG` is only a fallback for when the API
 is unreachable. When changing the flags in `server.mjs`, check them against a current build's `--help`.
 
-**`MANUL_BINARY` set by the user wins, and the app never writes it.** The bundled engine is passed per session as the
-binding's `binary` option instead of through `process.env` — an env mutation is permanent for the life of the process
-and invisible to anything reading it later. The option is omitted when the user set `MANUL_BINARY`, because an explicit
-option outranks the env var inside the binding and passing it would invert their override.
-
-**The browser engine's repository is `manul-browser`, not `Manul`.** The Go module is
-`github.com/alexbeatnik/manul-browser/core`. A local clone may sit under an older directory name, so `shared/engine.mjs`
-searches `../manul-browser`, `../Manul`, `../ManulEngineGo` in that order — canonical name first. Never hard-code one of
-them: an early version pinned `../Manul` and would have found nothing on any machine that cloned the repo by its real
-name.
-
-**There is no npm dependency on `manul-browser`, on purpose.** A `file:` dependency must hard-code one directory name,
-and npm resolves dependencies before any script could correct it. The binding is loaded by path at runtime
-(`loadBinding` in `browser/manul-browser.mjs`), trying the installed package first so this keeps working if the package
-is ever published.
-
-**The engine binary keeps the name `manul`.** That is manul-browser's own CLI name and what its `findBinary` looks for.
-Renaming the file to match this repo's naming would be wrong.
-
 ## Packaging
 
-`npm run engine` stages both halves into `resources/` — `bin/manul.exe` (built) and `manul-browser/` (the binding's
-compiled `dist`, copied). Both are gitignored build output. `npm run dist` re-stages, then runs electron-builder, which
-ships `resources/` through `extraResources`.
+`npm run dist` runs electron-builder and nothing else. Nothing is staged first: the release used to build the
+manul-browser engine from source — a second checkout, a Go toolchain and a TypeScript build before packaging could
+begin — and the engine is not part of the app any more. What ships is `src/`, the manifest, the licence and
+`node_modules`, which electron-builder prunes to the runtime dependencies itself.
 
-**A packaged app cannot reach the checkout**, so anything the engine or binding needs must be staged before the build.
-`resourceRoots()` in `browser/manul-browser.mjs` looks in `process.resourcesPath` first, then the repository's
-`resources/`. It deliberately does not consult `app.isPackaged`: in development `process.resourcesPath` points into
-Electron's own dist, which holds neither, so the check falls through on its own — and this file stays importable without
-`electron`, which is what lets `bundled.test.mjs` exercise the packaged path in plain Node.
-
-That test matters more than it looks: packaged-only resolution is invisible from source, and getting it wrong shows up
-as browser control silently missing in a shipped `.exe`.
+**A capability the app half-owns is one that cannot be uninstalled.** Browser control used to be four things at once: a
+built-in plugin, a `BrowserBridge` in the main process, two IPC handlers, and a pair of buttons with two status chips
+in the window. Switching the plugin off took the model's hands off a Chrome the app still owned and still had controls
+for, and the engine was compiled from a sibling checkout on every release. It is now one plugin in one repository,
+carrying its own engine, and the app has no browser at all — no service, no `resources/`, no Go in the workflow. When
+something similar is proposed, the question to ask is whether the app is still coherent with it uninstalled.
 
 ## Text handling
 

@@ -208,6 +208,7 @@ export class PluginHost extends EventEmitter {
         themes: [],
         locales: [],
         settings: [],
+        panel: '',
         icon: '',
         category: DEFAULT_CATEGORY,
         builtin,
@@ -644,6 +645,16 @@ export class PluginHost extends EventEmitter {
         // Declaration and value together: the row draws the control from the
         // first and fills it from the second, and neither is useful alone.
         settings: entry.manifest.settings.map((setting) => ({ ...setting, value: values[setting.key] ?? '' })),
+        /**
+         * The heading its settings also get in the left panel, or ''.
+         *
+         * Reported rather than acted on here: the panel is the renderer's, and
+         * what arrives is the same declaration the row is drawn from. A plugin
+         * that is not running contributes no section — a control that is drawn
+         * and changes nothing is worse than one that is absent — but that is
+         * decided where it is drawn, from `active`, which is on this list too.
+         */
+        panel: entry.manifest.panel ?? '',
         icon: entry.manifest.icon && entry.dir ? pluginAssetUrl(entry.manifest.id, entry.manifest.icon) : '',
         enabled: Boolean(state.enabled),
         approved: Boolean(state.approved),

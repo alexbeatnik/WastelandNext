@@ -1,13 +1,15 @@
 # Writing a plugin for Wasteland Next
 
-Everything the model may *do* is a plugin. So is every theme, every language, and dictation. The four capabilities that
-ship with the app — browser control, web lookup, file reading, shell commands — are plugins too, imported from
-`src/plugins/` instead of from disk, and they use the same API as anything you write.
+Everything the model may *do* is a plugin. So is every theme, every language, and dictation. The two capabilities that
+ship with the app — file reading and shell commands — are plugins too, imported from `src/plugins/` instead of from
+disk, and they use the same API as anything you write. Browser control is not among them any more: it lives in
+[its own repository](https://github.com/alexbeatnik/wasteland-plugin-manul-browser) and carries the engine it drives,
+which is the best worked example of a plugin that brings something the app does not have.
 
 This document is the whole of it. It is written to be followed straight through by a person or by an agent: the
 [skeleton](#a-plugin-that-works) below is a working plugin, and everything after it is reference.
 
-**Plugin API version 5.** Put the number your plugin actually needs in the manifest — see
+**Plugin API version 9.** Put the number your plugin actually needs in the manifest — see
 [API versions](#api-versions). Declaring a version the user's build does not implement means your plugin is listed
 with "update Wasteland Next" instead of being loaded, which is deliberate and much better than failing halfway through
 `activate` on a function that does not exist yet.
@@ -144,8 +146,9 @@ screen, with the reason on it — it is never silently absent.
 | `main` | for code | Entry point, a path inside your own directory. Its presence is what makes this a plugin that needs approval. |
 | `icon` | no | A path inside your directory. SVG with open strokes survives the app's colour filter best. |
 | `actions` | no | Action types the model may emit. `[a-z][a-z0-9_]{0,39}`. Registering one you did not declare throws. |
-| `services` | no | `browser`, `lookupBrowser`, `audio`, `mic`, `notify`. Asking for one you did not declare throws. |
+| `services` | no | `audio`, `mic`, `notify`, `scene`. Asking for one you did not declare throws. |
 | `settings` | no | Controls drawn on your row — see [Settings](#settings). |
+| `panel` | no | Draw those settings as a section of the left panel too. A heading, or `true` for your own name — see [Settings](#settings). |
 | `themes` | no | `[{id, name, file}]` — see [Themes](#themes). |
 | `locales` | no | `[{id, name, file}]` — see [Languages](#languages). |
 | `order` | no | Where your prompt fragment sits relative to others. Lower goes first. Default 100. |
@@ -324,8 +327,8 @@ Also worth doing:
 - **Say what to do when it fails**, not just when it works.
 - **Say how to answer.** "Say what is playing in one short sentence" prevents a model reading your whole feedback
   string out loud.
-- **Push back against neighbouring sections.** The browser fragment carries a worked example of playing a song on
-  YouTube; anything competing with that has to say so explicitly.
+- **Push back against neighbouring sections.** If browser control is installed, its fragment is long, prescriptive and
+  carries a worked example of playing a song on YouTube; anything competing with that has to say so explicitly.
 
 Your fragment is in the prompt only while your plugin is switched on. A disabled capability is *absent* from the
 prompt, never forbidden in it — a model told about a tool reaches for it, and the resulting refusal reads to the user
@@ -357,7 +360,8 @@ say.
 
 ## Settings
 
-Declared in the manifest, drawn on your row, edited by the user, read live through `ctx.store`.
+Declared in the manifest, drawn on your row — and in a panel section of your own if you ask for one — edited by the
+user, read live through `ctx.store`.
 
 ```json
 "settings": [
@@ -383,6 +387,33 @@ A `select` names its options in the manifest so the control can be drawn before 
 `ctx.store.get(key)` reads live rather than at activation, so a value the user changed a moment ago is the one you see.
 `ctx.onSettingsChanged(key, value)` exists for the settings that invalidate work already done — a music folder is the
 case in point, since nothing else would make the library rescan.
+
+### A section of your own
+
+Your row in PLUGINS is where somebody *decides* about your plugin: it is beside the description, the version and the
+switch that turns the whole thing off. It is a poor place to *use* a setting — reported of a music folder and a browser
+choice, both changed almost daily, that reaching either meant opening PLUGINS and reading a dozen rows to remember
+which control was which.
+
+`panel` puts the same settings in the left panel, under a heading of your own:
+
+```json
+"panel": "MUSIC"
+```
+
+`true` uses your plugin's name instead. Nothing else changes: the same declarations, the same controls, the same
+storage — the app simply draws them in a second place. There is no second way to define a control, and nothing your
+code has to do.
+
+Two rules follow from what a section is:
+
+- **It is only drawn while your plugin is running.** Switched off, the section goes with it — the same rule the audio
+  transport and the game panel follow, because a control that is drawn and cannot work is worse than one that is absent.
+- **A `panel` with no `settings` is refused at load time**, with a reason. A section that opens onto nothing is a
+  promise of controls that are not there.
+
+The heading is trimmed to 24 characters and flattened to one line: the panel is a narrow column, and a heading that
+wraps to three lines pushes everything below the fold.
 
 ---
 
@@ -415,6 +446,12 @@ your own directory would be downloaded again on every version bump. Both are rem
 
 Named in the manifest, handed over by name. Asking for one you did not declare throws — that is what makes the plugin
 list a true account of what a plugin can reach rather than a summary somebody wrote.
+
+There are four, and the list is short on purpose. A service exists for what has to be **shared**: one audio bar, one
+microphone button, one game panel, one notification queue, each of which needs an owner to arbitrate between two
+plugins wanting it. Everything else you can simply do — your plugin runs in the main process with everything Node can
+reach, and may spawn a process, open a socket or ship a binary in its own archive. If you are looking for a service
+that would only ever have one caller, you are looking for code you can write yourself.
 
 ### `notify`
 
@@ -591,25 +628,18 @@ One plugin drives the panel at a time and the newcomer wins, as with the audio t
 the panel goes with it — and an action id that is no longer on screen is refused, so a stale click cannot make a move
 in a world that has moved on.
 
-### `browser` and `lookupBrowser`
+### There is no browser service
 
-The visible Chrome and a headless one. `lookupBrowser` exists so a lookup never disturbs the tab the user is looking
-at; never use `browser` for background work.
+There used to be two — the visible Chrome and a headless one — and they are gone. Browser control is
+[a plugin](https://github.com/alexbeatnik/wasteland-plugin-manul-browser) that owns its engine, spawns its own
+sessions and closes them in `deactivate`. Declaring `browser` or `lookupBrowser` in a manifest is now a load-time
+error naming the unknown service.
 
-```js
-const browser = ctx.service('browser');
-const outcomes = await browser.runSteps(dsl, { signal: turn.signal });
-const map = await browser.pageMap();
-const text = await browser.readText('body', 4000);
-await browser.close();
-```
-
-`runSteps` takes manul-browser DSL, one command per line. See `src/plugins/browser-control.mjs` for the full DSL as
-documented to the model, and note that **a step reporting `ok` means the engine resolved a target and acted on it —
-not that the page did what was wanted.**
-
-`readText` falls back to the whole page body when its selector matches nothing, so you cannot infer presence from a
-non-empty answer.
+That is worth reading as a pattern rather than as a loss. A plugin runs in the main process with everything Node can
+reach: it may spawn a process, open a socket, ship a binary in its own archive. A service exists only for the things
+that must be *shared* — one audio bar, one microphone button, one game panel, one notification queue — because two
+plugins driving those need an owner to arbitrate. Nothing arbitrates a browser you launched yourself, so nothing needs
+to.
 
 ---
 
@@ -833,6 +863,7 @@ Declare the **lowest** version that has everything you use. Declaring a higher o
 | 6 | The `scene` service — a drawn panel, a pinned row of moves and their hotkeys |
 | 7 | Pressable list rows (`item.action`) and `act` answering `{sheet: true}` |
 | 8 | `board` — a picture with pressable places, and files served from `ctx.dataDir()` |
+| 9 | `panel` — your settings as a section of the left panel. The `browser` and `lookupBrowser` services are **removed** |
 
 **Not every addition moves the number.** `category` arrived after 5 and did not: a build that has never heard of the
 field ignores it and loads the plugin exactly as before, so declaring 6 for it would lock your plugin out of every
@@ -849,6 +880,7 @@ Before publishing, or before telling someone it is finished:
 - [ ] `apiVersion` is the lowest that has everything you use.
 - [ ] `category` names a heading the app knows, in the manifest **and** in your registry entry. An absent one is OTHER.
 - [ ] Every action you register is in `actions`; every service you fetch is in `services`.
+- [ ] If your settings are used often, `panel` gives them a section of their own — and a `panel` needs `settings`.
 - [ ] Your prompt fragment **names the refusal it exists to prevent** and says it is wrong in this session.
 - [ ] Your fragment shows a worked example in a fenced `action` block.
 - [ ] Every `feedback` tells the model what to *say*, not just what happened.

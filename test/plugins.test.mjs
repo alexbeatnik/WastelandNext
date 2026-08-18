@@ -27,7 +27,6 @@ import {
   needsApproval,
   parseManifest,
 } from '../src/main/plugins/manifest.mjs';
-import { pageMapContext } from '../src/plugins/browser-control.mjs';
 
 setDataRoot(mkdtempSync(join(tmpdir(), 'wl-plugins-')));
 
@@ -91,7 +90,7 @@ test('an installed plugin must name an entry point; a built-in need not', () => 
 });
 
 test('a service this build does not have is a manifest error, not a runtime undefined', () => {
-  const result = parseManifest({ ...GOOD, services: ['browser', 'filesystem'] });
+  const result = parseManifest({ ...GOOD, services: ['audio', 'filesystem'] });
   assert.equal(result.ok, false);
   assert.match(result.reason, /filesystem/);
 });
@@ -101,10 +100,50 @@ test('an unusable action type is refused', () => {
   assert.equal(parseManifest({ ...GOOD, actions: ['do_thing', 'do_2'] }).ok, true);
 });
 
+/* ============================ a section of its own ============================ */
+
+test('a plugin may ask for its settings to be drawn in the left panel', () => {
+  const settings = [{ key: 'folder', type: 'folder', label: 'Music' }];
+  assert.equal(parseManifest({ ...GOOD, settings, panel: 'MUSIC' }).manifest.panel, 'MUSIC');
+  // `true` means "use my own name" — a plugin that has no better word for it
+  // should not have to repeat itself.
+  assert.equal(parseManifest({ ...GOOD, settings, panel: true }).manifest.panel, 'Thing');
+  // Absent is the default, and the default is no section at all.
+  assert.equal(parseManifest({ ...GOOD, settings }).manifest.panel, '');
+});
+
+test('a panel heading is cut to something a narrow column can hold', () => {
+  const settings = [{ key: 'folder', type: 'folder', label: 'Music' }];
+  const long = parseManifest({ ...GOOD, settings, panel: 'X'.repeat(200) });
+  assert.equal(long.manifest.panel.length, 24);
+  // Newlines would otherwise push the whole panel down the page.
+  assert.equal(parseManifest({ ...GOOD, settings, panel: 'TWO\nWORDS' }).manifest.panel, 'TWO WORDS');
+});
+
+test('a section with nothing to put in it is refused, not drawn empty', () => {
+  // The same argument an empty category heading loses: a section promises
+  // controls, and one that opens onto nothing is worse than none. Refused
+  // rather than dropped, because the manifest has misunderstood what it asked
+  // for and the message says which line to delete.
+  const result = parseManifest({ ...GOOD, panel: 'NOTHING' });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /no settings/);
+});
+
 /* ============================ enablement ============================ */
 
+/**
+ * The capability whose keys the old config actually had.
+ *
+ * Browser control is a plugin in its own repository now and is not among the
+ * built-ins any more, but a config written by a build that had it still
+ * carries `browserEnabled` and `allowBrowser` — so this stays as the fixture
+ * for the upgrade path, which is the thing being tested. It is a manifest
+ * shape, not a plugin: nothing here loads any code.
+ */
 const BROWSER_MANIFEST = { id: 'browser-control', legacy: ['browserEnabled', 'allowBrowser'], enabledByDefault: true };
 const SHELL_MANIFEST = { id: 'system-shell', legacy: ['allowShell'], enabledByDefault: false };
+const READ_MANIFEST = { id: 'read-file', legacy: ['allowReadFile'], enabledByDefault: true };
 
 test('a capability switched off in an older build stays off after the upgrade', () => {
   const settings = { browserEnabled: false, allowBrowser: true, allowShell: true };
@@ -147,8 +186,8 @@ test('a plugin that has not been allowed to run does not default to on', () => {
   assert.equal(theme.looks.enabled, true);
 
   // Built-ins are approved by shipping inside the app and keep their defaults.
-  const builtin = mergeEnablement({}, [{ ...BROWSER_MANIFEST, builtin: true, main: '' }], {});
-  assert.equal(builtin['browser-control'].enabled, true);
+  const builtin = mergeEnablement({}, [{ ...READ_MANIFEST, builtin: true, main: '' }], {});
+  assert.equal(builtin['read-file'].enabled, true);
 });
 
 test('an already-approved plugin keeps its default, and a recorded choice wins', () => {
@@ -166,29 +205,15 @@ test('mergeEnablement does not edit the map it was given', () => {
 
 /* ============================ the host ============================ */
 
-/** A browser that answers without a Chrome anywhere near it. */
-function stubBrowser({ open = false, map = null } = {}) {
-  return {
-    open,
-    steps: [],
-    closed: 0,
-    async runSteps(dsl) {
-      this.steps.push(dsl);
-      return dsl.split('\n').map((step) => ({ ok: true, step, url: 'https://a.test' }));
-    },
-    async pageMap() {
-      return map;
-    },
-    async readText() {
-      return 'the answer is 42';
-    },
-    async close() {
-      this.closed += 1;
-    },
-  };
-}
-
-const ALL_BUILTINS = ['browser-control', 'web-lookup', 'read-file', 'system-shell'];
+/**
+ * The built-ins, all of them.
+ *
+ * Two, since browser control left for a repository of its own. That is the
+ * point of the list rather than an accident of it: what ships inside the app is
+ * what has nowhere else to live, and everything that reaches this machine
+ * through something the user could uninstall is installed.
+ */
+const ALL_BUILTINS = ['read-file', 'system-shell'];
 
 /** A host with exactly the named built-ins switched on. */
 async function hostWith(enabledIds, services = {}) {
@@ -198,7 +223,7 @@ async function hostWith(enabledIds, services = {}) {
 
   const host = new PluginHost({
     userDir: mkdtempSync(join(tmpdir(), 'wl-userplugins-')),
-    services: { browser: stubBrowser(), lookupBrowser: stubBrowser(), ...services },
+    services,
   });
   await host.load();
   return host;
@@ -206,7 +231,7 @@ async function hostWith(enabledIds, services = {}) {
 
 const promptFor = (host) => buildSystemPrompt({ fragments: host.promptFragments() });
 
-test('the four built-ins are discovered', async () => {
+test('the built-ins are discovered', async () => {
   const host = await hostWith(ALL_BUILTINS);
   assert.deepEqual(host.list().map((p) => p.id), ALL_BUILTINS);
   assert.ok(host.list().every((p) => p.builtin && p.active && !p.error), JSON.stringify(host.list()));
@@ -214,17 +239,15 @@ test('the four built-ins are discovered', async () => {
 
 test('every capability on documents every action type', async () => {
   const prompt = promptFor(await hostWith(ALL_BUILTINS));
-  for (const type of ['browser_steps', 'browser_close', 'web_lookup', 'read_file', 'system_shell']) {
+  for (const type of ['read_file', 'system_shell']) {
     assert.match(prompt, new RegExp(type), `${type} should be documented`);
   }
 });
 
 test('a disabled plugin is absent from the prompt, not forbidden in it', async () => {
-  const prompt = promptFor(await hostWith(['browser-control']));
-  assert.match(prompt, /browser_steps/);
+  const prompt = promptFor(await hostWith(['read-file']));
+  assert.match(prompt, /read_file/);
   assert.doesNotMatch(prompt, /system_shell/);
-  assert.doesNotMatch(prompt, /read_file/);
-  assert.doesNotMatch(prompt, /web_lookup/);
 });
 
 test('with nothing enabled the model is told it has nothing', async () => {
@@ -237,57 +260,30 @@ test('what the prompt documents is exactly what the dispatcher accepts', async (
   // The pairing the four checkboxes used to hold together by hand. A plugin
   // contributes its text and its handler in one activation, so the two cannot
   // drift — this is the assertion that says so.
-  const host = await hostWith(['browser-control', 'read-file']);
+  const host = await hostWith(['read-file']);
   const prompt = promptFor(host);
-  for (const type of ['browser_steps', 'browser_close', 'read_file']) {
-    assert.ok(host.action(type), `${type} is documented but not dispatchable`);
-    assert.match(prompt, new RegExp(type));
-  }
-  for (const type of ['web_lookup', 'system_shell']) {
-    assert.equal(host.action(type), null, `${type} is dispatchable but not documented`);
-  }
+  assert.ok(host.action('read_file'), 'read_file is documented but not dispatchable');
+  assert.match(prompt, /read_file/);
+  assert.equal(host.action('system_shell'), null, 'system_shell is dispatchable but not documented');
 });
 
 test('a switched-off action is still known, so it can be refused in words', async () => {
-  // "Unknown action type" makes a model retry with different spelling; "browser
-  // control is switched off" makes it tell the user. The manifest is what lets
-  // the app say the second without loading the plugin.
+  // "Unknown action type" makes a model retry with different spelling; "shell
+  // commands are switched off" makes it tell the user. The manifest is what
+  // lets the app say the second without loading the plugin.
   const host = await hostWith([]);
-  assert.equal(host.owner('browser_steps')?.name, 'Browser control');
   assert.equal(host.owner('system_shell')?.name, 'Shell commands');
+  assert.equal(host.owner('read_file')?.name, 'File reading');
   assert.equal(host.owner('teleport'), null);
 });
 
-test('lookup is reached for before a refusal, and none of it survives without lookup', async () => {
-  // The reported session: "what is today's date" answered with "I have no
-  // access to real-time information", two messages after the same model used
-  // the lookup action for the weather.
-  const on = promptFor(await hostWith(['web-lookup']));
-  assert.match(on, /BEFORE saying you do not know/i);
-  assert.match(on, /today's date/i);
-  assert.match(on, /no access to real-time information/i);
-  assert.match(on, /do not fill the gap from\s+memory/i);
-
-  const off = promptFor(await hostWith(['browser-control', 'read-file', 'system-shell']));
-  assert.doesNotMatch(off, /BEFORE saying you do not know/i);
-  assert.doesNotMatch(off, /no access to real-time information/i);
-});
-
-test('the browser section keeps its hard-won paragraphs', async () => {
-  const prompt = promptFor(await hostWith(['browser-control']));
-  // The two-turn search flow: "never use positional targets" with no recipe for
-  // an unknown title left the model stuck between guessing and refusing.
-  assert.match(prompt, /TWO turns/);
-  assert.match(prompt, /search_query=/);
-  assert.match(prompt, /CLICK the 'Exact Title As Listed'/);
-  // A resolved step is not a reached goal — this is what let one model loop
-  // five times on a sort that never applied.
-  assert.match(prompt, /does NOT mean the page did what you wanted/i);
-  assert.match(prompt, /check CURRENT PAGE/i);
-  // And a route out of a stuck interaction.
-  assert.match(prompt, /do not send the same steps again/i);
-  assert.match(prompt, /query parameters/i);
-  assert.match(prompt, /will be refused/i);
+test('an action belonging to no plugin at all is not owned either', async () => {
+  // Browser control's action types used to be answerable here whether or not it
+  // was switched on, because it shipped inside the app. Uninstalled, it is not
+  // a switched-off capability — it is one this app has never heard of, and the
+  // honest refusal is the one that says so.
+  const host = await hostWith(ALL_BUILTINS);
+  assert.equal(host.owner('browser_steps'), null);
 });
 
 test('switching a plugin off takes its action and its prompt with it', async () => {
@@ -305,10 +301,30 @@ test('switching a plugin off takes its action and its prompt with it', async () 
 
 test('switching one off leaves the others alone', async () => {
   const host = await hostWith(ALL_BUILTINS);
-  await host.setEnabled('browser-control', false);
-  assert.equal(host.action('browser_steps'), null);
-  assert.ok(host.action('read_file'));
-  assert.ok(host.action('web_lookup'));
+  await host.setEnabled('read-file', false);
+  assert.equal(host.action('read_file'), null);
+  assert.ok(host.action('system_shell'));
+});
+
+test('the list reports the panel a plugin asked for, and a broken row still carries the field', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-panel-'));
+  install(root, 'radio', {
+    manifest: {
+      actions: [],
+      panel: 'RADIO',
+      settings: [{ key: 'station', type: 'text', label: 'Station' }],
+    },
+    source: `export function activate() {}`,
+  });
+  // A row that throws while being drawn takes the whole list with it, so every
+  // field the renderer reads has to be there even on an entry that failed.
+  mkdirSync(join(root, 'wreck'), { recursive: true });
+  writeFileSync(join(root, 'wreck', 'plugin.json'), '{ not json');
+
+  const host = await installedHost(root, { radio: { enabled: true, approved: true } });
+  const rows = host.list();
+  assert.equal(rows.find((row) => row.id === 'radio').panel, 'RADIO');
+  assert.equal(rows.find((row) => row.id === 'wreck').panel, '');
 });
 
 test('the decision is persisted, not merely held in memory', async () => {
@@ -320,65 +336,89 @@ test('the decision is persisted, not merely held in memory', async () => {
 /* ============================ context and turns ============================ */
 
 test('a plugin contributes turn context, with its own heading', async () => {
-  const browser = stubBrowser({
-    open: true,
-    map: { url: 'https://a.test', groups: [{ name: 'Main', elements: [{ label: 'Sign in' }], truncated: 0 }] },
+  // The heading belongs to the plugin, not to the prompt builder: a second
+  // plugin contributing context would otherwise have its lines filed under
+  // somebody else's, which is only true of one of them.
+  const root = mkdtempSync(join(tmpdir(), 'wl-context-'));
+  install(root, 'tides', {
+    manifest: { actions: [] },
+    source: `export function activate(ctx) { ctx.context(() => 'TIDE\\nhigh at 14:20'); }`,
   });
-  const host = await hostWith(['browser-control'], { browser });
+  install(root, 'moon', {
+    manifest: { actions: [] },
+    source: `export function activate(ctx) { ctx.context(async () => 'MOON\\nwaxing'); }`,
+  });
+
+  const host = await installedHost(root, {
+    tides: { enabled: true, approved: true },
+    moon: { enabled: true, approved: true },
+  });
 
   const context = await host.context();
-  assert.match(context, /CURRENT PAGE/);
-  assert.match(context, /'Sign in'/);
+  assert.match(context, /TIDE\nhigh at 14:20/);
+  assert.match(context, /MOON\nwaxing/);
 });
 
-test('a closed browser contributes nothing rather than an empty heading', async () => {
-  const host = await hostWith(['browser-control'], { browser: stubBrowser({ open: false }) });
+test('a plugin with nothing to say contributes nothing rather than an empty heading', async () => {
+  // A model shown a heading with nothing under it reads it as a fact about the
+  // world — "there is no tide" rather than "nobody asked".
+  const root = mkdtempSync(join(tmpdir(), 'wl-context-quiet-'));
+  install(root, 'quiet', {
+    manifest: { actions: [] },
+    source: `export function activate(ctx) { ctx.context(() => ''); }`,
+  });
+  const host = await installedHost(root, { quiet: { enabled: true, approved: true } });
   assert.equal(await host.context(), '');
 });
 
 test('a context provider that throws does not cost the turn its prompt', async () => {
-  const browser = stubBrowser({ open: true });
-  browser.pageMap = async () => {
-    throw new Error('the engine died');
-  };
-  const host = await hostWith(['browser-control'], { browser });
-  assert.equal(await host.context(), '');
+  const root = mkdtempSync(join(tmpdir(), 'wl-context-throw-'));
+  install(root, 'broken', {
+    manifest: { actions: [] },
+    source: `export function activate(ctx) { ctx.context(() => { throw new Error('the engine died'); }); }`,
+  });
+  install(root, 'fine', {
+    manifest: { actions: [] },
+    source: `export function activate(ctx) { ctx.context(() => 'STILL HERE'); }`,
+  });
+
+  const host = await installedHost(root, {
+    broken: { enabled: true, approved: true },
+    fine: { enabled: true, approved: true },
+  });
+
+  // One plugin's bad turn is not the whole turn's: the failure is logged and
+  // everything else still reaches the model.
+  assert.equal(await host.context(), 'STILL HERE');
 });
 
-test('the repeat guard is rearmed once per turn, not once per batch', async () => {
-  const browser = stubBrowser({ open: true });
-  const host = await hostWith(['browser-control'], { browser });
-  const turn = { signal: undefined, status() {}, log() {}, confirm: async () => true };
-  const steps = 'CLICK the \'Buy\' button';
+test('a turn hook is called once per user message, and reaches every plugin that asked', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-turns-'));
+  install(root, 'counter', {
+    manifest: { actions: ['count'] },
+    source: `let turns = 0;
+      export function activate(ctx) {
+        ctx.prompt('COUNT — {"type":"count","steps":""}');
+        ctx.onTurnStart(() => { turns += 1; });
+        ctx.action({ type: 'count', run: async () => ({ ok: true, summary: String(turns) }) });
+      }`,
+  });
+  install(root, 'thrower', {
+    manifest: { actions: [] },
+    source: `export function activate(ctx) { ctx.onTurnStart(() => { throw new Error('nope'); }); }`,
+  });
+
+  const host = await installedHost(root, {
+    counter: { enabled: true, approved: true },
+    thrower: { enabled: true, approved: true },
+  });
 
   host.beginTurn();
-  const first = await host.action('browser_steps').run(steps, turn);
-  assert.equal(first.ok, true);
-
-  // The same batch again inside one turn cannot produce a different result.
-  const repeat = await host.action('browser_steps').run(steps, turn);
-  assert.equal(repeat.ok, false);
-  // A bare refusal tends to produce the same batch again, apologetically, so
-  // the guard names a way forward rather than just saying no.
-  assert.match(repeat.feedback, /already ran exactly these steps/i);
-  assert.match(repeat.feedback, /Try a different route/i);
-
-  // A new turn is a new question, and the user may well have asked for it again.
   host.beginTurn();
-  const later = await host.action('browser_steps').run(steps, turn);
-  assert.equal(later.ok, true);
-});
-
-test('a lookup closes its own browser and never touches the visible one', async () => {
-  const visible = stubBrowser({ open: true });
-  const lookupBrowser = stubBrowser();
-  const host = await hostWith(['web-lookup'], { browser: visible, lookupBrowser });
-
-  const result = await host.action('web_lookup').run('current weather', { status() {}, log() {} });
-  assert.equal(result.ok, true);
-  assert.match(result.feedback, /42/);
-  assert.equal(lookupBrowser.closed, 1, 'the headless browser must not be left holding memory');
-  assert.equal(visible.steps.length, 0, 'a lookup must never disturb the page the user is looking at');
+  // A hook that throws is logged and stepped over: a third-party typo must not
+  // be able to stop every other plugin being told a turn has begun.
+  const result = await host.action('count').run('', { status() {}, log() {} });
+  assert.equal(result.summary, '2');
 });
 
 /* ============================ installed plugins ============================ */
@@ -401,7 +441,7 @@ async function installedHost(root, state = {}) {
   for (const id of ALL_BUILTINS) plugins[id] = { enabled: false, approved: true };
   config.update({ plugins: { ...plugins, ...state } });
 
-  const host = new PluginHost({ userDir: root, services: { browser: stubBrowser(), lookupBrowser: stubBrowser() } });
+  const host = new PluginHost({ userDir: root, services: {} });
   await host.load();
   return host;
 }
@@ -575,7 +615,7 @@ test('a plugin cannot claim an action type a built-in already provides', async (
   const plugins = {};
   for (const id of ALL_BUILTINS) plugins[id] = { enabled: true, approved: true };
   config.update({ plugins: { ...plugins, shadow: { enabled: true, approved: true } } });
-  const host = new PluginHost({ userDir: root, services: { browser: stubBrowser(), lookupBrowser: stubBrowser() } });
+  const host = new PluginHost({ userDir: root, services: {} });
   await host.load();
 
   const entry = host.list().find((p) => p.id === 'shadow');
@@ -588,7 +628,7 @@ test('a plugin may not reach for what its manifest never declared', async () => 
   const root = mkdtempSync(join(tmpdir(), 'wl-undeclared-'));
   install(root, 'sneaky', {
     manifest: { actions: [] },
-    source: `export function activate(ctx) { ctx.service('browser'); }`,
+    source: `export function activate(ctx) { ctx.service('audio'); }`,
   });
   install(root, 'sneakier', {
     manifest: { actions: ['declared'] },
@@ -862,6 +902,54 @@ function stubAudio() {
   };
 }
 
+/**
+ * Browser control, from the repository it moved to.
+ *
+ * The capability this app shipped with until it did not, now a plugin like any
+ * other — and the case that proves the boundary holds. It declares no service,
+ * because there is no browser here to lend it; it brings its own engine; and it
+ * asks for a section in the left panel, which is the newest thing the manifest
+ * can say. All three are exactly the parts that would break silently.
+ *
+ * Skipped when the checkout is absent. Its `bin/` is staged rather than
+ * committed, so a fresh clone has the code and not the engine — which is fine
+ * here: nothing in this test starts a browser.
+ */
+const browserCheckout = join(process.cwd(), '..', 'wasteland-plugin-manul-browser', 'plugins');
+const haveBrowser = existsSync(join(browserCheckout, 'manul-browser', 'plugin.json'));
+
+test('browser control loads into the real host, without a browser in it', { skip: !haveBrowser }, async () => {
+  config.update({ plugins: { 'manul-browser': { enabled: true, approved: true } } });
+  // No services at all, deliberately: if this ever needs one, the app has grown
+  // a browser again and the whole move has come undone.
+  const host = new PluginHost({ userDir: browserCheckout, services: {} });
+  await host.load();
+
+  const row = host.list().find((plugin) => plugin.id === 'manul-browser');
+  assert.equal(row.active, true, row.error);
+  assert.deepEqual(row.services, []);
+
+  for (const type of ['browser_steps', 'browser_close', 'web_lookup']) {
+    assert.ok(host.action(type), `${type} did not register`);
+  }
+
+  const prompt = buildSystemPrompt({ fragments: host.promptFragments() });
+  assert.match(prompt, /browser_steps/);
+  assert.match(prompt, /web_lookup/);
+  // The refusals each fragment exists to contradict. `\s+` because the
+  // fragments are hard-wrapped and any phrase worth asserting on is long
+  // enough to be split across two lines.
+  assert.match(prompt, /I cannot browse the web/i);
+  assert.match(prompt, /no access to real-time\s+information/i);
+
+  // Its settings are drawn in the panel as well as on its row, which is the
+  // whole of what `panel` does — and the app is what draws them.
+  assert.equal(row.panel, 'BROWSER');
+  assert.deepEqual(row.settings.map((setting) => setting.key), ['engine', 'headless', 'executable']);
+
+  await host.shutdown();
+});
+
 test('the published plugins load into the real host', { skip: !havePlugins }, async () => {
   const audio = stubAudio();
   config.update({
@@ -1048,26 +1136,6 @@ test('the player says so rather than throwing when no folder is set', { skip: !h
     () => host.action('play_music').run('anything', { status() {}, log() {} }),
     /no music folder is set/,
   );
-});
-
-/* ============================ page map ============================ */
-
-test('pageMapContext flattens a map into quoted labels', () => {
-  const context = pageMapContext({
-    url: 'https://a.test',
-    groups: [
-      { name: 'Main', elements: [{ label: 'Sign in' }, { label: 'Register' }], truncated: 0 },
-      { name: 'Nav', elements: [{ label: 'Home' }], truncated: 3 },
-    ],
-  });
-  assert.match(context, /URL: https:\/\/a\.test/);
-  assert.match(context, /Main: 'Sign in', 'Register'/);
-  assert.match(context, /Nav: 'Home' \(\+3 more\)/);
-});
-
-test('pageMapContext is empty when there is nothing to describe', () => {
-  assert.equal(pageMapContext(null), '');
-  assert.equal(pageMapContext({ url: 'https://a.test', groups: [] }), '');
 });
 
 /* ============================ a plugin's own state ============================ */

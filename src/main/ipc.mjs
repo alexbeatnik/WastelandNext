@@ -16,7 +16,6 @@ import { planFor } from './models/placement.mjs';
 import { detectVram, placementForSize } from './llm/gpu.mjs';
 import { server } from './llm/server.mjs';
 import { downloadLlamaServer, llamaServerStatus } from './llm/tools.mjs';
-import { BrowserBridge, browser, engineAvailable } from './browser/manul-browser.mjs';
 import { PluginHost } from './plugins/host.mjs';
 import { pluginDataDir } from './paths.mjs';
 import { serveProtocols } from './plugins/protocol.mjs';
@@ -46,16 +45,18 @@ const VERSION = (() => {
   }
 })();
 
-/** Lookups get their own headless browser so they never touch the visible one. */
-const lookupBrowser = new BrowserBridge();
-
 /**
- * The two browsers are handed to the host as *services*, not imported by the
- * plugins that use them. That is what makes "which plugin can reach what" a
- * fact readable from a manifest, and what lets the host be tested with a stub
- * browser and no Chrome anywhere.
+ * Services are handed to the host by name, never imported by the plugins that
+ * use them. That is what makes "which plugin can reach what" a fact readable
+ * from a manifest, and what lets the host be tested with stubs and none of the
+ * real machinery anywhere.
+ *
+ * There is no browser among them. Driving one is a plugin's job now, engine and
+ * all — the app used to own a `BrowserBridge`, two IPC handlers and a pair of
+ * buttons for a Chrome that only ever existed because a plugin asked it to, and
+ * a capability the app half-owns is one that cannot be uninstalled.
  */
-const plugins = new PluginHost({ services: { browser, lookupBrowser, audio, notify, mic, scene } });
+const plugins = new PluginHost({ services: { audio, notify, mic, scene } });
 const agent = new Agent({ server, plugins });
 
 /**
@@ -91,8 +92,6 @@ function snapshot() {
   return {
     settings: config.load(),
     llm: server.status,
-    browser: browser.status,
-    engine: engineAvailable(),
     busy: agent.busy,
     version: VERSION,
     update: updater?.status ?? { state: 'idle' },
@@ -179,9 +178,6 @@ export function registerIpc(windowGetter) {
   server.on('state', (status) => send('llm:state', status));
   server.on('log', (line) => send('llm:log', { line }));
   server.on('tool', (progress) => send('tool:progress', progress));
-  browser.on('state', (status) => send('browser:state', status));
-  browser.on('step', (outcome) => send('browser:step', { outcome }));
-  browser.on('log', (line) => send('browser:log', { line }));
 
   const handle = (channel, fn) =>
     ipcMain.handle(channel, async (_event, ...args) => {
@@ -588,17 +584,6 @@ export function registerIpc(windowGetter) {
   handle('mic:transcribe', (bytes) => mic.hear(bytes));
   handle('mic:failed', (message) => mic.fail(message));
 
-  /* ---------- browser ---------- */
-  handle('browser:status', () => browser.status);
-  handle('browser:open', async () => {
-    await browser.ensureOpen();
-    return browser.status;
-  });
-  handle('browser:close', async () => {
-    await browser.close();
-    return browser.status;
-  });
-
   // Started last and deliberately not awaited: registering the handlers is what
   // lets the window boot, and a plugin that is slow to import must not hold the
   // window back. Anything that needs the list waits on `plugins.ready`.
@@ -628,9 +613,17 @@ async function restoreModel() {
   }
 }
 
-/** Called from `before-quit`. Stops the browsers; the model is unloaded after. */
+/**
+ * Called from `before-quit`. Stops the plugins; the model is unloaded after.
+ *
+ * `plugins.shutdown()` is where a browser gets closed now — it calls every
+ * active plugin's `deactivate`, and browser control's closes both of its
+ * sessions there. An orphaned Chrome outliving the app is the failure this
+ * prevents, and it is the plugin's to prevent because it is the plugin's
+ * Chrome.
+ */
 export async function shutdown() {
   download?.abort();
   agent.stop();
-  await Promise.allSettled([plugins.shutdown(), browser.close(), lookupBrowser.close()]);
+  await plugins.shutdown();
 }

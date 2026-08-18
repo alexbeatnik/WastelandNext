@@ -51,6 +51,15 @@ const state = {
   /** `id → {text, received, total}` for a plugin that is fetching something. */
   pluginProgress: {},
   /**
+   * Which plugin sections in the left panel are open.
+   *
+   * Held here rather than read off the DOM for the same reason the progress
+   * meter is: every saved setting repaints the whole list, and a section that
+   * folded shut because a checkbox inside it was ticked looks like the click
+   * closed it. `<details open>` is DOM state, and the DOM is rebuilt.
+   */
+  pluginPanels: new Set(),
+  /**
    * Notices already shown, `id → notice`.
    *
    * One can arrive twice — through the boot snapshot and again on the event
@@ -681,16 +690,6 @@ function paintCompute(llm) {
   label.className = `stat ${!real ? '' : real.where === 'cpu' ? 'warn' : 'ok'}`.trim();
 }
 
-function paintBrowser(browser) {
-  const label = $('stat-browser');
-  label.textContent = browser.open ? `BROWSER: ${(browser.mode || 'open').toUpperCase()}` : 'BROWSER: IDLE';
-  label.className = `stat ${browser.open ? 'ok' : ''}`;
-
-  const engine = $('stat-engine');
-  engine.textContent = browser.engine ? 'ENGINE: MANUL-BROWSER' : 'ENGINE: MISSING';
-  engine.className = `stat ${browser.engine ? '' : 'warn'}`;
-}
-
 /* ============================ the model picker ============================ */
 
 function setModelMenu(open) {
@@ -801,19 +800,31 @@ function pluginIcon(plugin) {
 }
 
 /** The controls a plugin declared for its own settings. */
-function settingControls(plugin) {
+function settingControls(plugin, where = 'row') {
   const box = el('div', 'plugin-settings');
 
   for (const setting of plugin.settings ?? []) {
     const row = el('div', 'plugin-setting');
     row.append(el('span', 'plugin-setting-label', setting.label));
+    // Which control this is, in words that survive the element being thrown
+    // away: saving repaints the list, and `restoreFocus` has to find the same
+    // control again in a tree that no longer contains the one it started in.
+    // `where` is part of it because the same setting is drawn twice — once on
+    // the plugin's row and once in its panel — and putting the caret back in
+    // the wrong copy would scroll the panel out from under the user.
+    const mark = (node) => {
+      node.dataset.plugin = plugin.id;
+      node.dataset.setting = setting.key;
+      node.dataset.where = where;
+      return node;
+    };
 
     if (setting.type === 'toggle') {
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.checked = Boolean(setting.value);
       input.addEventListener('change', () => saveSetting$(plugin.id, setting.key, input.checked));
-      row.append(input);
+      row.append(mark(input));
     } else if (setting.type === 'folder') {
       const value = el('span', 'plugin-setting-value', setting.value || 'not set');
       value.title = setting.value || '';
@@ -829,7 +840,7 @@ function settingControls(plugin) {
           pick.disabled = false;
         }
       });
-      row.append(value, pick);
+      row.append(value, mark(pick));
     } else if (setting.type === 'select') {
       // The manifest names the choices, so the control can be drawn before a
       // line of the plugin's code has run — and what a plugin may be set to
@@ -851,7 +862,7 @@ function settingControls(plugin) {
       }
       select.value = setting.value ?? '';
       select.addEventListener('change', () => saveSetting$(plugin.id, setting.key, select.value));
-      row.append(select);
+      row.append(mark(select));
     } else {
       const input = document.createElement('input');
       input.type = 'text';
@@ -862,11 +873,99 @@ function settingControls(plugin) {
         clearTimeout(timer);
         timer = setTimeout(() => saveSetting$(plugin.id, setting.key, input.value), 500);
       });
-      row.append(input);
+      row.append(mark(input));
     }
     box.append(row);
   }
   return box;
+}
+
+/**
+ * Where the caret was, so a repaint can put it back.
+ *
+ * Every saved setting repaints the whole plugin list, which throws away the
+ * control being used. On a checkbox that is invisible; in a text field it means
+ * the caret jumps out of the box half a second after the user starts typing,
+ * and the rest of the word goes into the page. Nothing on screen says why.
+ */
+function focusedSetting() {
+  const node = document.activeElement;
+  if (!node?.dataset?.setting) return null;
+  return {
+    plugin: node.dataset.plugin,
+    setting: node.dataset.setting,
+    where: node.dataset.where,
+    // Only a text field has one, and reading it off anything else throws in
+    // some browsers — hence the guard rather than an optional chain.
+    start: node.selectionStart ?? null,
+    end: node.selectionEnd ?? null,
+  };
+}
+
+/** Put it back, if the same control is still on screen. */
+function restoreFocus(mark) {
+  if (!mark) return;
+  const node = document.querySelector(
+    `[data-plugin="${mark.plugin}"][data-setting="${mark.setting}"][data-where="${mark.where}"]`,
+  );
+  if (!node) return;
+  node.focus();
+  if (mark.start !== null && typeof node.setSelectionRange === 'function') {
+    try {
+      node.setSelectionRange(mark.start, mark.end);
+    } catch {
+      /* not a field that has a selection */
+    }
+  }
+}
+
+/**
+ * A plugin's own section in the left panel.
+ *
+ * The settings on a plugin's row are where a choice is *made* — beside the
+ * description, the version and the switch that turns the whole thing off. This
+ * is where one gets *used*: a music folder, which browser to drive, the things
+ * that are changed often enough that opening PLUGINS and reading a dozen rows
+ * to find the right control is the wrong shape of work. Same declaration, same
+ * controls, same IPC — the manifest's `panel` only says where else to draw it.
+ *
+ * Only for a plugin that is actually running. A section drawn for something
+ * switched off would offer controls that change nothing anyone can see, which
+ * is the rule the audio transport and the game panel both already follow: a
+ * driver that went away takes its controls with it.
+ */
+function paintPluginPanels(list = []) {
+  const host = $('plugin-panels');
+  if (!host) return;
+  host.replaceChildren();
+
+  for (const plugin of list) {
+    if (!plugin.panel || !plugin.active || !plugin.settings?.length) continue;
+
+    const section = el('details', 'section');
+    section.dataset.pluginPanel = plugin.id;
+    // Rebuilt from `state`, never from the element that was here a moment ago:
+    // this function is called from `paintPlugins`, which runs on every saved
+    // setting, and a section that folded shut mid-click reads as the click
+    // having closed it.
+    section.open = state.pluginPanels.has(plugin.id);
+    section.addEventListener('toggle', () => {
+      if (section.open) state.pluginPanels.add(plugin.id);
+      else state.pluginPanels.delete(plugin.id);
+    });
+
+    const summary = document.createElement('summary');
+    summary.textContent = plugin.panel;
+    // The name is worth having somewhere: the heading is the plugin's own
+    // wording and need not say which plugin it belongs to.
+    summary.title = plugin.name;
+
+    const body = el('div', 'section-body');
+    body.append(settingControls(plugin, 'panel'));
+
+    section.append(summary, body);
+    host.append(section);
+  }
 }
 
 async function saveSetting$(id, key, value) {
@@ -888,6 +987,9 @@ async function saveSetting$(id, key, value) {
  */
 function paintPlugins(list = []) {
   state.plugins = list;
+  // Taken before anything is torn down: `replaceChildren` below removes the
+  // element the user is typing in, and after that there is nothing left to ask.
+  const focused = focusedSetting();
   const host = $('plugin-list');
   host.replaceChildren();
 
@@ -1045,6 +1147,11 @@ function paintPlugins(list = []) {
   // question nobody asked. It is also how a previous error message goes away.
   const active = list.filter((plugin) => plugin.active).length;
   $('plugin-status').textContent = list.length ? `${active} of ${list.length} active` : 'No plugins found.';
+
+  // From the same list and in the same breath: a plugin switched off here has
+  // to lose its panel section now, not at the next repaint of something else.
+  paintPluginPanels(list);
+  restoreFocus(focused);
 }
 
 /**
@@ -2586,9 +2693,6 @@ function applySettings(settings) {
   $('set-llama-path').value = settings.llamaServerPath;
   $('set-system-prompt').value = settings.systemPrompt;
 
-  $('set-browser-headless').checked = settings.browserHeadless;
-  $('set-chrome').value = settings.chromePath;
-
   // What the model may do is not painted from here any more: it belongs to the
   // plugin list, which the main process owns and reports whole.
   $('set-thinking').checked = settings.thinking;
@@ -2775,23 +2879,6 @@ function handleEvent(payload) {
       scrollChat();
       break;
     }
-
-    case 'browser:step':
-      activity(
-        `${payload.outcome.ok ? '✓' : '✗'} ${payload.outcome.step}${
-          payload.outcome.error ? ` — ${payload.outcome.error}` : ''
-        }`,
-        payload.outcome.ok ? 'ok' : 'bad',
-      );
-      break;
-
-    case 'browser:state':
-      paintBrowser(payload);
-      break;
-
-    case 'browser:log':
-      activity(payload.line);
-      break;
 
     case 'llm:state':
       paintLlm(payload);
@@ -3098,19 +3185,6 @@ function wire() {
 
   $('btn-cancel-download').addEventListener('click', () => api.models.cancelDownload());
 
-  $('btn-browser-open').addEventListener('click', async () => {
-    status('Opening browser…');
-    try {
-      paintBrowser(await api.browser.open());
-      status('Browser ready.');
-    } catch (err) {
-      status(err.message);
-      activity(err.message, 'bad');
-    }
-  });
-
-  $('btn-browser-close').addEventListener('click', async () => paintBrowser(await api.browser.close()));
-
   $('btn-shell-approve').addEventListener('click', () => answerShell(true));
   $('btn-shell-reject').addEventListener('click', () => answerShell(false));
 
@@ -3124,9 +3198,7 @@ function wire() {
   bindText('set-endpoint', 'externalEndpoint');
   bindText('set-llama-path', 'llamaServerPath');
   bindText('set-system-prompt', 'systemPrompt');
-  bindText('set-chrome', 'chromePath');
 
-  bindCheck('set-browser-headless', 'browserHeadless');
   bindCheck('set-crt', 'crtEffects');
 
   $('btn-store-refresh').addEventListener('click', () => refreshStore());
@@ -3189,7 +3261,6 @@ async function boot() {
   applySettings(snapshot.settings);
   paintLlm(snapshot.llm);
   paintCompute(snapshot.llm);
-  paintBrowser({ ...snapshot.browser, engine: snapshot.engine });
   paintCtx({ used: 0, max: snapshot.settings.nCtx, percent: 0 });
   // A first paint from the snapshot, which may have been taken while discovery
   // was still running; `refreshPlugins` below waits for it to settle.
@@ -3225,7 +3296,6 @@ async function boot() {
   // the app was closed is reported during boot, which is earlier than this.
   for (const notice of snapshot.notices ?? []) showNotice(notice);
 
-  if (!snapshot.engine) activity('manul-browser engine not built — run `npm run engine` for browser control.', 'bad');
   status('Ready');
 
   // Last, unawaited and quiet. It is what puts UPDATE on an installed row, so

@@ -1,35 +1,33 @@
 # Wasteland Next
 
-**A local LLM terminal that can drive your browser.** Amber-on-black CRT interface, Electron, no cloud required.
+**A local LLM terminal you can teach new tricks.** Amber-on-black CRT interface, Electron, no cloud required.
 
 Wasteland Next is the [Wasteland Terminal](https://github.com/alexbeatnik/wasteland) interface rebuilt on Electron, with
-the browser-control pipeline from [OS-Manul](https://github.com/alexbeatnik/OS-MANUL) and the
-[manul-browser](https://github.com/alexbeatnik/manul-browser) engine underneath it. The look is the original's; the
-security architecture is not — there is no seccomp lockdown, no encrypted chat store, no sandboxed executor. What
-replaces them is a browser the model can actually use.
+the agent pipeline from [OS-Manul](https://github.com/alexbeatnik/OS-MANUL) underneath it. The look is the original's;
+the security architecture is not — there is no seccomp lockdown, no encrypted chat store, no sandboxed executor. What
+replaces them is a plugin system: everything the model may *do* arrives as a plugin, is listed on a row you can read,
+and is switched on by you.
+
+That includes driving a browser, which used to be built in and is now
+[a plugin of its own](https://github.com/alexbeatnik/wasteland-plugin-manul-browser) carrying the
+[manul-browser](https://github.com/alexbeatnik/manul-browser) engine inside it.
 
 ## What it does
 
 Type a request. The model answers, or emits a fenced action block and the app carries it out:
 
-| Action | What happens |
-|---|---|
-| `browser_steps` | Runs manul-browser DSL against your visible Chrome — navigate, click, fill, press, scroll |
-| `browser_close` | Shuts the controlled browser down |
-| `web_lookup` | A silent search in a **separate headless browser**, so your open tab is untouched |
-| `read_file` | Reads one file, read-only, inside your home directory |
-| `system_shell` | Runs a shell command — but only after you approve it in a dialog |
-
-The browser is always one the app launches itself; there is no attach-to-your-own-Chrome mode, so a failure can never
-look like the app meddling with tabs you were using.
+| Action | What happens | Where it comes from |
+|---|---|---|
+| `read_file` | Reads one file, read-only, inside your home directory | built in |
+| `system_shell` | Runs a shell command — but only after you approve it in a dialog | built in |
+| `browser_steps` | Runs manul-browser DSL against a real browser — navigate, click, fill, press, scroll | [browser control](https://github.com/alexbeatnik/wasteland-plugin-manul-browser) |
+| `browser_close` | Shuts that browser down | browser control |
+| `web_lookup` | A silent search in a **separate headless browser**, so your open tab is untouched | browser control |
 
 **Every one of those is a plugin**, switched on and off in the PLUGINS section of the left panel — and more can be
-installed. See [Plugins](#plugins) below.
-
-After a browser batch the page is scanned and its real labels are fed back, so the next step targets text that is
-actually on screen instead of a guess. A title that is not on screen yet takes two turns by design: search on the
-first, click an exact result on the second. The model is told that in so many words, with the search-and-stop shape
-written out, because "never use positional targets" on its own leaves it choosing between guessing and refusing.
+installed. Two ship inside the app because they reach this machine's own files and shell, and there is nowhere else for
+them to come from; everything else, browser control included, is installed from a registry. See [Plugins](#plugins)
+below.
 
 Replies are rendered as markdown — headings, lists, links, emphasis, inline code and code blocks. The original forbade
 it because Nuklear drew glyphs rather than documents, so `**bold**` reached the user as four asterisks; this view can
@@ -82,8 +80,9 @@ click.
 A plugin contributes its action handlers **and** the slice of the system prompt that documents them, in one act. That
 is the point of the indirection: a switched-off capability is absent from the prompt rather than described and then
 refused, so the model never reaches for a tool it cannot have, and the two halves cannot drift apart. What a plugin may
-reach for — the browser, the headless lookup browser, audio output — is declared in its manifest and handed over by
-name, so the plugin list is a true account of what is running rather than a summary somebody wrote.
+reach for — audio output, the microphone, notifications, the game panel — is declared in its manifest and handed over
+by name, so the plugin list is a true account of what is running rather than a summary somebody wrote. A plugin that
+needs something the app does not have brings it: browser control ships the engine it drives.
 
 **Two kinds, and only one of them is code.** A theme pack is a manifest and some CSS, read by the app's own protocol
 handler; there is nothing to run, so there is nothing to consent to. Anything with an entry point runs in the main
@@ -145,7 +144,7 @@ to defeat the cache by importing the entry point under a unique query made it wo
 plugin's own imports, so a new entry point linked against cached dependencies and failed outright.
 
 **Writing one is documented in full in [docs/PLUGIN-API.md](docs/PLUGIN-API.md)** — the manifest, every method on
-`ctx`, all five services, the rules that are not negotiable, and a checklist. It is written to be followed straight
+`ctx`, every service, the rules that are not negotiable, and a checklist. It is written to be followed straight
 through by a person or by an agent. The
 [registry repository](https://github.com/alexbeatnik/wasteland-plugins) holds the published plugins and how to publish
 one.
@@ -155,43 +154,24 @@ one.
 | Component | Why | How |
 |---|---|---|
 | Node ≥ 22 | build and run | [nodejs.org](https://nodejs.org) |
-| Go ≥ 1.26 | builds the engine | [go.dev](https://go.dev/dl/) |
-| A [manul-browser](https://github.com/alexbeatnik/manul-browser) checkout | engine source + Node binding | clone it **beside this repo** |
-| Google Chrome | what the engine drives | system install |
 | `llama-server` | local inference | **downloaded on first model load** — or supply your own on `PATH` |
+| Chrome or Firefox | only for browser control | system install, and the plugin brings the engine |
 
-Only Node is needed to start the app. Without Go and the manul-browser checkout you get chat but no browser control;
-without `llama-server` you can still point the app at any OpenAI-compatible endpoint.
+Node is the whole build requirement. There is no Go toolchain and no second checkout any more: the browser engine used
+to be compiled from source here and is now a released binary inside
+[its own plugin](https://github.com/alexbeatnik/wasteland-plugin-manul-browser). Without `llama-server` you can still
+point the app at any OpenAI-compatible endpoint.
 
 ## Install
 
 ```bash
-git clone https://github.com/alexbeatnik/manul-browser   # beside this repo
 git clone <this repo> WastelandNext
 cd WastelandNext
-npm install          # also builds the engine into resources/bin
+npm install
 npm start
 ```
 
-`npm install` runs `scripts/build-manul-browser.mjs`, which stages **both halves** of manul-browser into `resources/`:
-
-```
-resources/bin/manul.exe      the Go engine, built from the checkout's core/
-resources/manul-browser/     the Node binding's compiled dist, copied
-```
-
-The binary keeps manul-browser's own CLI name (`manul`) — that is what its binding looks for.
-
-The checkout is found by looking for a sibling directory named `manul-browser` (then `Manul`, then `ManulEngineGo`,
-which are what older local clones were called). `MANUL_SOURCE` overrides the search and may name either the repository
-root or the `core` directory inside it.
-
-There is deliberately **no npm dependency** on `manul-browser`: the package publishes no platform packages yet, and a
-`file:` dependency would have to hard-code one directory name that npm resolves before any script could correct it. The
-binding is loaded by path at runtime instead — and an installed `manul-browser` package still wins if one ever exists, so
-this keeps working the day it is published.
-
-A developer working on the engine can set `MANUL_BINARY` to their own build; the app leaves that override alone.
+Then open **GET PLUGINS** and install what you want the model to be able to do. Browser control is listed there.
 
 ## Building a Windows executable
 
@@ -199,7 +179,7 @@ A developer working on the engine can set `MANUL_BINARY` to their own build; the
 npm run dist
 ```
 
-Stages manul-browser, then runs electron-builder. Two artifacts land in `dist/`:
+Runs electron-builder. Two artifacts land in `dist/`:
 
 | File | What it is |
 |---|---|
@@ -220,24 +200,21 @@ also refuses if the installer name recorded inside it does not match the asset b
 resolves the download through that name and would otherwise 404 on every machine. The `.blockmap` is not required, but
 without it an update re-downloads all 75 MB instead of the parts that changed.
 
-The runner builds the engine from source, so it checks out `manul-browser` alongside, installs Go, compiles the Node
-binding, and **fails the release if `resources/bin/manul.exe` is not there afterwards** — a release that quietly ships
-without browser control is worse than one that does not ship.
-
 The installed build checks for updates a few seconds after launch, downloads in the background and installs on
 restart, so nothing interrupts a turn. `[ ABOUT ]` shows what it is doing and offers `[ CHECK ]`, or `[ RESTART ]` once
-a build is waiting. Before the installer runs, llama-server and the controlled Chrome are shut down: `quitAndInstall`
-starts the installer and *then* asks the app to quit, and an orphaned llama-server holding port 8080 would make the
-next run report a model as loaded while talking to something else.
+a build is waiting. Before the installer runs, llama-server is shut down and every plugin is deactivated — which is
+what closes a browser one of them opened: `quitAndInstall` starts the installer and *then* asks the app to quit, and an
+orphaned llama-server holding port 8080 would make the next run report a model as loaded while talking to something
+else.
 
 The **portable** exe does not self-update — there is no installed copy to replace — and says so rather than offering a
 button that could only fail. Downloading a new portable exe is the whole update.
 
 Nothing is signed, so SmartScreen warns on first run and after each update.
 
-The packaged app carries the engine and the binding in its own `resources/`, so it needs neither the checkout nor Go on
-the machine that runs it. It still needs Chrome for browser control and `llama-server` (or a remote endpoint) for
-inference. The build is unsigned — Windows SmartScreen will warn on first run.
+The packaged app is the app and its plugins' host, nothing else: capabilities are installed from a registry at
+runtime, so a release does not have to carry them. It still needs `llama-server` (or a remote endpoint) for inference.
+The build is unsigned — Windows SmartScreen will warn on first run.
 
 ## First run
 
@@ -394,8 +371,6 @@ src/
 │   │   ├── rate.mjs        download speed and time remaining
 │   │   ├── search.mjs      in-app model search + per-repo file listing
 │   │   └── placement.mjs   where a model would run, before it is loaded
-│   ├── browser/
-│   │   └── manul-browser.mjs  the manul-browser bridge
 │   ├── plugins/
 │   │   ├── host.mjs        the registry: discovery, activation, contributions
 │   │   ├── manifest.mjs    validating what a plugin claims about itself
@@ -406,13 +381,10 @@ src/
 │       ├── agent.mjs       the turn pipeline, compaction, window budgeting
 │       ├── attach.mjs      files and folders the user put in front of the model
 │       ├── actions.mjs     reading actions out of a reply
-│       ├── batch-guard.mjs refusing a browser batch identical to one already run
 │       ├── prompts.mjs     assembling the system prompt from plugin fragments
 │       └── readfile.mjs    the read-only file path
 ├── plugins/                the plugins that ship with the app
 │   ├── index.mjs           the static list of built-ins
-│   ├── browser-control.mjs browser_steps · browser_close
-│   ├── web-lookup.mjs      web_lookup, in its own headless browser
 │   ├── read-file.mjs       read_file
 │   └── system-shell.mjs    system_shell, behind the approval dialog
 ├── preload/preload.cjs     the renderer's whole view of main
@@ -421,25 +393,23 @@ src/
     ├── render.mjs          text shaping both processes need
     ├── markdown.mjs        markdown → data the renderer builds nodes from
     ├── media.mjs           MIME types, Range parsing, clock formatting
-    ├── schemes.mjs         how a wasteland-plugin:// or wasteland-media:// URL is spelled
-    └── engine.mjs          finding the manul-browser checkout
+    └── schemes.mjs         how a wasteland-plugin:// or wasteland-media:// URL is spelled
 ```
 
 ## Testing
 
 ```bash
-npm test       # 437 unit tests, no Electron, no network
+npm test       # 495 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
 ```
 
 `npm test` covers the pure logic: action extraction and its JSON repair, `<think>` splitting and stripping, markdown
 parsing, chat storage and id validation, path vetting, HuggingFace URL rewriting and quantisation choice, prompt
 assembly, plugin manifest validation and host activation, registry entries and version comparison, Range parsing and
-custom-scheme URLs, GGUF header parsing and the context/GPU arithmetic, the compaction threshold and the window backstop, folder
-collection and its budget, download speed and resume, crash-log summarising, checkout resolution, and where a
-*packaged* app looks for the engine.
+custom-scheme URLs, GGUF header parsing and the context/GPU arithmetic, the compaction threshold and the window
+backstop, folder collection and its budget, download speed and resume, and crash-log summarising.
 
-`npm run smoke` boots the real window offscreen — 134 checks — and covers what unit tests cannot: a renderer that throws
+`npm run smoke` boots the real window offscreen — 225 checks — and covers what unit tests cannot: a renderer that throws
 on boot, a preload that failed to expose its bridge, an IPC channel renamed on one side only, a layout that breaks at
 one screen shape, or a control that stops resetting what it should. It clicks NEW CHAT, presses Enter, attaches a
 folder and detaches one of two, switches a plugin off and checks the main process agrees, allows a plugin that brings
@@ -470,9 +440,9 @@ compares against that same manifest rather than against a pattern.
 |---|---|---|
 | Language | C11 + Nuklear + SDL2 | Electron |
 | Inference | llama.cpp linked in | `llama-server` subprocess, OpenAI-compatible |
-| Network | seccomp kills any new socket after load | open — the browser needs it |
+| Network | seccomp kills any new socket after load | open — model downloads and whatever a plugin needs |
 | Chat store | XChaCha20-Poly1305 | plain JSON |
-| Agent | sandboxed filesystem tools | browser control, lookup, read-only file, gated shell |
+| Agent | sandboxed filesystem tools | read-only file, gated shell, and whatever is installed |
 | Context | fixed window, no compaction | budgeted against the reply, compacted, with a hard backstop |
 | Layout | fixed panels | aspect-ratio responsive |
 | Replies | plain text — Nuklear drew glyphs, not documents | markdown, parsed to data and built as DOM nodes |
@@ -480,8 +450,8 @@ compares against that same manifest rather than against a pattern.
 
 ## Known gaps
 
-- The engine and binding come from a sibling checkout rather than from npm — `manul-browser` has no published platform
-  packages yet, so there is nowhere else for either to come from.
+- Browser control is a separate download, and its archive carries a compiled engine — so it is published per platform,
+  and the index offers the Windows build. An index entry has no field for the platform it runs on.
 - `web_lookup` reads DuckDuckGo result text. It has no AI-overview extraction and no CAPTCHA handling.
 - VRAM is detected through `nvidia-smi` only. On an AMD or Intel card the offload is left exactly as configured, because
   a wrong number would be worse than none — Windows reports 4 GB for anything larger.
@@ -501,4 +471,4 @@ compares against that same manifest rather than against a pattern.
 ## License
 
 [Apache License 2.0](LICENSE) — the same licence as
-[manul-browser](https://github.com/alexbeatnik/manul-browser), whose engine and binding this ships.
+[manul-browser](https://github.com/alexbeatnik/manul-browser), which browser control ships.
