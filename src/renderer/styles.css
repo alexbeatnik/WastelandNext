@@ -897,10 +897,19 @@ button.choice.chosen .choice-label::before {
 
 /* ---- the board ---- */
 
+/**
+ * A map is looked at, not skimmed, and this is the one dialog that wants the
+ * window it is given.
+ *
+ * The third term is a height, in a width. The board holds a 3:2 ratio and fills
+ * this box, so its height follows the box's width — and a dialog sized only in
+ * `vw` grows a picture taller than the screen on a wide, short monitor. At
+ * `112vh` of width the picture lands near 74vh tall, which leaves the heading
+ * and the close button their room at 1920x1080, 1600x900, 1366x768 and
+ * 1280x1024 alike.
+ */
 .board-box {
-  /* A map is looked at, not skimmed. This is the one dialog that wants the
-     window it is given. */
-  width: min(78rem, 96vw);
+  width: min(90rem, 96vw, 112vh);
   max-width: none;
 }
 
