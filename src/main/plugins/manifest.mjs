@@ -18,7 +18,7 @@ import { normaliseCategory } from '../../shared/categories.mjs';
  * function. Bumped only when the shape of `activate(ctx)` changes in a way a
  * plugin can notice.
  */
-export const PLUGIN_API_VERSION = 10;
+export const PLUGIN_API_VERSION = 11;
 
 /**
  * Services a plugin may ask the host for.

@@ -40,6 +40,20 @@ import { pluginDataUrl } from '../shared/schemes.mjs';
  */
 const TONES = new Set(['good', 'warn', 'bad']);
 
+/**
+ * Accent words a meter may use.
+ *
+ * A tone says how something is *going* — good, warn, bad. What colour a bar is
+ * says what it *stands for*, which is a different question and one the plugin
+ * is the only one able to answer: health, mana and stamina sit side by side in
+ * the same strip, and a player finds the one they want by colour long before
+ * reading its label. A closed vocabulary for exactly the reason tones have one
+ * — this becomes a class name, and a plugin naming its own colour would be a
+ * plugin writing the stylesheet. The words are roles rather than colours, so a
+ * theme stays free to decide what "life" looks like.
+ */
+const ACCENTS = new Set(['life', 'mana', 'vigour', 'growth', 'time']);
+
 const MAX_TITLE = 80;
 const MAX_LABEL = 48;
 const MAX_VALUE = 32;
@@ -49,6 +63,8 @@ const MAX_ID = 64;
 /** A line for the status bar, and the words a button puts in the composer. */
 const MAX_STATUS = 200;
 const MAX_SUBMIT = 400;
+/** What a player may type into a scene's one field: a name, not a paragraph. */
+const MAX_ENTRY = 40;
 
 const MAX_METERS = 8;
 const MAX_FIELDS = 10;
@@ -108,6 +124,11 @@ function tone(value) {
   return TONES.has(word) ? word : '';
 }
 
+function accent(value) {
+  const word = String(value ?? '').trim();
+  return ACCENTS.has(word) ? word : '';
+}
+
 function number(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -161,6 +182,8 @@ export function normaliseScene(raw) {
     board: null,
     /** A row of pressable cards — a picture, a name, a paragraph — or null. */
     cards: null,
+    /** One line for the player to fill in — a hero's name — or null. */
+    entry: null,
   };
 
   for (const entry of list(raw.meters, MAX_METERS)) {
@@ -174,6 +197,8 @@ export function normaliseScene(raw) {
       // filled to an imaginary limit, so this is kept as given, zero included.
       max: max > 0 ? max : 0,
       tone: tone(entry?.tone),
+      /** Which resource this is, so the strip can be read by colour. */
+      accent: accent(entry?.accent),
     });
   }
 
@@ -297,6 +322,39 @@ export function normaliseScene(raw) {
       });
     }
     if (items.length) scene.cards = { label: text(raw.cards.label, MAX_TITLE), items };
+  }
+
+  /**
+   * One line for the player to fill in.
+   *
+   * Added because a game asked a question the panel could not hold. A hero's
+   * name used to be typed into the composer, on the argument that the composer
+   * is a text field already and a second one would be a second place to look.
+   * That argument was wrong in one particular way, and the wrongness was
+   * reported as a bug: a name typed at the composer is a message, a message
+   * goes to the model first, and a small model asked to pass a word through
+   * sometimes answers it instead. The question is the game's, so the field to
+   * answer it belongs to the game.
+   *
+   * Deliberately one line and nothing more. It is not a form: no second field,
+   * no validation vocabulary, no types. A game that needs a form should be
+   * asking something simpler.
+   */
+  if (raw.entry && typeof raw.entry === 'object') {
+    const action = text(raw.entry.action, MAX_ID);
+    // Without an id there is nowhere for the answer to go, which would be a
+    // field that swallows what the player types.
+    if (action) {
+      scene.entry = {
+        action,
+        label: text(raw.entry.label, MAX_LABEL),
+        hint: text(raw.entry.hint, MAX_HINT),
+        placeholder: text(raw.entry.placeholder, MAX_LABEL),
+        /** What the field starts out holding, so a question can be re-asked. */
+        value: text(raw.entry.value, MAX_ENTRY),
+        submit: text(raw.entry.submit, MAX_LABEL) || 'OK',
+      };
+    }
   }
 
   for (const entry of list(raw.actions, MAX_ACTIONS)) {
@@ -487,10 +545,15 @@ export class Scene extends EventEmitter {
     }
     for (const point of this.#scene?.board?.points ?? []) if (point.action) ids.add(point.action);
     for (const card of this.#scene?.cards?.items ?? []) if (card.action) ids.add(card.action);
+    if (this.#scene?.entry?.action) ids.add(this.#scene.entry.action);
     return ids;
   }
 
-  async act(actionId) {
+  /**
+   * @param actionId which control was used
+   * @param value what was typed into the field, when the control is the field
+   */
+  async act(actionId, value = '') {
     const presenter = this.#presenter;
     if (!presenter) throw new Error('no game is running');
 
@@ -499,7 +562,9 @@ export class Scene extends EventEmitter {
       throw new Error('that action is no longer on offer');
     }
 
-    const answer = (await presenter.act(id)) ?? {};
+    // Cut to a line and a length here, so a plugin is handed a name and never
+    // a paragraph however the field is driven.
+    const answer = (await presenter.act(id, text(value, MAX_ENTRY))) ?? {};
     return {
       /** A line for the status bar: what happened, if nothing else says. */
       status: text(answer.status, MAX_STATUS),
@@ -536,6 +601,8 @@ export class Scene extends EventEmitter {
       board: answer.board === true,
       /** Ask for the chooser, as `sheet` and `board` ask for theirs. */
       cards: answer.cards === true,
+      /** Ask for the field, which is how a game gets a name typed into it. */
+      entry: answer.entry === true,
     };
   }
 }

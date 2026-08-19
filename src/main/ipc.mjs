@@ -567,7 +567,7 @@ export function registerIpc(windowGetter) {
    * than a second one that would have to re-learn the busy check, the transcript
    * entry and what to do when a send fails.
    */
-  handle('scene:act', (actionId) => scene.act(actionId));
+  handle('scene:act', (actionId, value) => scene.act(actionId, value));
 
   /* ---------- dictation ---------- */
 

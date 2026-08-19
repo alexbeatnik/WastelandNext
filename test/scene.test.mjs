@@ -107,11 +107,11 @@ test('a list row can be pressed when the game gave it something to do', async ()
 
   // Pressable rows are on offer exactly as the moves are — the same guard, so a
   // stale click on a bag emptied three turns ago is refused the same way.
-  assert.deepEqual(await scene.act('item-sword'), { status: 'In hand.', submit: '', sheet: false, board: false, cards: false });
+  assert.deepEqual(await scene.act('item-sword'), { status: 'In hand.', submit: '', sheet: false, board: false, cards: false, entry: false });
   await assert.rejects(() => scene.act('item-herb'), /no longer on offer/);
 
   // And a move may ask for the sheet, which is the only way a plugin can.
-  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: true, board: false, cards: false });
+  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: true, board: false, cards: false, entry: false });
   assert.deepEqual(pressed, ['item-sword', 'bag']);
 });
 
@@ -164,7 +164,7 @@ test('a move can ask for the board, as it can for the sheet', async () => {
   const scene = new Scene();
   scene.present({ pluginId: 'game', act: () => ({ board: true }) });
   scene.show({ actions: [{ id: 'map', label: 'Map' }] });
-  assert.deepEqual(await scene.act('map'), { status: '', submit: '', sheet: false, board: true, cards: false });
+  assert.deepEqual(await scene.act('map'), { status: '', submit: '', sheet: false, board: true, cards: false, entry: false });
 });
 
 test('a chooser is cards, and a card is on offer like anything else', async () => {
@@ -205,9 +205,70 @@ test('a chooser is cards, and a card is on offer like anything else', async () =
 
 test('a move can ask for the chooser', async () => {
   const scene = new Scene();
-  scene.present({ pluginId: 'game', act: () => ({ cards: true }) });
+  scene.present({ pluginId: 'game', act: () => ({ cards: true, entry: false }) });
   scene.show({ actions: [{ id: 'who', label: 'Who' }] });
-  assert.deepEqual(await scene.act('who'), { status: '', submit: '', sheet: false, board: false, cards: true });
+  assert.deepEqual(await scene.act('who'), { status: '', submit: '', sheet: false, board: false, cards: true, entry: false });
+});
+
+test('an accent is one of the resource words or it is nothing', () => {
+  // It becomes a class name, exactly as a tone does, so it is checked exactly
+  // as a tone is. A plugin that could name its own colour would be a plugin
+  // writing the stylesheet.
+  const scene = normaliseScene({
+    meters: [
+      { label: 'HP', value: 5, max: 10, accent: 'life' },
+      { label: 'MANA', value: 5, max: 10, accent: 'mana', tone: 'bad' },
+      { label: 'DYE', value: 5, max: 10, accent: 'meter { background: red }' },
+      { label: 'HUE', value: 5, max: 10, accent: 'chartreuse' },
+    ],
+  });
+  assert.equal(scene.meters[0].accent, 'life');
+  // An accent and a tone answer different questions, so a meter may carry both.
+  assert.equal(scene.meters[1].accent, 'mana');
+  assert.equal(scene.meters[1].tone, 'bad');
+  assert.equal(scene.meters[2].accent, '');
+  assert.equal(scene.meters[3].accent, '');
+});
+
+test('a scene can hold one field, and what is typed into it reaches the plugin', async () => {
+  /**
+   * The reported failure this exists for: a hero's name typed at the composer
+   * is a message, a message goes to the model first, and a small model asked to
+   * pass a word through sometimes answers it instead. The question belongs to
+   * the game, so the field to answer it does too.
+   */
+  const scene = new Scene();
+  const typed = [];
+  scene.present({ pluginId: 'game', act: (id, value) => typed.push([id, value]) });
+  scene.show({
+    title: 'Новый забег',
+    entry: { label: 'ИМЯ ГЕРОЯ', hint: 'Как его звали', placeholder: 'Арден', submit: 'НАЧАТЬ', action: 'name' },
+  });
+
+  const entry = scene.status().scene.entry;
+  assert.equal(entry.action, 'name');
+  assert.equal(entry.submit, 'НАЧАТЬ');
+
+  await scene.act('name', '  Серг  ');
+  assert.deepEqual(typed, [['name', 'Серг']], 'trimmed to one line, as every label is');
+});
+
+test('a field with no action is no field at all', () => {
+  // There would be nowhere for the answer to go, which is a box that swallows
+  // whatever the player types.
+  assert.equal(normaliseScene({ entry: { label: 'Name' } }).entry, null);
+  assert.equal(normaliseScene({ entry: 'name' }).entry, null);
+});
+
+test('what is typed is cut to a name, not a paragraph', async () => {
+  const scene = new Scene();
+  let got = null;
+  scene.present({ pluginId: 'game', act: (id, value) => { got = value; } });
+  scene.show({ entry: { label: 'Name', action: 'name' } });
+  const newline = String.fromCharCode(10);
+  await scene.act('name', `${'и'.repeat(200)}${newline}вторая строка`);
+  assert.equal(got.length, 40);
+  assert.ok(!got.includes(newline));
 });
 
 test('a scene belongs to the conversation it was painted in', () => {
@@ -290,7 +351,7 @@ test('a button that is not on screen cannot be pressed', async () => {
   });
   scene.show({ actions: [{ id: 'look', label: 'Look' }] });
 
-  assert.deepEqual(await scene.act('look'), { status: '', submit: 'I look', sheet: false, board: false, cards: false });
+  assert.deepEqual(await scene.act('look'), { status: '', submit: 'I look', sheet: false, board: false, cards: false, entry: false });
   await assert.rejects(() => scene.act('attack'), /no longer on offer/);
 
   scene.show({ actions: [{ id: 'attack', label: 'Attack' }] });
@@ -309,7 +370,7 @@ test('a plugin answering with nothing is answered with nothing', async () => {
   const scene = new Scene();
   scene.present({ pluginId: 'game', act: () => undefined });
   scene.show({ actions: [{ id: 'bag', label: 'Bag' }] });
-  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: false, board: false, cards: false });
+  assert.deepEqual(await scene.act('bag'), { status: '', submit: '', sheet: false, board: false, cards: false, entry: false });
 });
 
 test('a game cannot start a turn on its own', () => {

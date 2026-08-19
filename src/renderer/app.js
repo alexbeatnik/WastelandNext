@@ -1922,7 +1922,9 @@ function meterNode(meter) {
   const row = el('div', `scene-meter${meter.max > 0 ? '' : ' plain'}`);
   row.append(el('span', 'scene-meter-label', meter.label));
 
-  const bar = el('div', `meter ${meter.tone}`.trim());
+  // Two classes, and they answer different questions: the accent says which
+  // resource this is, the tone says how it is going. A theme decides both.
+  const bar = el('div', `meter ${meter.accent ? `accent-${meter.accent}` : ''} ${meter.tone}`.replace(/\s+/g, ' ').trim());
   const fill = el('i');
   const share = meter.max > 0 ? (meter.value / meter.max) * 100 : 0;
   fill.style.width = `${Math.max(0, Math.min(100, share))}%`;
@@ -1959,6 +1961,9 @@ function syncSceneBusy() {
   // same terms as the row of buttons.
   for (const point of $('board').querySelectorAll('.board-point.pressable')) point.disabled = state.streaming;
   for (const card of $('cards').querySelectorAll('button.card')) card.disabled = state.streaming;
+  // The field sends a move like anything else, so it waits its turn like
+  // anything else — and a disabled input also says why nothing is happening.
+  if (!$('entry-modal').hidden) paintEntry();
 }
 
 /**
@@ -1995,6 +2000,7 @@ function paintScene(status = { active: false, scene: null }) {
     $('sheet-modal').hidden = true;
     $('board-modal').hidden = true;
     $('cards-modal').hidden = true;
+    $('entry-modal').hidden = true;
     return;
   }
 
@@ -2031,6 +2037,11 @@ function paintScene(status = { active: false, scene: null }) {
   // cards has nothing left to ask.
   if (!scene.cards) $('cards-modal').hidden = true;
   else if (!$('cards-modal').hidden) paintCards();
+  // Same rule for the field, and for the same reason: a scene redrawn without
+  // one has nothing left to ask. Repainted without resetting it, so a repaint
+  // mid-turn cannot swallow a half-typed name.
+  if (!scene.entry) $('entry-modal').hidden = true;
+  else if (!$('entry-modal').hidden) paintEntry();
 }
 
 function paintSheet() {
@@ -2191,6 +2202,48 @@ function setCards(open) {
   $('cards-modal').hidden = !show;
 }
 
+/**
+ * The one field, and what it is for.
+ *
+ * Never repainted over what somebody is halfway through typing: a game redraws
+ * its panel on every turn, and a field that reset itself because the plugin
+ * repainted would lose the name a letter before it was finished.
+ */
+function paintEntry({ reset = false } = {}) {
+  const entry = sceneShowing() ? state.scene.scene.entry : null;
+  if (!entry) return;
+  $('entry-title').textContent = entry.label;
+  $('entry-hint').textContent = entry.hint;
+  $('entry-hint').hidden = !entry.hint;
+  $('entry-send').textContent = entry.submit;
+  const field = $('entry-input');
+  field.placeholder = entry.placeholder;
+  if (reset) field.value = entry.value;
+  $('entry-send').disabled = state.streaming;
+  field.disabled = state.streaming;
+}
+
+function setEntry(open) {
+  const show = Boolean(open) && Boolean(sceneShowing() && state.scene.scene.entry);
+  if (show) paintEntry({ reset: true });
+  $('entry-modal').hidden = !show;
+  // A field nobody is standing in is a field nobody can type into. The focus is
+  // the whole difference between "a question was asked" and "a question was
+  // asked and answering it takes one more click than it should".
+  if (show) $('entry-input').focus();
+}
+
+/** Whatever is in the field, sent as the answer to the question that drew it. */
+async function sendEntry() {
+  const entry = sceneShowing() ? state.scene.scene.entry : null;
+  if (!entry) return;
+  const typed = $('entry-input').value.trim();
+  // Refused rather than sent: an empty answer would have the game name the hero
+  // for the player, which is the one thing this window exists to avoid.
+  if (!typed) return status('Type something first.');
+  await pressAction(entry.action, typed);
+}
+
 function setBoard(open) {
   const show = Boolean(open) && Boolean(sceneShowing() && state.scene.scene.board);
   if (show) paintBoard();
@@ -2212,16 +2265,17 @@ function setSheet(open) {
  * journal — costs nothing and involves no model at all, which is most of what
  * made those commands slow and unreliable when they had to be typed at one.
  */
-async function pressAction(actionId) {
+async function pressAction(actionId, value = '') {
   if (state.streaming) return status('A turn is running — wait for it to finish.');
   try {
-    const answer = await api.scene.act(actionId);
+    const answer = await api.scene.act(actionId, value);
     if (answer.status) status(answer.status);
     // Asked for before anything is sent: a game that opens the bag and then
     // takes a turn should show the bag first, not after the reply lands.
     if (answer.sheet) setSheet(true);
     if (answer.board) setBoard(true);
     if (answer.cards) setCards(true);
+    if (answer.entry) setEntry(true);
     // Sent from here, not from the main process, so a pressed button is an
     // ordinary message in the conversation this window has open.
     if (answer.submit) {
@@ -2230,6 +2284,7 @@ async function pressAction(actionId) {
       // refusing to get out of the way of the thing it was used to do.
       setBoard(false);
       setCards(false);
+      setEntry(false);
       await submitPrompt(answer.submit);
     }
   } catch (err) {
@@ -2240,6 +2295,17 @@ async function pressAction(actionId) {
 
 function wireScene() {
   $('btn-scene-sheet').addEventListener('click', () => setSheet($('sheet-modal').hidden));
+  $('entry-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    sendEntry();
+  });
+  $('entry-modal').addEventListener('click', (event) => {
+    // Only the backdrop, as with the sheet. Unlike the chooser this one can be
+    // dismissed: a text field with no way out would trap a player who changed
+    // their mind, and the game still takes the same answer typed at the
+    // composer if they would rather.
+    if (event.target === $('entry-modal')) setEntry(false);
+  });
   $('btn-sheet-close').addEventListener('click', () => setSheet(false));
   $('btn-board-close').addEventListener('click', () => setBoard(false));
   $('board-modal').addEventListener('click', (event) => {
@@ -2255,6 +2321,7 @@ function wireScene() {
     if (event.key === 'Escape') {
       setSheet(false);
       setBoard(false);
+      setEntry(false);
     }
     // The digits belong to the game, so they belong to its conversation too: a
     // hidden panel must not still answer the keyboard.
