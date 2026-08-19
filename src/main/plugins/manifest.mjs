@@ -236,6 +236,16 @@ export function parseManifest(raw, { builtin = false } = {}) {
        * refusing to load a working plugin over that word would be absurd.
        */
       category: normaliseCategory(raw.category),
+      /**
+       * The picture on its row, as a path inside the plugin.
+       *
+       * Checked above and then dropped, for a while: `list()` builds a URL from
+       * `manifest.icon` and every installed plugin handed it `undefined`, so a
+       * declared icon was validated, refused if it pointed anywhere dangerous,
+       * and then never drawn. Only the registry listing showed one, because
+       * that comes from the index rather than from here.
+       */
+      icon,
       /** Where this one sits in the system prompt; lower goes first. */
       order: Number.isFinite(Number(raw.order)) ? Number(raw.order) : 100,
       enabledByDefault: raw.enabledByDefault !== false,

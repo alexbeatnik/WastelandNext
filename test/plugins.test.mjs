@@ -45,6 +45,17 @@ test('a well-formed manifest is normalised, not merely accepted', () => {
   assert.equal(manifest.order, 5);
   assert.equal(manifest.enabledByDefault, true);
   assert.deepEqual(manifest.services, []);
+  assert.equal(manifest.icon, '', 'a manifest with no icon says so, rather than leaving the field out');
+});
+
+test('a declared icon survives parsing, because the row is drawn from it', () => {
+  // It was checked here and then left out of the manifest, so `list()` built
+  // its URL from `undefined` and no installed plugin ever showed an icon. The
+  // registry listing did, which is what made it look like a working feature.
+  assert.equal(parseManifest({ ...GOOD, icon: 'icon.svg' }).manifest.icon, 'icon.svg');
+  assert.equal(parseManifest({ ...GOOD, icon: 'art/icon.png' }).manifest.icon, 'art/icon.png');
+  // And the containment rule is the one every other path in the plugin follows.
+  assert.equal(parseManifest({ ...GOOD, icon: '../../secrets.svg' }).ok, false);
 });
 
 test('an id that could escape its own directory is refused', () => {
