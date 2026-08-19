@@ -827,16 +827,22 @@ button.choice.chosen .choice-label::before {
 
 /* A bar's own colour, which beats its tone.
 
-   Declared after the tone rules because it has to win: a mana bar that turned
-   red when it ran low would be telling the player something true in the one
-   language the strip uses for something else — "which bar am I looking at". So
-   the fill answers that question and only that question, and the alarm moves
-   to the edge, below. */
-.meter.accent-life > i { background: var(--bar-life); }
-.meter.accent-mana > i { background: var(--bar-mana); }
-.meter.accent-vigour > i { background: var(--bar-vigour); }
-.meter.accent-growth > i { background: var(--bar-growth); }
-.meter.accent-time > i { background: var(--bar-time); }
+   It has to win: a mana bar that turned red when it ran low would be telling
+   the player something true in the one language the strip uses for something
+   else — "which bar am I looking at". So the fill answers that question and
+   only that question, and the alarm moves to the edge, below.
+
+   Won by specificity and not by position, which is the whole point of the extra
+   selector. Being declared lower down was the first attempt and it lost: the
+   health bar came out orange, because `.meter.warn > i` is written eight
+   hundred lines further on for the context gauge, and a rule that has to be
+   below every rule anyone adds later is a rule that will be above one of them
+   eventually. Three classes beat two wherever this sits in the file. */
+.scene-meter .meter.accent-life > i { background: var(--bar-life); }
+.scene-meter .meter.accent-mana > i { background: var(--bar-mana); }
+.scene-meter .meter.accent-vigour > i { background: var(--bar-vigour); }
+.scene-meter .meter.accent-growth > i { background: var(--bar-growth); }
+.scene-meter .meter.accent-time > i { background: var(--bar-time); }
 
 /* Nearly out, said around the bar rather than inside it. */
 .scene-meter .meter.warn { border-color: #ff8000; }
