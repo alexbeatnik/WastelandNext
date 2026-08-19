@@ -637,6 +637,32 @@ button.choice.chosen .choice-label::before {
   color: var(--amber-bright);
 }
 
+/* An offer made by the reply itself, rather than by a plugin's result — so it
+   sits straight in the transcript under the words that asked, not inside a
+   card. The rule matters as much as the look: these are the buttons a model
+   used to be unable to draw, which is why it wrote numbered lists nobody could
+   click. */
+.choices.offer {
+  margin: 0 0 0.1rem;
+}
+
+/* Answered, and kept. The fence is stripped out of the prose, so this row is
+   the only remaining record of what was on offer — removing it would leave the
+   next message replying to nothing. Greyed, because a control that is drawn
+   and cannot work is worse than one that is absent, and this one has to look
+   as spent as it is. */
+.choices.offer.spent button.choice {
+  border-style: dashed;
+  opacity: 0.75;
+}
+
+/* The one that was taken stays legible even in a spent row: it is the fact the
+   row is being kept for. */
+.choices.offer.spent button.choice.chosen {
+  opacity: 1;
+  border-style: solid;
+}
+
 /* ============================ Player ============================ */
 
 .player {

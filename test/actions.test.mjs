@@ -10,7 +10,7 @@ import {
   parseActionPayload,
   splitNarration,
   splitThinking,
-  stripActionBlocks,
+  stripBlocks,
 } from '../src/main/agent/actions.mjs';
 
 const fence = (body) => '```action\n' + body + '\n```';
@@ -62,7 +62,7 @@ test('drops payloads that are beyond repair', () => {
 test('a code fence that is not an action fence is left alone', () => {
   const reply = 'Here is some JS:\n```js\nconst a = 1;\n```';
   assert.deepEqual(extractActions(reply), []);
-  assert.equal(stripActionBlocks(reply), reply);
+  assert.equal(stripBlocks(reply), reply);
 });
 
 test('firstJsonObject respects braces inside strings', () => {
@@ -92,14 +92,14 @@ test('splitNarration treats an action-free reply as all prose', () => {
   assert.deepEqual(splitNarration('  just words  '), { pre: 'just words', post: '' });
 });
 
-test('stripActionBlocks leaves only prose, with the fence read as a paragraph break', () => {
+test('stripBlocks leaves only prose, with the fence read as a paragraph break', () => {
   const reply = `Opening it.\n${fence('{"type":"browser_steps","steps":"NAVIGATE to https://a.test"}')}\nOpened.`;
-  assert.equal(stripActionBlocks(reply), 'Opening it.\n\nOpened.');
+  assert.equal(stripBlocks(reply), 'Opening it.\n\nOpened.');
 });
 
-test('stripActionBlocks collapses the run of blank lines a long fence leaves', () => {
+test('stripBlocks collapses the run of blank lines a long fence leaves', () => {
   const reply = `Before.\n\n${fence('{"type":"browser_close","steps":""}')}\n\nAfter.`;
-  assert.equal(stripActionBlocks(reply), 'Before.\n\nAfter.');
+  assert.equal(stripBlocks(reply), 'Before.\n\nAfter.');
 });
 
 test('splitThinking separates a reasoning block from the answer', () => {
@@ -125,4 +125,49 @@ test('splitThinking treats an unclosed block as reasoning to the end', () => {
 
 test('splitThinking drops an empty reasoning block', () => {
   assert.deepEqual(splitThinking('<think></think>\nHi.'), [{ kind: 'text', content: 'Hi.' }]);
+});
+
+test('an action written without its fence still runs, for a type that exists', () => {
+  // Reported as a playlist that never played: the model emitted the object
+  // alone on a line and the JSON was printed at the user instead of being run.
+  const reply = 'Роблю плейліст.\n{"type":"queue_music","steps":"pearl jam"}';
+  const known = (type) => type === 'queue_music';
+  assert.deepEqual(extractActions(reply, { known }), [{ type: 'queue_music', steps: 'pearl jam' }]);
+  // And it leaves the prose, rather than the wiring, on screen.
+  assert.equal(stripBlocks(reply), 'Роблю плейліст.');
+});
+
+test('an unfenced object for a type nobody declares is left as prose', () => {
+  // The guard that makes the fallback safe: without it every reply quoting an
+  // action object would run one.
+  const reply = 'Формат такий:\n{"type":"make_coffee","steps":"double"}';
+  assert.deepEqual(extractActions(reply, { known: (type) => type === 'queue_music' }), []);
+});
+
+test('a fenced action wins, and the unfenced scan does not run at all', () => {
+  // A reply that asked properly must never have a second action found in the
+  // sentence where it described what it was doing.
+  const reply = [
+    'Opening it.',
+    '```action',
+    '{"type":"queue_music","steps":"pearl jam"}',
+    '```',
+    '{"type":"queue_music","steps":"something else"}',
+  ].join('\n');
+  const found = extractActions(reply, { known: () => true });
+  assert.deepEqual(found, [{ type: 'queue_music', steps: 'pearl jam' }]);
+});
+
+test('a line that merely starts with a brace is prose and stays put', () => {
+  const reply = 'Пиши так: {"type": ... } і не забудь steps.';
+  assert.deepEqual(extractActions(reply, { known: () => true }), []);
+  assert.equal(stripBlocks(reply), reply);
+});
+
+test('an object sharing its line with words is not an action', () => {
+  // Anchored to both ends of the line on purpose: the safety of this whole
+  // fallback rests on "a line holding nothing but an action object is not prose".
+  const reply = 'Ось приклад: {"type":"queue_music","steps":"pearl jam"} — зрозуміло?';
+  assert.deepEqual(extractActions(reply, { known: () => true }), []);
+  assert.equal(stripBlocks(reply), reply);
 });

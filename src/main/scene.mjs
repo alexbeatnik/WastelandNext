@@ -426,6 +426,53 @@ export class Scene extends EventEmitter {
   }
 
   /**
+   * The game acted in this turn, so the panel belongs to this conversation.
+   *
+   * `show()` claims a scene, which covers every game that repaints when it
+   * acts. A scene painted *outside* a turn — from a timer, or at activation —
+   * belongs to nobody, and before this nothing could ever claim it afterwards:
+   * it stayed drawn nowhere until the plugin happened to repaint. Having acted
+   * here is the evidence that closes that.
+   *
+   * Deliberately not "claim it for whichever conversation runs next". That is
+   * the harm the rule above exists to prevent — a hero on screen for somebody
+   * who opened the app to ask about the weather — so this is accepted only for
+   * the plugin actually driving the panel, only inside a turn, and only when
+   * there is something drawn. A plugin that draws nothing until it is played
+   * still shows nothing, and no amount of claiming can invent a scene the app
+   * was never given.
+   */
+  claimTurn(pluginId) {
+    if (!this.#scene || !this.#turnChat) return;
+    if (this.#presenter?.pluginId !== String(pluginId ?? '')) return;
+    if (this.#chatId === this.#turnChat) return;
+    this.#chatId = this.#turnChat;
+    this.#announce();
+  }
+
+  /**
+   * Is a game driving this session?
+   *
+   * Asked by the prompt, and deliberately broader than "is the panel up". The
+   * first version gated on a scene being shown in this conversation, which
+   * reads as the tighter and more careful answer and is wrong for the one
+   * moment that matters: a run *starts* with nothing on screen. So at the exact
+   * turn the model had to call the game's action, the prompt was still coaching
+   * it on how to ask the user to pick something — and it duly wrote "press one
+   * of the class cards on screen" without dealing any, because nothing had run.
+   *
+   * A registered presenter is a plugin that owns the panel and the moves for
+   * this session, however little is drawn yet. While one exists the app has no
+   * business offering a second way to ask a question. The cost is that a game
+   * switched on takes the reply's own buttons out of every conversation, which
+   * is the right trade: the game is the thing that breaks, and switching the
+   * plugin off is one click on the row that turned it on.
+   */
+  hasPresenter() {
+    return Boolean(this.#presenter);
+  }
+
+  /**
    * The board, with its picture turned into something the page can load.
    *
    * Built here and never in the renderer, for the reason the audio bar records:

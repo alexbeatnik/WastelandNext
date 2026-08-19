@@ -380,7 +380,7 @@ test('a game cannot start a turn on its own', () => {
   const surface = Object.getOwnPropertyNames(Object.getPrototypeOf(scene));
   assert.deepEqual(
     surface.filter((name) => name !== 'constructor' && !name.startsWith('#')).sort(),
-    ['act', 'clear', 'present', 'releasePlugin', 'setTurn', 'show', 'status'],
+    ['act', 'claimTurn', 'clear', 'hasPresenter', 'present', 'releasePlugin', 'setTurn', 'show', 'status'],
   );
 });
 
@@ -396,4 +396,122 @@ test('showing something that is not a scene changes nothing', () => {
   scene.show(null);
   scene.show('a string');
   assert.equal(scene.status().scene.title, 'here');
+});
+
+test('a registered presenter means a game is driving the session', () => {
+  // What the prompt asks before deciding whether the reply may offer buttons of
+  // its own. Deliberately not "is the panel up": a run *starts* with nothing on
+  // screen, and gating on the scene left the app coaching the model about
+  // buttons at the exact turn it needed to call the game's action instead.
+  const scene = new Scene();
+  assert.equal(scene.hasPresenter(), false);
+
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+  assert.equal(scene.hasPresenter(), true, 'before a single scene has been shown');
+
+  scene.setTurn('chat-a');
+  scene.show({ title: 'the common room' });
+  assert.equal(scene.hasPresenter(), true);
+});
+
+test('a game switched off stops driving', () => {
+  // `releasePlugin` is what the host calls, and it must hand the session back:
+  // a plugin that is gone cannot own the way the user is asked to choose.
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+  scene.setTurn('chat-a');
+  scene.show({ title: 'the common room' });
+
+  scene.releasePlugin('other-plugin');
+  assert.equal(scene.hasPresenter(), true, 'somebody else being switched off is not this game ending');
+
+  scene.releasePlugin('fantasy-rpg');
+  assert.equal(scene.hasPresenter(), false);
+});
+
+test('clearing the panel is not the game leaving', () => {
+  // A run between scenes — the panel down, the plugin still driving. The prompt
+  // must stay quiet through that gap, which is exactly where the first version
+  // of this gate opened up.
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+  scene.clear();
+  assert.equal(scene.status().active, false);
+  assert.equal(scene.hasPresenter(), true);
+});
+
+test('a game that acts without repainting still claims the conversation', () => {
+  // The hole `show()` leaves: a scene painted outside a turn — from a timer, at
+  // activation — belongs to nobody, and before this nothing could claim it
+  // afterwards. It stayed drawn nowhere until the plugin happened to repaint.
+  // Having acted here is the evidence that closes that.
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+  scene.show({ title: 'Новый забег', cards: { label: 'Кто ты', items: [{ label: 'Маг', action: 'class-mage' }] } });
+  assert.equal(scene.status().chatId, '', 'painted outside a turn, owned by nobody');
+
+  scene.setTurn('chat-a');
+  scene.claimTurn('fantasy-rpg');
+  assert.equal(scene.status().chatId, 'chat-a');
+});
+
+test('only the plugin driving the panel can claim it', () => {
+  // Another plugin acting in the same turn is not evidence about this game.
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+  scene.show({ title: 'Новый забег' });
+  scene.setTurn('chat-a');
+
+  scene.claimTurn('audio-player');
+  assert.equal(scene.status().chatId, '');
+  scene.claimTurn('fantasy-rpg');
+  assert.equal(scene.status().chatId, 'chat-a');
+});
+
+test('nothing is claimed outside a turn, or with nothing drawn', () => {
+  // The harm the whole rule exists to prevent is a hero on screen for somebody
+  // who opened the app to ask about the weather, and an unclaimed scene handed
+  // to whoever runs next is exactly that.
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+
+  scene.claimTurn('fantasy-rpg');
+  assert.equal(scene.status().chatId, '', 'nothing is drawn yet');
+
+  scene.show({ title: 'Новый забег' });
+  scene.claimTurn('fantasy-rpg');
+  assert.equal(scene.status().chatId, '', 'no turn is running');
+});
+
+test('claiming does not move a game already being played elsewhere', () => {
+  // A turn in another conversation is not a move in this game — the rule
+  // `show()` already follows, and this must not quietly undo it.
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+  scene.setTurn('chat-a');
+  scene.show({ title: 'Village of Mara' });
+  assert.equal(scene.status().chatId, 'chat-a');
+
+  scene.setTurn('chat-b');
+  scene.claimTurn('fantasy-rpg');
+  assert.equal(scene.status().chatId, 'chat-b', 'the game acted here, so it is played here now');
+});
+
+test('a claim tells the window, or the panel appears only on the next repaint', () => {
+  const scene = new Scene();
+  const seen = [];
+  scene.on('state', (status) => seen.push(status.chatId));
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+  scene.show({ title: 'Новый забег' });
+  scene.setTurn('chat-a');
+
+  seen.length = 0;
+  scene.claimTurn('fantasy-rpg');
+  assert.deepEqual(seen, ['chat-a']);
+
+  // And says nothing when nothing changed, or every action in a long game
+  // would repaint the panel for no reason.
+  seen.length = 0;
+  scene.claimTurn('fantasy-rpg');
+  assert.deepEqual(seen, []);
 });

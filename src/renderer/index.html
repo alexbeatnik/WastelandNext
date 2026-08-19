@@ -252,6 +252,12 @@
             <span class="scene-title" id="scene-title"></span>
             <span class="scene-sub" id="scene-sub"></span>
             <button id="btn-scene-sheet" class="ghost" title="Character sheet — 0">[ SHEET ]</button>
+            <!-- The way back into a chooser that was dismissed. A game can put
+                 cards in a scene without giving an action that opens them, and
+                 then the only question on screen is unreachable — which is
+                 exactly what a fantasy game shipped, leaving a model telling the
+                 player to press a card that was never drawn. -->
+            <button id="btn-scene-cards" class="ghost" title="Choose" hidden>[ CHOOSE ]</button>
           </div>
           <div class="scene-meters" id="scene-meters"></div>
           <div class="scene-facts" id="scene-facts"></div>

@@ -12,7 +12,7 @@ import * as chats from '../chats.mjs';
 import * as config from '../config.mjs';
 import { estimateTokens, streamChat } from '../llm/client.mjs';
 import { COMPACT_PROMPT, buildSystemPrompt, titlePrompt } from './prompts.mjs';
-import { extractActions, splitNarration, splitThinking, stripActionBlocks, stripThinking } from './actions.mjs';
+import { extractActions, splitNarration, splitThinking, stripBlocks, stripThinking } from './actions.mjs';
 import { Attachments } from './attach.mjs';
 
 /** How many times one user message may bounce back through the model. */
@@ -169,6 +169,7 @@ export function shapeForTemplate(messages) {
 
 export class Agent extends EventEmitter {
   #server;
+  #scene;
   /** The plugin host. Every action the model may emit comes from it. */
   #plugins;
   #abort = null;
@@ -184,10 +185,18 @@ export class Agent extends EventEmitter {
   /** Files and folders the user attached, waiting for the next message. */
   attachments = new Attachments();
 
-  constructor({ server, plugins }) {
+  /**
+   * `scene` is here for one question: is a game drawing its own moves in this
+   * conversation? If it is, the prompt must not also tell the model how to
+   * offer buttons — the panel already has a row of them, and the game's own
+   * fragment tells it to end on the scenery. Optional, because nothing else in
+   * this class needs it and the unit tests build neither.
+   */
+  constructor({ server, plugins, scene = null }) {
     super();
     this.#server = server;
     this.#plugins = plugins;
+    this.#scene = scene;
   }
 
   get busy() {
@@ -214,12 +223,18 @@ export class Agent extends EventEmitter {
    * go over the wire as user turns, because a mid-conversation system message
    * is handled inconsistently across local models.
    */
-  #buildMessages(chat, context) {
+  #buildMessages(chat, context, chatId = '') {
     const settings = config.load();
     const system = buildSystemPrompt({
       fragments: this.#plugins.promptFragments(),
       userPrompt: settings.systemPrompt,
       context,
+      // Absent rather than forbidden, as everything else here is. A game owns
+      // the panel, the moves and how the player is asked; a second way to ask,
+      // described at length with a worked example, competes with the plugin's
+      // own fragment and wins — which is how "press one of the class cards"
+      // came back from a model that had not started a run.
+      choices: !this.#scene?.hasPresenter(),
     });
 
     const messages = [{ role: 'system', content: system }];
@@ -354,7 +369,7 @@ export class Agent extends EventEmitter {
     await this.#maybeCompact(chatId, { context });
 
     const chat = chats.read(chatId);
-    const built = this.#buildMessages(chat, context);
+    const built = this.#buildMessages(chat, context, chatId);
 
     // Compaction is the graceful shrink and normally the only one that runs.
     // This is what happens when it could not shrink enough — without it the
@@ -393,11 +408,14 @@ export class Agent extends EventEmitter {
     }
 
     chats.append(chatId, { role: 'assistant', content: text });
-    this.#say('reply:end', { text, rendered: stripActionBlocks(text), aborted });
+    this.#say('reply:end', { text, rendered: stripBlocks(text), aborted });
 
     if (aborted) return;
 
-    const actions = extractActions(text);
+    // `owner` is consulted rather than the active handler map: a type that is
+    // declared but switched off must still be recognised, so the dispatcher can
+    // say which plugin is off instead of "unknown action type".
+    const actions = extractActions(text, { known: (type) => Boolean(this.#plugins.owner(type)) });
     if (actions.length === 0) return;
 
     const { post } = splitNarration(text);
@@ -446,6 +464,12 @@ export class Agent extends EventEmitter {
     } catch (err) {
       this.#say('action:result', { type: action.type, ok: false, summary: err.message });
       return { feedback: `[ACTION FAILED] ${action.type}: ${err.message}. Tell the user; do not retry it.` };
+    } finally {
+      // On both paths, including the failing one: the game acted in this
+      // conversation either way. A game that answers without repainting leaves
+      // a scene painted at activation owned by nobody, and one that claims
+      // nobody is drawn nowhere — a panel that never appears at all.
+      this.#scene?.claimTurn(handler.pluginId);
     }
 
     const { ok = true, summary = '', feedback = '', ...detail } = result ?? {};
@@ -531,7 +555,7 @@ export class Agent extends EventEmitter {
       // "src, main, agent" for a conversation that was about something else.
       .filter((message) => message.role !== 'tool')
       .slice(0, 2)
-      .map((m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${stripActionBlocks(m.content).slice(0, 600)}`)
+      .map((m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${stripBlocks(m.content).slice(0, 600)}`)
       .join('\n\n');
 
     try {
@@ -568,7 +592,7 @@ export class Agent extends EventEmitter {
     // The plugin context counts. It is part of every prompt and, on a busy
     // site, the page map is the largest part of it — estimating without it is
     // what let a browsing turn sail past the threshold without ever triggering.
-    const messages = this.#buildMessages(chat, context);
+    const messages = this.#buildMessages(chat, context, chatId);
     const usage = this.#contextUsage(messages);
     if (!force && !shouldCompact(usage, chat.messages.length)) return false;
     if (chat.messages.length <= KEEP_MESSAGES + 1) return false;
@@ -621,7 +645,7 @@ export class Agent extends EventEmitter {
    */
   contextFor(chatId) {
     const chat = chats.read(chatId) ?? { messages: [] };
-    return this.#contextUsage(this.#buildMessages(chat, ''));
+    return this.#contextUsage(this.#buildMessages(chat, '', chatId));
   }
 
   /**

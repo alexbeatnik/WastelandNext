@@ -251,11 +251,50 @@ different from anything, so the weaker check passed on the bug.
 
 **A game is played in a conversation, and the panel belongs there with it.** The first version tied the scene to nothing, so the strip and the row of moves were drawn over every chat in the app: opening a new conversation gave an empty transcript under a character sheet and a list of moves, offering a game that was not being played. `show()` stamps the scene with the conversation the turn is running in, `ipc.mjs` supplies that off `turn:start` because it is the only place that sees both, and the renderer draws nothing unless the open chat is that one. Both ids must be non-empty rather than merely equal — `state.chatId` is `''` on a new conversation, and "no chat" must not match "no game".
 
+**A game that *acts* in a turn claims the panel, even when it does not repaint.** `show()` claiming the scene covers
+every game that redraws when it acts, and leaves a hole behind it: a scene painted *outside* a turn — from a timer, at
+activation — belonged to nobody and nothing could claim it afterwards, so it stayed drawn nowhere until the plugin
+happened to repaint. `claimTurn(pluginId)` is called from `#dispatch`'s `finally`, on the failing path too, since the
+game acted in this conversation either way. It is deliberately not "claim it for whichever conversation runs next",
+which is the harm the rule below exists to prevent; it is accepted only for the plugin driving the panel, only inside a
+turn, and only when something is drawn, and it announces only on a change.
+
+**It cannot invent a scene, and that is the limit worth knowing.** A reported dead end looked exactly like the hole
+above and was not it: `fantasy-rpg` draws nothing at activation *on purpose* (its own comment explains why — a game left
+open yesterday would otherwise be on screen at boot, over a conversation that has nothing to do with it), and while a
+class is unchosen its handler answers "choose a class on the cards" without repainting. A pending setup plus a restart
+therefore leaves no scene at all — not an unclaimed one — and the app has nothing to draw and no way to ask for it. The
+panel comes back only when the plugin repaints, which is the contract that plugin states for itself. When a chooser
+never appears, check whether a scene exists before reaching for the claiming rules.
+
 **A scene painted outside a turn claims no conversation, and one that claimed none is drawn nowhere.** Activation and timers both land there. Nothing outside a turn knows which chat a game is being played in, and taking "whichever is open" is exactly how the panel got everywhere in the first place. The cost is that a run reopened after a restart has no panel until the first move; that is a smaller wrong answer than a hero on screen for somebody who opened the app to ask about something else, and the run itself is never at risk — it is in the plugin's save, and `context()` hands it to the model whether or not anything is drawn.
 
 **The hotkeys are hidden with the panel.** A digit answered by a panel the user cannot see would make a move in a conversation the game is not being played in. `sceneShowing()` is the single answer to "is this game on screen", and the keyboard, the sheet and the paint all ask it.
 
 **A list row is a control only when the game gave it one.** An inventory is what `action` on an item exists for: putting the sword in your hand is a thing to do to a row, not a move to pick off a bar. It is optional because a journal is not an inventory, and an entry that could be clicked and did nothing would be worse than one that plainly cannot be. `#offered()` folds those ids in with the moves', so a stale click on a bag emptied three turns ago is refused exactly as a stale move is.
+
+**A chooser opens itself, because closing itself was only half the job.** The dialog used to be opened solely by an
+`act` answering `cards: true`, so a scene arriving *with* cards and no actions was a dead end: the question existed in
+the document and nothing on screen could reach it. `fantasy-rpg` ships exactly that for its class chooser — picking a
+class is the turn, so there is no move to offer beside it — and the model spent whole sessions telling the player to
+press a card that had never been drawn. Two conditions, both learned from the smoke run rather than from reading: the
+question must be a *new* one (keyed off the label and the ids, or a chooser reopened on every repaint could never be
+dismissed, and a game repaints every turn), and the scene must offer no moves. Cards kept beside a row of moves are a
+reference — "who is here" — and throwing that open unasked put a dialog over the panel that swallowed the next hotkey.
+A new question when the scene *does* have moves closes the old dialog instead: the player was answering something else,
+and leaving that up over a different list is worse than shutting it.
+
+**`[ CHOOSE ]` is the way back, and exists for the same reason `[ SHEET ]` does.** A dismissed chooser with no action to
+reopen it would be the dead end again, one click later. It is drawn only while the scene has cards, like the sheet
+button is drawn only when there are groups.
+
+**An action can arrive without its fence, and only then is a bare line read as one.** Reported as a playlist that never
+played: the model emitted `{"type":"queue_music","steps":"pearl jam"}` alone on a line, nothing matched it, and the JSON
+was printed at the user. `BARE_ACTION_RE` is anchored to both ends of a single line, the fallback runs only when the
+reply holds no fenced action at all, and the type must be one some plugin *declares* — `owner()`, not the active handler
+map, so a switched-off plugin still answers with the sentence the model can act on. All three narrow the same risk, the
+one the fenced path already carries: a reply that is discussing an action rather than asking for one. `stripBlocks`
+removes such a line only when it parses, so prose that merely starts with a brace is never quietly edited.
 
 **`sheet: true` is the only way a plugin can open the dialog.** The sheet is the app's, so a game asking to "look in the bag" had no way to show one — an inventory button that only wrote a line in the status bar would be a control describing the thing it should have shown. It is honoured before `submit`, so a move that opens the bag *and* takes a turn shows the bag first rather than after the reply lands.
 
@@ -423,8 +462,59 @@ or `2 * 3 * 4 = 24` comes out italicised.
 it, and the resulting refusal reads to the user as a bug. `buildSystemPrompt` assembles from parts; `prompts.test.mjs`
 guards this.
 
+**A numbered list is not a menu, and the model cannot draw a button.** A reply ending "1. Open it 2. Pick another
+version — which would you like?" is a control the user cannot press, and it was reported exactly that way, from a model
+that had already found the video it was asking permission to open. The ```choices fence is the cure: the model states
+the options as data, `parseChoices` reads them, and the renderer builds the buttons — the same bargain the scene panel
+and the audio bar strike, for the same reason. Pressing one goes through `submitPrompt`, so a chosen option takes
+exactly the path typed text takes and the busy check, the transcript entry and the hand-back on failure are not
+implemented twice. The prompt fragment naming the refusal is not optional decoration: a model that does not know the
+fence exists writes the numbered list, which is the failure this exists to prevent, and the same rule `audio-player`'s
+first fragment records.
+
+**The choice fence is absent whenever a game is driving the session.** Not qualified with an exception — the rule this
+file opens with, met from the other direction: it is the *app's* own text that has to go quiet. `fantasy-rpg` is a
+third-party plugin whose whole interaction is "press what the panel offers", and whose fragment says in as many words
+to end a turn on the scenery and never list the options. Shipping `OFFERING A CHOICE` unconditionally put the app's
+instruction against the plugin's, with the worked example on the app's side. It cost two things: replies ending in a
+menu the panel had already drawn, and — worse — "press one of the class cards on screen" from a model that had never
+called `fantasy_rpg`, so no cards existed. That plugin has no per-message hook; a run starts only when the model emits
+the action, and the section pulled it into describing the game instead of playing it.
+
+**The gate is a registered presenter, not a scene on screen.** `showingIn(chatId)` was written first and is the
+tighter, more careful-looking question — and it is open at the only moment that matters, because a run *starts* with
+the panel empty. `hasPresenter()` is true from the plugin's `activate`, which is also when its fragment enters the
+prompt, so the two go quiet together. The cost is that a game switched on takes the reply's own buttons out of every
+conversation; that is the right trade, since the game is the thing that breaks and switching the plugin off is one
+click on the row that turned it on. `agent.mjs` takes `scene` in its constructor for this and nothing else.
+
+**A rule the prompt keeps and a fact the service reports are two tests that both pass while the wiring is missing.**
+`prompts.test.mjs` proves `choices: false` removes the section, `scene.test.mjs` proves `hasPresenter` answers
+correctly, and the agent could simply never ask. `game-prompt.test.mjs` is the third test: it builds a real `Agent`
+over a real `Scene` and reads `contextFor` before and after a presenter registers, because the size of a prompt is the
+cheapest thing about it observable from outside. Check it fails with the flag hard-coded back to `true` before
+trusting it.
+
+**Only the newest offer is live, and a spent one stays on screen.** Those are two halves of one rule. A turn with
+follow-ups emits a `reply:end` — and therefore an offer — per model call, so without retiring the older row there are
+two sets of buttons answering a question that has one answer, the older about a world several steps back; that is the
+staleness `scene.act` refuses an unoffered id for. But the row is greyed rather than removed, because `stripBlocks`
+takes the fence out of the prose: delete the buttons and the user message that answered them is replying to nothing
+visible. Which way it went is read back off the message that follows, not stored.
+
+**`retireOffers` returns its own undo, and only one caller may retire.** `submitPrompt` hands the text back when
+`turn:start` never arrived, and an offer retired for a message that does not exist is a dead row with nothing on screen
+saying why. Retiring a second time from the click handler as well looked harmless and was not: the second call found
+nothing live left, so the restore it returned restored nothing, and a send that failed left the buttons dead. The
+smoke run caught it — nothing in the source distinguishes the working version from the broken one.
+
+**An offer is drawn on `reply:end`, which lands while the turn is still running.** So every button is born disabled,
+and `syncOfferBusy` in `setStreaming` is what hands them back — the mirror of `syncSceneBusy`, and load-bearing rather
+than cosmetic. The smoke check asserts `disabled` is false after the turn ends, because a row of buttons that is drawn,
+styled and permanently unpressable is the exact bug the whole feature was built to remove.
+
 **Chats persist the raw reply, fences and all.** The model needs to see its own actions on the next turn.
-`stripActionBlocks` is a *view*, applied at render time only. Never write stripped text back to storage.
+`stripBlocks` is a *view*, applied at render time only. Never write stripped text back to storage.
 
 **Roles are stored structurally.** The original stored a flat `> prompt\nreply` transcript because C had no JSON; here a
 reply that itself begins with `> ` cannot be mistaken for a new turn. There is a test for that specific case.
@@ -739,8 +829,8 @@ something similar is proposed, the question to ask is whether the app is still c
 
 ## Text handling
 
-`src/shared/render.mjs` holds the shaping both processes need (`ACTION_RE`, `stripActionBlocks`, `splitThinking`,
-`formatSize`). One definition imported twice, so main and renderer cannot drift on what counts as prose.
+`src/shared/render.mjs` holds the shaping both processes need (`ACTION_RE`, `CHOICES_RE`, `stripBlocks`,
+`splitThinking`, `formatSize`). One definition imported twice, so main and renderer cannot drift on what counts as prose.
 
 Action JSON arrives malformed often. `parseActionPayload` tries, in order: the first *balanced* `{...}` (string- and
 escape-aware, so a `}` inside the DSL does not truncate it), then a repair pass for the known truncation where a small

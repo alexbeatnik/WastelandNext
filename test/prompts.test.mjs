@@ -82,3 +82,43 @@ test('nothing in the base rules forbids what the protocol demands', () => {
   assert.ok((prompt.match(/```action/g) ?? []).length >= 1, 'expected the protocol to show a fence');
   assert.doesNotMatch(prompt, /no (markdown|code fences|fenced)/i);
 });
+
+test('the choice fence is documented whether or not anything can act', () => {
+  // Unlike an action, this is not a capability a plugin contributes — it is how
+  // the model talks to the user, and it is true of a session with no tools at
+  // all. A model that does not know the fence exists writes a numbered list and
+  // asks the user to pick from it, which is a menu with nothing to press.
+  for (const fragments of [[], ['TOOL — {"type":"do_thing"}']]) {
+    const prompt = buildSystemPrompt({ fragments });
+    assert.match(prompt, /```choices/);
+    assert.match(prompt, /numbered list is not a menu/);
+  }
+});
+
+test('the choice fence says the options are sent as the user, not acted on', () => {
+  // The whole difference from an action: nothing here reaches a handler, the
+  // words go down the path typed text takes. A model reading this as a tool
+  // call would wait for a result that is never coming.
+  assert.match(buildSystemPrompt({ fragments: [] }), /as if the user had typed/);
+});
+
+test('a game on screen takes the choice fence out of the prompt', () => {
+  // Reported against `fantasy-rpg`, whose own fragment says in as many words to
+  // end on the scenery and never list the options — while this section, longer
+  // and carrying a worked example, told the model to do exactly that. The panel
+  // already draws the moves; a second row under the reply is two menus for one
+  // turn. Absent, not forbidden: an exception written into the text would be
+  // one more rule for a small model to weigh against a worked example.
+  const playing = buildSystemPrompt({ fragments: ['FANTASY RPG'], choices: false });
+  assert.doesNotMatch(playing, /```choices/);
+  assert.doesNotMatch(playing, /OFFERING A CHOICE/);
+  // Everything else is untouched — this removes a section, it does not switch modes.
+  assert.match(playing, /FANTASY RPG/);
+  assert.match(playing, /```action/);
+  assert.match(playing, /You are Wasteland/);
+});
+
+test('the fence comes back when no game is drawing its own moves', () => {
+  assert.match(buildSystemPrompt({ fragments: ['FANTASY RPG'], choices: true }), /```choices/);
+  assert.match(buildSystemPrompt({ fragments: [] }), /```choices/);
+});

@@ -887,6 +887,133 @@ async function checkMarkdown(window) {
   check('the raw asterisks are gone', !drawn.text.includes('**bold**'), drawn.text.slice(0, 60));
 }
 
+/**
+ * The options a reply offers, as buttons.
+ *
+ * None of this is visible to the unit tests, which can only say that the fence
+ * parses. What is checked here is what was actually reported: a model found the
+ * video, wrote a numbered list of what to do next, and left the user with
+ * nothing to press. So: that buttons appear, that they are *enabled* — an offer
+ * is drawn on `reply:end`, while the turn is still running, so every one of
+ * them is born disabled and something has to hand them back — that the JSON
+ * never reaches the screen, and that a superseded offer stops being pressable.
+ */
+async function checkReplyChoices(window) {
+  say('');
+  say('Choices offered by a reply');
+
+  const reply = [
+    'Found **Pearl Jam — Black (Official Audio)**, 5:46. What next?',
+    '',
+    '```choices',
+    '{"options":[{"label":"Open and play it","send":"open the video and play it","note":"5:46"},"Show other versions"]}',
+    '```',
+  ].join('\n');
+
+  window.webContents.send('event', { event: 'reply:end', text: reply, rendered: reply, aborted: false });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const drawn = await window.webContents.executeJavaScript(`(() => {
+    const box = [...document.querySelectorAll('#chat-log .choices.offer')].pop();
+    const turn = [...document.querySelectorAll('#chat-log .turn.assistant.md')].pop();
+    if (!box) return null;
+    const buttons = [...box.querySelectorAll('button.choice')];
+    return {
+      count: buttons.length,
+      labels: buttons.map((b) => b.querySelector('.choice-label').textContent),
+      notes: [...box.querySelectorAll('.choice-note')].map((n) => n.textContent),
+      titles: buttons.map((b) => b.title),
+      enabled: buttons.every((b) => !b.disabled),
+      spent: box.classList.contains('spent'),
+      display: getComputedStyle(box).display,
+      prose: turn ? turn.textContent : '',
+    };
+  })()`);
+
+  check('a reply that offers options draws buttons', drawn?.count === 2, JSON.stringify(drawn));
+  if (!drawn) return;
+
+  check(
+    `labelled as the model wrote them — ${drawn.labels.join(' | ')}`,
+    drawn.labels[0] === 'Open and play it' && drawn.labels[1] === 'Show other versions',
+  );
+  check(`a second line survives — ${drawn.notes.join(' | ')}`, drawn.notes.length === 1 && drawn.notes[0] === '5:46');
+  // A hint that repeats the button is noise; one hiding different words is a trap.
+  check(
+    'the tooltip appears only where the words sent differ',
+    drawn.titles[0] === 'open the video and play it' && drawn.titles[1] === '',
+  );
+  // The bug this check exists for: the offer lands while the turn is still
+  // running, so every button is created disabled and stays that way unless
+  // `setStreaming` hands them back afterwards.
+  check('and they are pressable once the turn has finished', drawn.enabled === true);
+  check('the row is not born spent', drawn.spent === false);
+  check(`the row is actually on screen — display: ${drawn.display}`, drawn.display !== 'none');
+  // The fence is wiring. Left in, it renders as a code block full of JSON.
+  check('the block itself is not shown to the user', !drawn.prose.includes('"options"'), drawn.prose.slice(0, 80));
+  check('but the prose around it is', drawn.prose.includes('Pearl Jam'), drawn.prose.slice(0, 80));
+
+  /**
+   * Pressing one, with no model loaded.
+   *
+   * The failure is the point, exactly as it is for a game move: it proves the
+   * words went out by the path a typed message takes. What is specific here is
+   * the way back — a turn that never started did not answer the offer, so the
+   * buttons have to come back rather than sitting dead for a message that does
+   * not exist.
+   */
+  const before = await window.webContents.executeJavaScript(
+    `document.querySelectorAll('#chat-log .turn.user').length`,
+  );
+  const pressed = await window.webContents.executeJavaScript(`(async () => {
+    const box = [...document.querySelectorAll('#chat-log .choices.offer')].pop();
+    box.querySelectorAll('button.choice')[0].click();
+    await new Promise((r) => setTimeout(r, 600));
+    return {
+      status: document.getElementById('status-line').textContent,
+      turns: document.querySelectorAll('#chat-log .turn.user').length,
+      composer: document.getElementById('input').value,
+      spent: box.classList.contains('spent'),
+      enabled: [...box.querySelectorAll('button.choice')].every((b) => !b.disabled),
+    };
+  })()`);
+  check(
+    `a pressed option goes out as an ordinary message — "${pressed.status}"`,
+    /model/i.test(pressed.status),
+    pressed.status,
+  );
+  check('a turn that never started leaves nothing in the transcript', pressed.turns === before, `${before} → ${pressed.turns}`);
+  // The words came from a button, so there is nowhere to hand them back to.
+  check("and does not put the model's words in the composer", pressed.composer === '', pressed.composer);
+  check('an offer nothing answered is handed back', pressed.spent === false && pressed.enabled === true, JSON.stringify(pressed));
+
+  /**
+   * A superseded offer stops being pressable.
+   *
+   * A turn with follow-ups emits a reply — and so an offer — per model call.
+   * Two live rows of buttons are two answers to a question that has one, and
+   * the older row is asking about a world several steps back.
+   */
+  const second = ['Opened it. Anything else?', '', '```choices', '{"options":["Play the next one"]}', '```'].join('\n');
+  window.webContents.send('event', { event: 'reply:end', text: second, rendered: second, aborted: false });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const rows = await window.webContents.executeJavaScript(`(() => {
+    return [...document.querySelectorAll('#chat-log .choices.offer')].map((box) => ({
+      spent: box.classList.contains('spent'),
+      enabled: [...box.querySelectorAll('button.choice')].every((b) => !b.disabled),
+      labels: [...box.querySelectorAll('.choice-label')].map((n) => n.textContent),
+    }));
+  })()`);
+  const stale = rows.at(-2);
+  const fresh = rows.at(-1);
+  check('a newer offer takes over', fresh?.labels.join() === 'Play the next one', JSON.stringify(fresh));
+  check('and the one it replaced is spent', stale?.spent === true && stale?.enabled === false, JSON.stringify(stale));
+  // Kept, not removed: the fence is stripped out of the prose, so this row is
+  // the only remaining record of what was on offer.
+  check(`the spent offer is still readable — ${stale?.labels.join(' | ')}`, stale?.labels.length === 2);
+}
+
 function assertOk(value) {
   if (!value) throw new Error('interaction setup failed');
 }
@@ -1698,6 +1825,191 @@ async function checkChoices(window) {
  * `<link>` at the right place. The assertion is on a colour actually changing,
  * because everything short of that can be true while the screen is unchanged.
  */
+/**
+ * A chooser with no button to open it.
+ *
+ * The reported dead end, exactly: `fantasy-rpg` publishes its class chooser as
+ * a scene carrying `cards` and no `actions`, because picking a class *is* the
+ * turn. The dialog was only ever opened by an `act` answering `cards: true`, so
+ * there was nothing on screen to reach it with — and the model spent the whole
+ * session telling the player to press a card that had never been drawn. Every
+ * assertion here is on what is actually displayed, because the cards existed in
+ * the scene document the entire time the bug was on screen.
+ */
+async function checkChooser(window) {
+  say('');
+  say('A chooser that nothing opens');
+
+  // The panel is drawn only in the conversation the scene was stamped with, so
+  // one has to be open and the service told a turn is running in it.
+  const chatId = await window.webContents.executeJavaScript(`(async () => {
+    const list = await window.wasteland.chats.list();
+    const pick = document.querySelector('#chat-menu .chat-row .chat-pick');
+    if (!pick || !list.length) return '';
+    pick.click();
+    await new Promise((r) => setTimeout(r, 400));
+    return list[0].id;
+  })()`);
+  check('a conversation to ask in', Boolean(chatId), 'no seeded chat to open');
+  scene.setTurn(chatId);
+  scene.present({ pluginId: 'smoke-game', pluginName: 'Smoke game', act: () => ({ status: 'picked' }) });
+  scene.show({
+    title: 'New run',
+    subtitle: 'Choose who to play',
+    // No `actions`. That is the whole case.
+    cards: {
+      label: 'Who are you',
+      items: [
+        { label: 'Warrior', note: 'strong', action: 'class-warrior' },
+        { label: 'Mage', note: 'clever', action: 'class-mage' },
+      ],
+    },
+  });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const opened = await window.webContents.executeJavaScript(`(() => {
+    const modal = document.getElementById('cards-modal');
+    const button = document.getElementById('btn-scene-cards');
+    return {
+      display: getComputedStyle(modal).display,
+      cards: modal.querySelectorAll('.card').length,
+      labels: [...modal.querySelectorAll('.card')].map((c) => c.textContent),
+      buttonShown: getComputedStyle(button).display !== 'none',
+      actions: document.querySelectorAll('#scene-actions .scene-action').length,
+    };
+  })()`);
+
+  check('a scene that asks a question offers no moves', opened.actions === 0, JSON.stringify(opened));
+  // The bug: the dialog stayed shut and there was no way to open it.
+  check(`the chooser opens itself — display: ${opened.display}`, opened.display !== 'none', JSON.stringify(opened));
+  check(`with the cards the game published — ${opened.cards}`, opened.cards === 2);
+  // And a way back, for a chooser the player dismissed.
+  check('a button to reopen it is drawn', opened.buttonShown === true);
+
+  const dismissed = await window.webContents.executeJavaScript(`(async () => {
+    document.getElementById('btn-scene-cards').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const shut = getComputedStyle(document.getElementById('cards-modal')).display;
+    document.getElementById('btn-scene-cards').click();
+    await new Promise((r) => setTimeout(r, 200));
+    return { shut, reopened: getComputedStyle(document.getElementById('cards-modal')).display };
+  })()`);
+  check(`the button closes it — display: ${dismissed.shut}`, dismissed.shut === 'none', JSON.stringify(dismissed));
+  check('and opens it again', dismissed.reopened !== 'none', JSON.stringify(dismissed));
+
+  /**
+   * A repaint is not a new question.
+   *
+   * A game redraws its panel every turn. A chooser that reopened on each one
+   * could not be dismissed at all, which is a worse dead end than the one this
+   * check exists for.
+   */
+  await window.webContents.executeJavaScript(`document.getElementById('btn-scene-cards').click()`);
+  await new Promise((r) => setTimeout(r, 200));
+  scene.show({
+    title: 'New run',
+    subtitle: 'Choose who to play — still',
+    cards: {
+      label: 'Who are you',
+      items: [
+        { label: 'Warrior', note: 'strong and rested', action: 'class-warrior' },
+        { label: 'Mage', note: 'clever', action: 'class-mage' },
+      ],
+    },
+  });
+  await new Promise((r) => setTimeout(r, 400));
+  const again = await window.webContents.executeJavaScript(
+    `getComputedStyle(document.getElementById('cards-modal')).display`,
+  );
+  check(`the same question redrawn stays dismissed — display: ${again}`, again === 'none', again);
+
+  // A different question is a new one, and opens.
+  scene.show({
+    title: 'New run',
+    subtitle: 'Name the hero',
+    cards: { label: 'Pick a name', items: [{ label: 'Elsa', action: 'name-elsa' }] },
+  });
+  await new Promise((r) => setTimeout(r, 400));
+  const fresh = await window.webContents.executeJavaScript(
+    `getComputedStyle(document.getElementById('cards-modal')).display`,
+  );
+  check(`a different question opens itself — display: ${fresh}`, fresh !== 'none', fresh);
+
+  /**
+   * Cards a scene keeps beside its moves are a reference, not a question.
+   *
+   * The rule the smoke run had to teach: throwing that open unasked put a
+   * dialog over the panel that swallowed the next hotkey. A scene with moves
+   * has given the player something else to do, so the chooser waits behind its
+   * own button.
+   */
+  scene.show({
+    title: 'Playing',
+    actions: [{ id: 'look', label: 'Look around' }],
+    cards: { label: 'Who is here', items: [{ label: 'Brann', action: 'who-brann' }] },
+  });
+  await new Promise((r) => setTimeout(r, 400));
+  const beside = await window.webContents.executeJavaScript(`(() => ({
+    modal: getComputedStyle(document.getElementById('cards-modal')).display,
+    button: getComputedStyle(document.getElementById('btn-scene-cards')).display,
+    moves: document.querySelectorAll('#scene-actions .scene-action').length,
+  }))()`);
+  check(`a chooser beside the moves stays shut — display: ${beside.modal}`, beside.modal === 'none', JSON.stringify(beside));
+  check('but is still reachable from its button', beside.button !== 'none', JSON.stringify(beside));
+  check(`and the moves are drawn — ${beside.moves}`, beside.moves === 1);
+
+  // A scene with nothing to ask takes the chooser and its button away.
+  scene.show({ title: 'Playing', actions: [{ id: 'look', label: 'Look around' }] });
+  await new Promise((r) => setTimeout(r, 400));
+  const gone = await window.webContents.executeJavaScript(`(() => ({
+    modal: getComputedStyle(document.getElementById('cards-modal')).display,
+    button: getComputedStyle(document.getElementById('btn-scene-cards')).display,
+  }))()`);
+  check(`a scene with no chooser closes it — display: ${gone.modal}`, gone.modal === 'none', JSON.stringify(gone));
+  check('and takes the button with it', gone.button === 'none', JSON.stringify(gone));
+
+  /**
+   * A chooser painted before any turn, claimed by the turn the game acts in.
+   *
+   * A game can paint from a timer or at activation, outside every turn, and
+   * such a scene belongs to nobody and is drawn nowhere. Claiming it when the
+   * game next acts is what brings it back. This is the one part
+   * `scene.test.mjs` cannot see: whether the window actually draws it when the
+   * claim lands.
+   */
+  scene.clear();
+  scene.setTurn('');
+  scene.show({
+    title: 'New run',
+    subtitle: 'Choose who to play',
+    cards: { label: 'Who are you', items: [{ label: 'Warrior', action: 'class-warrior' }] },
+  });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const unclaimed = await window.webContents.executeJavaScript(`(() => ({
+    panel: getComputedStyle(document.getElementById('scene')).display,
+    modal: getComputedStyle(document.getElementById('cards-modal')).display,
+  }))()`);
+  check(`a scene painted outside a turn is drawn nowhere — panel: ${unclaimed.panel}`,
+    unclaimed.panel === 'none' && unclaimed.modal === 'none', JSON.stringify(unclaimed));
+
+  scene.setTurn(chatId);
+  scene.claimTurn('smoke-game');
+  await new Promise((r) => setTimeout(r, 400));
+
+  const claimed = await window.webContents.executeJavaScript(`(() => ({
+    panel: getComputedStyle(document.getElementById('scene')).display,
+    modal: getComputedStyle(document.getElementById('cards-modal')).display,
+    cards: document.querySelectorAll('#cards-modal .card').length,
+  }))()`);
+  check(`the game acting claims the panel — panel: ${claimed.panel}`, claimed.panel !== 'none', JSON.stringify(claimed));
+  check(`and the chooser it was holding opens — modal: ${claimed.modal}`, claimed.modal !== 'none', JSON.stringify(claimed));
+  check(`with its cards — ${claimed.cards}`, claimed.cards === 1, JSON.stringify(claimed));
+
+  scene.clear();
+  await new Promise((r) => setTimeout(r, 200));
+}
+
 async function checkThemes(window) {
   say('');
   say('Themes');
@@ -2236,11 +2548,13 @@ app.whenReady().then(async () => {
     check('no renderer errors', errors.length === 0, errors.join(' | '));
 
     await checkMarkdown(window);
+    await checkReplyChoices(window);
     await checkPlugins(window);
     await checkThemes(window);
     await checkLanguages(window);
     await checkPlayer(window, wavPath);
     await checkScene(window);
+    await checkChooser(window);
     await checkChatControls(window);
     await checkAttachments(window);
     await checkNotices(window);

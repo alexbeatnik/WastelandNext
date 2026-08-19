@@ -7,49 +7,12 @@
  * about JSON and this is where that creativity gets absorbed.
  */
 
-import { ACTION_RE } from '../../shared/render.mjs';
+import { ACTION_RE, BARE_ACTION_RE, firstJsonObject } from '../../shared/render.mjs';
 
-export { splitThinking, stripActionBlocks, stripThinking } from '../../shared/render.mjs';
-
-/**
- * Slice out the first balanced `{...}`, respecting strings and escapes.
- *
- * The model often writes a sentence after the closing brace, still inside the
- * fence. A strict parse rejects the whole thing and the action is silently
- * lost, which reads to the user as the model having given up.
- */
-export function firstJsonObject(raw) {
-  const text = String(raw ?? '');
-  const start = text.indexOf('{');
-  if (start === -1) return null;
-
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-
-  for (let i = start; i < text.length; i += 1) {
-    const ch = text[i];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === '\\') {
-      if (inString) escaped = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-    if (ch === '{') depth += 1;
-    else if (ch === '}') {
-      depth -= 1;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null;
-}
+// `firstJsonObject` moved to `shared/` when the renderer came to need it for
+// the choices fence; it is re-exported here because this is where the action
+// parser's own tests reach for it, and because it is the same job either way.
+export { firstJsonObject, parseChoices, splitThinking, stripBlocks, stripThinking } from '../../shared/render.mjs';
 
 /**
  * Patch the one truncation small models reliably produce: the inner DSL string
@@ -95,12 +58,41 @@ export function parseActionPayload(raw) {
   return null;
 }
 
-/** Every well-formed action in a reply, in the order the model emitted them. */
-export function extractActions(text) {
+/**
+ * Every well-formed action in a reply, in the order the model emitted them.
+ *
+ * `known` answers "is this a type some plugin declares", and is what makes the
+ * unfenced fallback below safe enough to have. Without it every reply that
+ * quoted an action object would run one.
+ */
+export function extractActions(text, { known = null } = {}) {
+  const source = String(text ?? '');
   const actions = [];
-  for (const match of String(text ?? '').matchAll(ACTION_RE)) {
+  for (const match of source.matchAll(ACTION_RE)) {
     const payload = parseActionPayload(match[1]);
     if (payload && payload.type) actions.push(payload);
+  }
+  if (actions.length > 0) return actions;
+
+  /**
+   * The fence was left off entirely.
+   *
+   * Reported as a playlist that never played: the model emitted
+   * {"type":"queue_music","steps":"pearl jam"} alone on a line, nothing matched
+   * it, and the JSON was printed at the user instead of being run.
+   *
+   * Only when the reply has no fenced action at all, and only for a type a
+   * plugin actually declares. Both narrow the same risk — a reply that is
+   * *discussing* an action rather than asking for one — which the fenced path
+   * already carries and this must not widen much. A declared type that is
+   * switched off is still accepted: the dispatcher answers "that is switched
+   * off", which is the sentence the model can act on.
+   */
+  for (const match of source.matchAll(BARE_ACTION_RE)) {
+    const payload = parseActionPayload(match[0]);
+    if (!payload?.type) continue;
+    if (known && !known(payload.type)) continue;
+    actions.push(payload);
   }
   return actions;
 }

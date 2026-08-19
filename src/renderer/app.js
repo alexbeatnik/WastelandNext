@@ -6,7 +6,14 @@
  * reload of this window can never leave the two disagreeing about whether a
  * turn is running.
  */
-import { describePlacement, formatDuration, formatSize, splitThinking, stripActionBlocks } from '../shared/render.mjs';
+import {
+  describePlacement,
+  formatDuration,
+  formatSize,
+  parseChoices,
+  splitThinking,
+  stripBlocks,
+} from '../shared/render.mjs';
 import { describeUpdate, isBusy, isReady } from '../shared/updates.mjs';
 import { parseMarkdown } from '../shared/markdown.mjs';
 import { formatTime } from '../shared/media.mjs';
@@ -48,6 +55,15 @@ const state = {
    * would make the DOM the source of truth for something the main process owns.
    */
   scene: { active: false, scene: null },
+  /**
+   * Which chooser has already been put on screen.
+   *
+   * A chooser is a question, so it opens itself when it arrives — but a game
+   * repaints its panel every turn, and one that reopened on every repaint could
+   * never be dismissed. This is what makes "a new question" different from "the
+   * same question, drawn again".
+   */
+  cardsAsked: '',
   /** `id → {text, received, total}` for a plugin that is fetching something. */
   pluginProgress: {},
   /**
@@ -211,8 +227,99 @@ function addAttachmentTurn(content) {
   return node;
 }
 
-/** Draw one stored message, splitting reasoning out and hiding action fences. */
-function renderMessage(message) {
+/**
+ * The options a reply offered, as buttons that send.
+ *
+ * The model cannot draw a control, so a reply that ends "1. open it 2. pick
+ * another" is a menu the user cannot use — reported exactly that way, against a
+ * model that had just found the video it was asking permission to open. This is
+ * the answer: the offer arrives as data in a fence, the app builds the buttons,
+ * and pressing one goes down the same path typed words take.
+ *
+ * `send` is what goes, `label` is what it says. They are usually the same, so
+ * the tooltip is set only when they are not — a button whose hint repeats the
+ * button is noise, and one that quietly sends something else is a trap.
+ */
+function offerNode(choices, { live = true, taken = '' } = {}) {
+  const box = el('div', 'choices offer');
+  if (!live) box.classList.add('spent');
+
+  for (const choice of choices) {
+    const button = el('button', 'choice');
+    button.append(el('span', 'choice-label', choice.label));
+    if (choice.note) button.append(el('span', 'choice-note', choice.note));
+    if (choice.send !== choice.label) button.title = choice.send;
+    // Which way an old offer went, read back off the message that answered it.
+    if (taken && choice.send === taken) button.classList.add('chosen');
+    button.disabled = !live || state.streaming;
+
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+      button.classList.add('chosen');
+      // Retiring the row is `submitPrompt`'s, and doing it here as well was a
+      // bug the smoke run caught: the second call found nothing left to retire
+      // and handed back a restore that restored nothing, so a send that failed
+      // left the offer dead with no way to answer it.
+      //
+      // Nowhere to hand the words back to either: they came from a button, not
+      // the composer, and dropping the model's phrasing into the box the user
+      // types in would be worse than losing it.
+      void submitPrompt(choice.send);
+    });
+    box.append(button);
+  }
+  return box;
+}
+
+/**
+ * Spend every offer still on screen, and return what puts them back.
+ *
+ * A row of buttons outlives the reply that drew it. Three turns later the world
+ * has moved on and pressing one sends words answering a question nobody is
+ * still asking — the same staleness the game panel refuses a move for. The
+ * buttons stay drawn, greyed, rather than being removed: the fence they came
+ * from is stripped out of the prose, so taking them away would leave the user
+ * message that follows answering nothing visible.
+ *
+ * The restore is for the send that never happened — `submitPrompt` hands the
+ * text back when the turn was never recorded, and an offer retired for a
+ * message that does not exist is a dead row of buttons with no explanation.
+ */
+function retireOffers() {
+  const spent = [...$('chat-log').querySelectorAll('.choices.offer:not(.spent)')];
+  for (const box of spent) {
+    box.classList.add('spent');
+    for (const button of box.querySelectorAll('button.choice')) button.disabled = true;
+  }
+  return () => {
+    for (const box of spent) {
+      box.classList.remove('spent');
+      for (const button of box.querySelectorAll('button.choice')) button.disabled = state.streaming;
+    }
+  };
+}
+
+/**
+ * Grey the offers out while a turn runs — the mirror of `syncSceneBusy`.
+ *
+ * Not merely cosmetic, and not optional: an offer is drawn on `reply:end`,
+ * which lands while the turn is still running, so every button would be born
+ * disabled and nothing would ever enable it again.
+ */
+function syncOfferBusy() {
+  for (const box of $('chat-log').querySelectorAll('.choices.offer:not(.spent)')) {
+    for (const button of box.querySelectorAll('button.choice')) button.disabled = state.streaming;
+  }
+}
+
+/**
+ * Draw one stored message, splitting reasoning out and hiding the fences.
+ *
+ * `live` is whether this is the newest message, which is the only one whose
+ * choices may still be pressed; `taken` is the user message that answered it,
+ * so a spent offer can show which way it went.
+ */
+function renderMessage(message, { live = false, taken = '' } = {}) {
   if (message.role === 'user') return void addTurn('user', message.content);
   if (message.role === 'tool') {
     if (message.content.startsWith('[ATTACHED ')) return void addAttachmentTurn(message.content);
@@ -220,21 +327,48 @@ function renderMessage(message) {
   }
 
   const segments = splitThinking(message.content);
+  const offered = parseChoices(message.content);
   // With thinking switched off, the reasoning is hidden — but only when there
   // is an answer to show instead. A model that ignores the setting and thinks
   // without concluding would otherwise leave a blank turn, which tells the user
-  // nothing and looks like a failure.
-  const hasAnswer = segments.some((s) => s.kind === 'text' && stripActionBlocks(s.content));
+  // nothing and looks like a failure. A row of options counts: a reply that
+  // asked a question and drew the buttons for it has answered.
+  const hasAnswer = offered.length > 0 || segments.some((s) => s.kind === 'text' && stripBlocks(s.content));
   const hideThinking = !state.settings.thinking && hasAnswer;
 
   for (const segment of segments) {
     if (segment.kind === 'think') {
       if (!hideThinking) addTurn('think', segment.content);
     } else {
-      const prose = stripActionBlocks(segment.content);
+      const prose = stripBlocks(segment.content);
       if (prose) addMarkdownTurn('assistant', prose);
     }
   }
+
+  if (offered.length > 0) {
+    // A newer offer supersedes every older one. A turn with follow-ups emits a
+    // reply — and therefore an offer — per model call, so without this a model
+    // that asked, acted and asked again would leave two live rows of buttons
+    // for a question that has one answer. Nothing to retire on a stored chat:
+    // everything above the newest message was drawn spent already.
+    if (live) retireOffers();
+    $('chat-log').append(offerNode(offered, { live, taken }));
+  }
+}
+
+/**
+ * What answered the offer in message `index`, if anything did.
+ *
+ * Only up to the next reply: a user message further down the transcript belongs
+ * to a later exchange, and marking a button because words matched three turns
+ * on would be a record of something that never happened.
+ */
+function answeredBy(messages, index) {
+  for (let i = index + 1; i < messages.length; i += 1) {
+    if (messages[i].role === 'assistant') return '';
+    if (messages[i].role === 'user') return messages[i].content;
+  }
+  return '';
 }
 
 function scrollChat() {
@@ -274,7 +408,12 @@ async function loadChat(id) {
   if (state.chatId) {
     const chat = await api.chats.read(state.chatId);
     if (seq !== chatLoadSeq) return;
-    for (const message of chat?.messages ?? []) renderMessage(message);
+    const messages = chat?.messages ?? [];
+    for (const [index, message] of messages.entries()) {
+      // Only the newest reply's offer is still live; every earlier one is a
+      // record, and the message that followed it says which way it went.
+      renderMessage(message, { live: index === messages.length - 1, taken: answeredBy(messages, index) });
+    }
   }
   // Notices belong to no conversation, so they survive every switch: the
   // transcript was just cleared wholesale, and the dedup map would otherwise
@@ -2008,6 +2147,7 @@ function paintScene(status = { active: false, scene: null }) {
   $('scene-sub').textContent = scene.subtitle;
   // A button that opens an empty dialog is a dead control.
   $('btn-scene-sheet').hidden = scene.groups.length === 0;
+  $('btn-scene-cards').hidden = !scene.cards;
 
   const meters = $('scene-meters');
   meters.replaceChildren();
@@ -2033,10 +2173,42 @@ function paintScene(status = { active: false, scene: null }) {
   // The board moves with every step, so this is the case that matters most:
   // walking into the forest must move the marker under the open map.
   if (!$('board-modal').hidden) paintBoard();
-  // The chooser closes itself when the answer arrives: a scene redrawn without
-  // cards has nothing left to ask.
-  if (!scene.cards) $('cards-modal').hidden = true;
-  else if (!$('cards-modal').hidden) paintCards();
+  /**
+   * The chooser opens itself, as well as closing itself.
+   *
+   * Closing was already here — a scene redrawn without cards has nothing left
+   * to ask — and opening is the same job from the other end. Without it a game
+   * could put a question in a scene that nothing on screen could reach: the
+   * dialog was only ever opened by an `act` answering `cards: true`, so a scene
+   * arriving with cards and no actions was a dead end. A fantasy game shipped
+   * exactly that for its class chooser, and the model spent the whole session
+   * telling the player to press a card that had never been drawn.
+   *
+   * Two conditions, and the smoke run insisted on the second. The question has
+   * to be a *new* one, keyed off what is being asked, or a chooser reopened on
+   * every repaint could not be dismissed at all — a game redraws its panel
+   * every turn. And the scene has to offer no moves: cards a game keeps around
+   * as a "who is here" list, reachable from a button on the row, are a
+   * reference and not a question, and throwing that open unasked put a dialog
+   * over the panel that swallowed the next hotkey. A scene with nothing else to
+   * do is asking now; a scene with moves has given the player something else,
+   * and the chooser waits behind its own button.
+   */
+  if (!scene.cards) {
+    $('cards-modal').hidden = true;
+    state.cardsAsked = '';
+  } else {
+    const asked = cardsKey(scene.cards);
+    if (asked !== state.cardsAsked) {
+      state.cardsAsked = asked;
+      // A new question decides the dialog either way, and the second half was
+      // the smoke run's again: opening it when the scene has nothing else to
+      // do, and *closing* whatever the last question was when it does. The
+      // player was answering something else; leaving that dialog up over a
+      // different list is worse than shutting it.
+      setCards(scene.actions.length === 0);
+    } else if (!$('cards-modal').hidden) paintCards();
+  }
   // Same rule for the field, and for the same reason: a scene redrawn without
   // one has nothing left to ask. Repainted without resetting it, so a repaint
   // mid-turn cannot swallow a half-typed name.
@@ -2196,6 +2368,17 @@ function paintCards() {
   }
 }
 
+/**
+ * What is being asked, as one string.
+ *
+ * The label and the ids, because those are what change when the question does.
+ * Not the whole document: a game that repaints the same chooser with a tweaked
+ * note would reopen a dialog the player had put away.
+ */
+function cardsKey(cards) {
+  return [cards.label, ...cards.items.map((item) => item.action)].join('\u0000');
+}
+
 function setCards(open) {
   const show = Boolean(open) && Boolean(sceneShowing() && state.scene.scene.cards);
   if (show) paintCards();
@@ -2295,6 +2478,7 @@ async function pressAction(actionId, value = '') {
 
 function wireScene() {
   $('btn-scene-sheet').addEventListener('click', () => setSheet($('sheet-modal').hidden));
+  $('btn-scene-cards').addEventListener('click', () => setCards($('cards-modal').hidden));
   $('entry-form').addEventListener('submit', (event) => {
     event.preventDefault();
     sendEntry();
@@ -2829,6 +3013,9 @@ function setStreaming(on) {
   // The moves on the action row are refused while a turn runs, and have to look
   // refused: a button that silently does nothing reads as a broken game.
   syncSceneBusy();
+  // A reply's own options are the same kind of control, and are drawn mid-turn:
+  // without this they would be born disabled and never come back.
+  syncOfferBusy();
 }
 
 /**
@@ -2844,6 +3031,9 @@ function setStreaming(on) {
  * phrasing into the box the player types in would be worse than losing it.
  */
 async function submitPrompt(prompt, { restoreTo = null } = {}) {
+  // Whether the words came from a button or the composer, the offer on screen
+  // has now been answered and must stop being pressable.
+  const restoreOffers = retireOffers();
   const userTurn = addTurn('user', prompt);
   scrollChat();
   setStreaming(true);
@@ -2864,6 +3054,10 @@ async function submitPrompt(prompt, { restoreTo = null } = {}) {
     status(err.message);
     activity(err.message, 'bad');
     if (!state.turnStarted) {
+      // Nothing was recorded, so nothing answered the offer: put it back with
+      // the words, or the user is left looking at buttons that died for a
+      // message that does not exist.
+      restoreOffers();
       if (restoreTo && !restoreTo.value) restoreTo.value = prompt;
       userTurn.remove();
     }
@@ -2960,7 +3154,7 @@ function handleEvent(payload) {
       if (payload.error) {
         addTurn('assistant error', `✗ ${payload.error}`);
       } else {
-        renderMessage({ role: 'assistant', content: payload.text });
+        renderMessage({ role: 'assistant', content: payload.text }, { live: true });
       }
       if (payload.aborted) activity('stopped by user', 'bad');
       scrollChat();

@@ -57,7 +57,7 @@ const VERSION = (() => {
  * a capability the app half-owns is one that cannot be uninstalled.
  */
 const plugins = new PluginHost({ services: { audio, notify, mic, scene } });
-const agent = new Agent({ server, plugins });
+const agent = new Agent({ server, plugins, scene });
 
 /**
  * Install the custom-scheme handlers. Called from `main.mjs` once the app is
