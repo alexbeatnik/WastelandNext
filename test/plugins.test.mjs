@@ -14,7 +14,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setDataRoot } from '../src/main/paths.mjs';
@@ -859,17 +859,39 @@ test('stop still works when no plugin is driving, or a stale bar cannot be dismi
 /* ============================ the published plugins ============================ */
 
 /**
- * The real `audio-player`, from the plugins repository beside this one.
+ * The real plugins, from the repositories beside this one.
  *
- * Skipped when that checkout is absent, because it is a separate repository and
- * a missing sibling is not a failure of this one. When it is there, this is the
- * only test that exercises the actual deliverable end to end: the manifest the
+ * One checkout per plugin — `wasteland-plugin-audio-player` and its siblings —
+ * since the `wasteland-plugins` monorepo they used to share was split up. Each
+ * repository holds a `plugins/` with exactly one directory in it, which is also
+ * what the app unpacks into, so pointing a host at one is pointing it at the
+ * shape it will meet on a user's machine.
+ *
+ * Skipped when a checkout is absent, because it is a separate repository and a
+ * missing sibling is not a failure of this one. When it is there, these are the
+ * only tests that exercise the actual deliverable end to end: the manifest the
  * registry will publish, the code the installer will unpack, and the app's own
- * host and audio service — the three halves that are each fine on their own and
- * only fail where they meet.
+ * host and services — the halves that are each fine alone and only fail where
+ * they meet.
  */
-const pluginsCheckout = join(process.cwd(), '..', 'wasteland-plugins', 'plugins');
-const havePlugins = existsSync(join(pluginsCheckout, 'audio-player', 'plugin.json'));
+const checkoutFor = (id) => join(process.cwd(), '..', `wasteland-plugin-${id}`, 'plugins');
+const havePlugin = (id) => existsSync(join(checkoutFor(id), id, 'plugin.json'));
+
+/**
+ * Several published plugins under one root, the way an installed tree has them.
+ *
+ * The split gave each plugin a repository, and a `PluginHost` reads one
+ * directory — so a test about two plugins coexisting has to put them in one,
+ * and copying is the only way that behaves the same on Windows as anywhere
+ * else. They are a few kilobytes each.
+ */
+function stagePlugins(...ids) {
+  const root = mkdtempSync(join(tmpdir(), 'wl-published-'));
+  for (const id of ids) cpSync(join(checkoutFor(id), id), join(root, id), { recursive: true });
+  return root;
+}
+
+const havePlayer = havePlugin('audio-player');
 
 /** An audio service that records rather than plays. */
 function stubAudio() {
@@ -950,7 +972,10 @@ test('browser control loads into the real host, without a browser in it', { skip
   await host.shutdown();
 });
 
-test('the published plugins load into the real host', { skip: !havePlugins }, async () => {
+test(
+  'the published plugins load into the real host',
+  { skip: !(havePlayer && havePlugin('phosphor-themes')) },
+  async () => {
   const audio = stubAudio();
   config.update({
     plugins: {
@@ -958,7 +983,10 @@ test('the published plugins load into the real host', { skip: !havePlugins }, as
       'phosphor-themes': { enabled: true, approved: false },
     },
   });
-  const host = new PluginHost({ userDir: pluginsCheckout, services: { audio } });
+  // Two repositories, one installed tree: code and a theme pack side by side is
+  // what a user's `plugins/` actually looks like, and the split did not change
+  // that even though it changed where they are published from.
+  const host = new PluginHost({ userDir: stagePlugins('audio-player', 'phosphor-themes'), services: { audio } });
   await host.load();
 
   const player = host.list().find((plugin) => plugin.id === 'audio-player');
@@ -986,9 +1014,10 @@ test('the published plugins load into the real host', { skip: !havePlugins }, as
   const themes = host.themes();
   assert.equal(themes.length, 3, JSON.stringify(themes.map((theme) => theme.key)));
   assert.ok(themes.every((theme) => theme.url.startsWith('wasteland-plugin://phosphor-themes/')));
-});
+  },
+);
 
-test('the player finds music, queues it and drives the bar', { skip: !havePlugins }, async () => {
+test('the player finds music, queues it and drives the bar', { skip: !havePlayer }, async () => {
   const library = mkdtempSync(join(tmpdir(), 'wl-music-'));
   mkdirSync(join(library, 'Pink Moon'), { recursive: true });
   for (const name of ['01 Pink Moon.mp3', '02 Place To Be.mp3', 'cover.jpg']) {
@@ -1006,7 +1035,7 @@ test('the player finds music, queues it and drives the bar', { skip: !havePlugin
       'phosphor-themes': { enabled: false, approved: false },
     },
   });
-  const host = new PluginHost({ userDir: pluginsCheckout, services: { audio } });
+  const host = new PluginHost({ userDir: checkoutFor('audio-player'), services: { audio } });
   await host.load();
 
   const turn = { status() {}, log() {}, signal: undefined };
@@ -1048,7 +1077,7 @@ test('the player finds music, queues it and drives the bar', { skip: !havePlugin
   assert.equal(audio.playing, false);
 });
 
-test('near-matches are offered rather than guessed between', { skip: !havePlugins }, async () => {
+test('near-matches are offered rather than guessed between', { skip: !havePlayer }, async () => {
   // Reported: "Elderly woman pearl jam" found only the live recording, because
   // that file happened to carry the band in its name while the album cut did
   // not — both sitting under a folder called Pearl Jam. And when two versions
@@ -1064,7 +1093,7 @@ test('near-matches are offered rather than guessed between', { skip: !havePlugin
 
   const audio = stubAudio();
   config.update({ plugins: { 'audio-player': { enabled: true, approved: true, settings: { library } } } });
-  const host = new PluginHost({ userDir: pluginsCheckout, services: { audio } });
+  const host = new PluginHost({ userDir: checkoutFor('audio-player'), services: { audio } });
   await host.load();
   const turn = { status() {}, log() {}, signal: undefined };
 
@@ -1095,7 +1124,7 @@ test('near-matches are offered rather than guessed between', { skip: !havePlugin
   await assert.rejects(() => host.choose('play_music', 'nonsense'), /no longer the current one/);
 });
 
-test('a playlist is gathered without asking which one', { skip: !havePlugins }, async () => {
+test('a playlist is gathered without asking which one', { skip: !havePlayer }, async () => {
   // The other half of the same request: asking which of forty tracks was meant
   // is the wrong question when somebody asked for all forty.
   const library = mkdtempSync(join(tmpdir(), 'wl-playlist-'));
@@ -1106,7 +1135,7 @@ test('a playlist is gathered without asking which one', { skip: !havePlugins }, 
 
   const audio = stubAudio();
   config.update({ plugins: { 'audio-player': { enabled: true, approved: true, settings: { library } } } });
-  const host = new PluginHost({ userDir: pluginsCheckout, services: { audio } });
+  const host = new PluginHost({ userDir: checkoutFor('audio-player'), services: { audio } });
   await host.load();
   const turn = { status() {}, log() {}, signal: undefined };
 
@@ -1124,10 +1153,10 @@ test('a playlist is gathered without asking which one', { skip: !havePlugins }, 
   assert.equal(missing.ok, false);
 });
 
-test('the player says so rather than throwing when no folder is set', { skip: !havePlugins }, async () => {
+test('the player says so rather than throwing when no folder is set', { skip: !havePlayer }, async () => {
   const audio = stubAudio();
   config.update({ plugins: { 'audio-player': { enabled: true, approved: true, settings: {} } } });
-  const host = new PluginHost({ userDir: pluginsCheckout, services: { audio } });
+  const host = new PluginHost({ userDir: checkoutFor('audio-player'), services: { audio } });
   await host.load();
 
   // The agent turns a throw into feedback too, but a message naming the remedy
@@ -1233,12 +1262,12 @@ function stubNotify() {
 /** The real plugin, over a state directory of its own. */
 async function remindersHost(stateDir, notify) {
   config.update({ plugins: { reminders: { enabled: true, approved: true } } });
-  const host = new PluginHost({ userDir: pluginsCheckout, stateDir, services: { notify } });
+  const host = new PluginHost({ userDir: checkoutFor('reminders'), stateDir, services: { notify } });
   await host.load();
   return host;
 }
 
-const haveReminders = existsSync(join(pluginsCheckout, 'reminders', 'plugin.json'));
+const haveReminders = havePlugin('reminders');
 
 test('the reminders plugin loads and says the refusal it prevents', { skip: !haveReminders }, async () => {
   const host = await remindersHost(mkdtempSync(join(tmpdir(), 'wl-rem-')), stubNotify());
@@ -1462,7 +1491,7 @@ function stubMic() {
   };
 }
 
-const haveVoice = existsSync(join(pluginsCheckout, 'voice-input', 'plugin.json'));
+const haveVoice = havePlugin('voice-input');
 
 test('voice input drives the button and tells the model nothing', { skip: !haveVoice }, async () => {
   const mic = stubMic();
@@ -1471,7 +1500,7 @@ test('voice input drives the button and tells the model nothing', { skip: !haveV
   for (const id of ALL_BUILTINS) plugins[id] = { enabled: false, approved: true };
   config.update({ plugins });
 
-  const host = new PluginHost({ userDir: pluginsCheckout, services: { mic } });
+  const host = new PluginHost({ userDir: checkoutFor('voice-input'), services: { mic } });
   await host.load();
 
   const row = host.list().find((plugin) => plugin.id === 'voice-input');

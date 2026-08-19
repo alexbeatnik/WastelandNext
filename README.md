@@ -73,9 +73,9 @@ credential directories — `.ssh`, `.aws`, `.gnupg` and friends — are refused 
 ## Plugins
 
 Everything the model may *do* is a plugin. The four capabilities above ship with the app and cannot be removed, only
-switched off; **GET PLUGINS** lists what the [registry](https://github.com/alexbeatnik/wasteland-plugins) offers — with
-icons, descriptions, and an UPDATE button when a newer version is published — and installs into the data directory on a
-click.
+switched off; **GET PLUGINS** lists what the registries offer — with icons, descriptions, and an UPDATE button when a
+newer version is published — and installs into the data directory on a click. The app ships knowing one repository per
+plugin, listed in [`registry.mjs`](src/main/plugins/registry.mjs), and a user may add more.
 
 A plugin contributes its action handlers **and** the slice of the system prompt that documents them, in one act. That
 is the point of the indirection: a switched-off capability is absent from the prompt rather than described and then
@@ -107,8 +107,8 @@ files, and what stops the alternative — asking someone to retype a file name.
 the recording and the encoding to 16 kHz mono, because `getUserMedia` only exists in the window and no plugin runs code
 there — and a plugin owns turning the sound into words. The button appears only once something can actually
 transcribe, dictated text lands in the composer rather than being sent, and the recording is deleted the moment it has
-been read, whether or not the engine worked. The [voice input](https://github.com/alexbeatnik/wasteland-plugins)
-plugin runs whisper.cpp locally: pick small, medium or large, it is downloaded once, and no audio leaves the machine.
+been read, whether or not the engine worked. The
+[voice input](https://github.com/alexbeatnik/wasteland-plugin-voice-input) plugin runs whisper.cpp locally: pick small, medium or large, it is downloaded once, and no audio leaves the machine.
 
 **A plugin can say something without being asked.** Everything else in the transcript is an answer to something you
 typed; a reminder coming due is not. The `notify` service puts a card in the transcript *and* raises an operating
@@ -145,9 +145,15 @@ plugin's own imports, so a new entry point linked against cached dependencies an
 
 **Writing one is documented in full in [docs/PLUGIN-API.md](docs/PLUGIN-API.md)** — the manifest, every method on
 `ctx`, every service, the rules that are not negotiable, and a checklist. It is written to be followed straight
-through by a person or by an agent. The
-[registry repository](https://github.com/alexbeatnik/wasteland-plugins) holds the published plugins and how to publish
-one.
+through by a person or by an agent. Each published plugin has a repository of its own, holding its source, its tests
+and the workflow that publishes it:
+[audio player](https://github.com/alexbeatnik/wasteland-plugin-audio-player),
+[voice input](https://github.com/alexbeatnik/wasteland-plugin-voice-input),
+[reminders](https://github.com/alexbeatnik/wasteland-plugin-reminders),
+[browser control](https://github.com/alexbeatnik/wasteland-plugin-manul-browser),
+[Space Trader](https://github.com/alexbeatnik/wasteland-plugin-space-trader),
+[Ukrainian](https://github.com/alexbeatnik/wasteland-plugin-ukrainian) and
+[phosphor themes](https://github.com/alexbeatnik/wasteland-plugin-phosphor-themes).
 
 ## Requirements
 

@@ -779,23 +779,28 @@ nobody can read as it flickers. Four times a second is plenty.
 
 ## Testing
 
-Plugins in the registry repository are tested two ways, and both are worth copying.
+The published plugins are tested two ways, and both are worth copying.
 
-**Pure logic, in the registry repo.** Put the parts that do not need the app — parsing, scheduling, tag reading — in
-their own module and test them with `node --test`. `tests/schedule.test.mjs` is a worked example.
+**Pure logic, in the plugin's own repo.** Put the parts that do not need the app — parsing, scheduling, tag reading —
+in their own module and test them with `node --test`. `tests/schedule.test.mjs` in
+[wasteland-plugin-reminders](https://github.com/alexbeatnik/wasteland-plugin-reminders) is a worked example. A
+`tests/manifest.test.mjs` beside it is worth having too: it asserts the manifest is true about the directory it sits
+in, which is otherwise only discovered at install time, on somebody else's machine.
 
-**Against the real host, in the app repo.** `test/plugins.test.mjs` loads plugins from a checkout of the registry
-repository sitting beside the app, with stub services, and asserts they activate, register what they claimed, and
-produce the prompt they should:
+**Against the real host, in the app repo.** `test/plugins.test.mjs` loads plugins from their checkouts beside the app,
+with stub services, and asserts they activate, register what they claimed, and produce the prompt they should:
 
 ```js
-const host = new PluginHost({ userDir: pluginsCheckout, services: { mic: stubMic() } });
+const host = new PluginHost({ userDir: checkoutFor('my-plugin'), services: { mic: stubMic() } });
 await host.load();
 const row = host.list().find((plugin) => plugin.id === 'my-plugin');
 assert.equal(row.active, true, row.error);
 ```
 
-Clone `wasteland-plugins` beside `WastelandNext` and those tests run; without it they skip.
+Each plugin has a repository of its own, so `checkoutFor(id)` is `../wasteland-plugin-<id>/plugins`. Clone one beside
+`WastelandNext` and its tests run; without it they skip. A test needing two plugins under one root stages copies into
+a temporary directory — `stagePlugins(...)` does that — because a host reads one directory and an installed tree has
+them side by side.
 
 `row.error` carries the reason a plugin failed to activate, which is why it is passed as the assertion message — a
 bare `false` tells you nothing.
@@ -864,8 +869,13 @@ Users add a registry in **GET PLUGINS → REGISTRIES**; pasting `https://github.
 `index.json` on `main`. Several registries are asked in parallel, and where two publish the same id the newest version
 wins with the source shown on the row.
 
-In the `wasteland-plugins` repository, `scripts/build-index.mjs` packs every plugin and writes `index.json` with the
-digests; the release workflow runs it. An archive uploaded by hand with no regenerated index entry is invisible.
+In a plugin's repository, `scripts/build-index.mjs` packs it and writes `index.json` with the digest; the release
+workflow runs it on a push to `main`. An archive uploaded by hand with no regenerated index entry is invisible.
+
+One repository per plugin, rather than one holding them all: in a monorepo a push republishes everything whatever had
+changed, and the release history of one plugin is a log of the others. Copy the scripts and the workflow from any of
+the published plugins — they are the same file in each, and the only thing that differs is the id in the concurrency
+group.
 
 ---
 
