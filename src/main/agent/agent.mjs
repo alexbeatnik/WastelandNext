@@ -351,7 +351,11 @@ export class Agent extends EventEmitter {
       this.#busy = false;
       this.#abort = null;
       this.#say('turn:end', {});
-      this.#status('Ready');
+      // Cleared, not set to a resting word. The status line reports what is
+      // happening — "Thinking…", "Waiting for approval…" — and a turn that has
+      // finished is nothing happening; leaving "Ready" there made the row
+      // permanent, and a permanent row is one nobody reads when it changes.
+      this.#status('');
     }
   }
 

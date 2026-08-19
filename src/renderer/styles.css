@@ -103,7 +103,6 @@ body.no-crt .crt {
 
 @media (prefers-reduced-motion: reduce) {
   .crt { animation: none; }
-  .pulse { animation: none; }
 }
 
 /* ============================ Top bar ============================ */
@@ -137,17 +136,6 @@ body.no-crt .crt {
 
 .topbar .stat.warn { color: var(--warn); }
 .topbar .stat.ok { color: var(--ok); }
-
-.pulse {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  background: var(--amber);
-  border-radius: 50%;
-  margin-right: 0.45em;
-  box-shadow: 0 0 6px var(--amber);
-  animation: blink 1.6s step-end infinite;
-}
 
 #toggle-panel {
   margin-left: auto;
@@ -2126,32 +2114,70 @@ button.card:disabled {
   display: none;
 }
 
+/* The prompt line: a field and the buttons that act on it, not three things
+   that happen to be next to each other. `flex-end` is what keeps it straight —
+   the buttons sit on the bottom edge of the box however tall it has grown,
+   where a stacked column used to hang below a two-line field and leave the
+   whole row looking crooked. */
 .composer {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   gap: 0.4rem;
   padding: 0.4rem 0.6rem;
   border-top: 1px solid var(--amber-faint);
 }
 
+/* The caret and the text share one border, so the `>` reads as part of the
+   prompt. The border is here rather than on the textarea for that reason, and
+   the focus ring has to follow it: `:focus` on a child cannot paint a parent. */
+.composer-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0.4rem;
+  background: var(--bg-deep);
+  border: 1px solid var(--amber-faint);
+}
+
+.composer-field:focus-within {
+  border-color: var(--amber);
+}
+
+/* Sized like the text it sits in front of, so the two share a first line. It
+   used to be nudged down with a padding, which held for exactly one font. */
 .composer .caret {
   color: var(--amber-bright);
-  padding-top: 0.25rem;
+  font-size: 0.95em;
+  line-height: 1.35;
 }
 
+/* Height comes from the content, via `growComposer`. Hence `resize: none`:
+   a dragged height and a computed one are two owners for one number. Two lines
+   at rest so the box does not jump on the first keystroke, and a third of the
+   window at most, past which it scrolls. */
 .composer textarea {
   flex: 1;
-  min-height: 2.6em;
-  max-height: 40vh;
+  min-width: 0;
+  min-height: 2.7em;
+  max-height: 32vh;
+  padding: 0;
+  border: 0;
+  background: none;
+  resize: none;
+  line-height: 1.35;
 }
 
+/* Both bounds, or the computed height would shrink it back the moment anything
+   is typed into it. */
 .composer.expanded textarea {
-  min-height: 40vh;
+  min-height: 45vh;
+  max-height: 45vh;
 }
 
 .composer-buttons {
   display: flex;
-  flex-direction: column;
   gap: 0.25rem;
 }
 
@@ -2195,9 +2221,10 @@ button.send.stop {
   border-color: var(--warn);
 }
 
+/* Transient. There is no resting message any more, so nothing reserves a
+   height here: the row is hidden outright whenever it holds nothing. */
 .status-line {
-  padding: 0.15rem 0.6rem 0.4rem;
-  min-height: 1.3em;
+  padding: 0.2rem 0.6rem 0.1rem;
 }
 
 /* ============================ Activity column ============================ */

@@ -301,6 +301,113 @@ async function checkComposerKeys(window) {
 }
 
 /**
+ * The prompt box, measured rather than read.
+ *
+ * Both halves of this were on screen while the source read perfectly. A column
+ * of buttons beside a two-line field hangs below it, which is geometry and not
+ * anything the DOM can be asked about; and a status line resting on a word is a
+ * row of the transcript's height spent saying nothing, which is a computed
+ * `display`. Neither is visible to a check that reads text content.
+ */
+async function checkComposer(window) {
+  say('');
+  say('Composer');
+
+  const shape = await window.webContents.executeJavaScript(`(() => {
+    const input = document.getElementById('input');
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const field = document.querySelector('.composer-field').getBoundingClientRect();
+    const buttons = document.querySelector('.composer-buttons').getBoundingClientRect();
+    return {
+      resting: input.getBoundingClientRect().height,
+      gap: Math.abs(field.bottom - buttons.bottom),
+      overhang: buttons.height - field.height,
+      grip: getComputedStyle(input).resize,
+    };
+  })()`);
+  check(
+    `the buttons sit on the bottom edge of the field — ${shape.gap.toFixed(1)}px apart`,
+    shape.gap <= 1.5,
+    JSON.stringify(shape),
+  );
+  // The other half of straight: a stack tall enough to outgrow the box it sits
+  // beside pushes the whole row open around it, which is what the column of
+  // three did to a two-line field.
+  check(
+    'and do not make the row taller than it — ' + shape.overhang.toFixed(1) + 'px',
+    shape.overhang <= 0,
+    JSON.stringify(shape),
+  );
+
+  // A dragged height and a computed one are two owners for one number, and the
+  // dragged one loses on the next keystroke.
+  check('and the box carries no resize grip to fight the computed height', shape.grip === 'none', shape.grip);
+
+  // The eight lines are built here and interpolated as JSON. A newline written
+  // as an escape inside a string that is itself inside a template literal is one
+  // backslash away from a SyntaxError thrown in the renderer instead.
+  const eight = JSON.stringify(['1', '2', '3', '4', '5', '6', '7', '8'].map((n) => 'line ' + n).join('\n'));
+  const grown = await window.webContents.executeJavaScript(`(() => {
+    const input = document.getElementById('input');
+    input.value = ${eight};
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const field = document.querySelector('.composer-field').getBoundingClientRect();
+    const buttons = document.querySelector('.composer-buttons').getBoundingClientRect();
+    const height = input.getBoundingClientRect().height;
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return { height, gap: Math.abs(field.bottom - buttons.bottom), shrunk: input.getBoundingClientRect().height };
+  })()`);
+  check(
+    `eight lines make the box taller — ${shape.resting.toFixed(0)} → ${grown.height.toFixed(0)}px`,
+    grown.height > shape.resting + 20,
+    JSON.stringify(grown),
+  );
+  check('the buttons stay on its edge as it grows', grown.gap <= 1.5, JSON.stringify(grown));
+  // The other half of the same rule: a cleared box still five lines tall is the
+  // same bug from the other side.
+  check(
+    `emptying it puts the box back — ${grown.shrunk.toFixed(0)}px`,
+    Math.abs(grown.shrunk - shape.resting) <= 1,
+    JSON.stringify(grown),
+  );
+
+  // The status line, driven the way the agent drives it.
+  const read = `(() => {
+    const node = document.getElementById('status-line');
+    return {
+      text: node.textContent,
+      display: getComputedStyle(node).display,
+      composerTop: document.getElementById('composer').getBoundingClientRect().top,
+    };
+  })()`;
+
+  window.webContents.send('event', { event: 'status', text: 'Thinking…' });
+  await new Promise((r) => setTimeout(r, 200));
+  const shown = await window.webContents.executeJavaScript(read);
+  check(
+    `something to say puts the line on screen — "${shown.text}"`,
+    shown.text === 'Thinking…' && shown.display !== 'none',
+    JSON.stringify(shown),
+  );
+
+  // Exactly what the agent emits in its `finally`. Idle is drawn as nothing.
+  window.webContents.send('event', { event: 'status', text: '' });
+  await new Promise((r) => setTimeout(r, 200));
+  const idle = await window.webContents.executeJavaScript(read);
+  check('and a finished turn takes it away again', idle.text === '' && idle.display === 'none', JSON.stringify(idle));
+  // Why it sits above the composer rather than below: the height comes out of
+  // the transcript, which can spare it, and never out from under the box the
+  // user is typing in.
+  check(
+    `the composer does not move when it comes and goes — ${idle.composerTop.toFixed(0)}px`,
+    Math.abs(shown.composerTop - idle.composerTop) <= 1,
+    JSON.stringify({ shown: shown.composerTop, idle: idle.composerTop }),
+  );
+}
+
+/**
  * Attaching a file or a folder.
  *
  * Driven through the IPC the buttons use rather than through the file dialog,
@@ -2359,7 +2466,9 @@ app.whenReady().then(async () => {
       vault: document.getElementById('vault-list').textContent.trim().length,
       sections: document.querySelectorAll('.section').length,
       status: document.getElementById('status-line').textContent,
+      statusShown: getComputedStyle(document.getElementById('status-line')).display,
       browserChip: Boolean(document.getElementById('stat-browser')),
+      sysChip: Boolean(document.getElementById('stat-sys')),
       engineChip: Boolean(document.getElementById('stat-engine')),
       model: document.getElementById('stat-model').textContent,
       ctx: document.getElementById('ctx-label').textContent,
@@ -2533,7 +2642,16 @@ app.whenReady().then(async () => {
       enabled: !document.getElementById('btn-search').disabled,
     }))()`);
     check('an empty search is a quiet no-op', searched.results === 0 && searched.enabled, JSON.stringify(searched));
-    check('boot reached Ready', probe.status === 'Ready', probe.status);
+    // Read through the computed style, not the attribute: what `hidden` says
+    // and what the user sees are different questions, and only the second is
+    // worth a check. An idle app has nothing to report, and the line that used
+    // to rest on "Ready" spent every idle moment saying so.
+    check('boot says nothing, because nothing is happening', probe.status === '', probe.status);
+    check('and the line is not on screen to say it', probe.statusShown === 'none', probe.statusShown);
+    // SYS: ONLINE was written once, in the markup, and never again — a reading
+    // that cannot report anything else is decoration wearing a status chip's
+    // clothes.
+    check('no SYS chip that could only ever say ONLINE', !probe.sysChip);
     check('context meter initialised', /^CTX: \d+ \/ \d+/.test(probe.ctx), probe.ctx);
     // The browser chips are gone with the browser: nothing in this app owns a
     // Chrome any more, and a status line for a capability that may not be
@@ -2556,6 +2674,7 @@ app.whenReady().then(async () => {
     await checkScene(window);
     await checkChooser(window);
     await checkChatControls(window);
+    await checkComposer(window);
     await checkAttachments(window);
     await checkNotices(window);
     await checkDictation(window);

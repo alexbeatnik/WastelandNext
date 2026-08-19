@@ -25,7 +25,6 @@
 
     <header class="topbar">
       <span class="brand">WASTELAND<span class="version">NEXT</span></span>
-      <span class="stat" id="stat-sys"><i class="pulse"></i>SYS: ONLINE</span>
       <span class="stat" id="stat-model">MODEL: NONE</span>
       <span class="stat" id="stat-compute" hidden>RUN: —</span>
       <button class="ghost" id="btn-about" title="About Wasteland Next">[ ABOUT ]</button>
@@ -284,11 +283,26 @@
              window — a move you have to scroll back up to make is not a move. -->
         <div class="scene-actions" id="scene-actions" hidden></div>
 
+        <!-- Transient, and above the composer rather than below it: the row
+             takes its height from the transcript, which can spare it, instead
+             of shifting the box being typed into. Empty means idle — there is
+             no resting message, because a line that always says the same thing
+             is one nobody reads when it finally says something else. -->
+        <div id="status-line" class="status-line muted" hidden></div>
+
+        <!-- The caret and the text share one border, so this reads as a prompt
+             rather than as a marker beside a field, and the buttons sit against
+             the bottom edge of it. The box is as tall as what is in it
+             (`growComposer`), which is why it carries no resize grip: a dragged
+             height and a computed one are two owners for one number, and the
+             dragged one loses on the next keystroke. -->
         <div class="composer" id="composer">
-          <span class="caret">&gt;</span>
-          <textarea id="input" rows="2" placeholder="Ask, or tell it what to open…  (Enter sends · Shift+Enter newline)"></textarea>
+          <div class="composer-field">
+            <span class="caret" aria-hidden="true">&gt;</span>
+            <textarea id="input" rows="1" placeholder="Ask, or tell it what to open…"></textarea>
+          </div>
           <div class="composer-buttons">
-            <button id="btn-expand" class="ghost" title="Expand the composer">⤡</button>
+            <button id="btn-expand" class="ghost" title="Expand the composer">⤢</button>
             <!-- Drawn only when a plugin has a working transcriber: a
                  microphone that records into nothing is a dead control, and
                  getting a model is done on that plugin's own row. -->
@@ -296,7 +310,6 @@
             <button id="btn-send" class="send" title="Send">▶</button>
           </div>
         </div>
-        <div id="status-line" class="status-line muted">Ready</div>
       </section>
 
       <!-- ===================== ACTIVITY ===================== -->

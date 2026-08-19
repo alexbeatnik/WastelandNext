@@ -101,8 +101,37 @@ function el(tag, className, text) {
   return node;
 }
 
+/**
+ * The one transient line, above the composer.
+ *
+ * Empty means idle, and idle is drawn as nothing at all: the line used to rest
+ * on "Ready", which is a row of the transcript's height spent saying what the
+ * app is doing whenever it is doing nothing — and a message nobody reads when
+ * it finally changes.
+ */
 function status(text) {
-  $('status-line').textContent = text;
+  const line = $('status-line');
+  line.textContent = text;
+  line.hidden = !text;
+}
+
+/**
+ * The composer is as tall as what is in it.
+ *
+ * A fixed two-line box scrolls a pasted paragraph out of sight while the
+ * buttons beside it stay where they are; the height is computed from the
+ * content instead, floored at two lines and capped in the stylesheet, past
+ * which it scrolls. Setting `auto` first is not a flourish — `scrollHeight`
+ * never reports less than the height already applied, so without it the box
+ * grows and never comes back down.
+ *
+ * Every programmatic write to the composer owes a call: a cleared box still
+ * five lines tall is the same bug from the other side.
+ */
+function growComposer() {
+  const input = $('input');
+  input.style.height = 'auto';
+  input.style.height = `${input.scrollHeight}px`;
 }
 
 function activity(text, kind = '') {
@@ -2704,7 +2733,8 @@ async function startDictation() {
       input.value = input.value ? `${input.value.replace(/\s*$/, '')} ${text}` : text;
       input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
-      status('Ready');
+      growComposer();
+      status('');
     } catch (err) {
       status(err.message);
       activity(`dictation failed — ${err.message}`, 'bad');
@@ -2831,7 +2861,7 @@ async function attachVia(run) {
     paintAttachments(items);
     for (const error of result.errors ?? []) activity(`not attached — ${error}`, 'bad');
 
-    if (result.canceled) status('Ready');
+    if (result.canceled) status('');
     else if (result.errors?.length) status(`Not attached: ${result.errors[0]}`);
     else status(items.length === 1 ? '1 attachment ready.' : `${items.length} attachments ready.`);
   } catch (err) {
@@ -3058,7 +3088,10 @@ async function submitPrompt(prompt, { restoreTo = null } = {}) {
       // the words, or the user is left looking at buttons that died for a
       // message that does not exist.
       restoreOffers();
-      if (restoreTo && !restoreTo.value) restoreTo.value = prompt;
+      if (restoreTo && !restoreTo.value) {
+        restoreTo.value = prompt;
+        growComposer();
+      }
       userTurn.remove();
     }
   } finally {
@@ -3076,6 +3109,7 @@ async function send() {
   if (!prompt) return;
 
   input.value = '';
+  growComposer();
   await submitPrompt(prompt, { restoreTo: input });
 }
 
@@ -3354,7 +3388,23 @@ function wire() {
     send();
   });
 
-  $('btn-expand').addEventListener('click', () => $('composer').classList.toggle('expanded'));
+  // Typing is what sets the height, so the handler is on the box itself rather
+  // than on the keys: a paste, a drop and an undo all arrive as `input` and
+  // none of them is a keystroke.
+  $('input').addEventListener('input', growComposer);
+
+  // One button, two states, and it has to say which one it is in — the only
+  // other feedback is the size of the box, which is the thing being changed.
+  // Written through `t()` because `applyDictionary` walks markup captured at
+  // boot, and putting the captured original back over a string the app has
+  // since written is an erasure rather than a translation.
+  $('btn-expand').addEventListener('click', () => {
+    const open = $('composer').classList.toggle('expanded');
+    const button = $('btn-expand');
+    button.textContent = open ? '⤡' : '⤢';
+    button.title = t(open ? 'Shrink the composer' : 'Expand the composer');
+    $('input').focus();
+  });
 
   // The links inside carry `target="_blank"`, which the main process turns into
   // `shell.openExternal` — this window must never navigate away from itself.
@@ -3606,7 +3656,7 @@ async function boot() {
   // the app was closed is reported during boot, which is earlier than this.
   for (const notice of snapshot.notices ?? []) showNotice(notice);
 
-  status('Ready');
+  status('');
 
   // Last, unawaited and quiet. It is what puts UPDATE on an installed row, so
   // it cannot wait for the section to be opened — but a machine with no network
