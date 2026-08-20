@@ -43,9 +43,6 @@ export const DEFAULTS = {
   /** Point at an already-running OpenAI-compatible endpoint instead of spawning one. */
   externalEndpoint: '',
 
-  /** Browser */
-  browserHeadless: false,
-  chromePath: '',
 
   /**
    * Plugin state, keyed by id: `{enabled, approved}`.

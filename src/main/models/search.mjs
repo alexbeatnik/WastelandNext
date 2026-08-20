@@ -29,16 +29,26 @@ const QUANT_ORDER = [
   'F16', 'BF16', 'F32',
 ];
 
+/**
+ * Every quantisation with the pattern that finds it, longest name first.
+ *
+ * Longest match wins, so `Q4_K_M` is not reported as `Q4_K`. Built once at load
+ * rather than inside `parseQuant`: a listing calls it per file, and a repository
+ * offering thirty quantisations was compiling a thousand throwaway regexes to
+ * answer a question whose answer never changes. None of them is global, so
+ * there is no `lastIndex` to carry from one filename to the next.
+ */
+const QUANT_MATCHERS = [...QUANT_ORDER]
+  .sort((a, b) => b.length - a.length)
+  .map((quant) => ({
+    quant,
+    re: new RegExp(`(^|[-_.])${quant.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([-_.]|$)`, 'i'),
+  }));
+
 /** The quantisation named in a GGUF filename, uppercased, or ''. */
 export function parseQuant(filename) {
   const name = basename(String(filename ?? '')).replace(/\.gguf$/i, '');
-  // Longest match wins so `Q4_K_M` is not reported as `Q4_K` — the list is
-  // walked from the most specific end.
-  const byLength = [...QUANT_ORDER].sort((a, b) => b.length - a.length);
-  const hit = byLength.find((quant) =>
-    new RegExp(`(^|[-_.])${quant.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([-_.]|$)`, 'i').test(name),
-  );
-  return hit ?? '';
+  return QUANT_MATCHERS.find(({ re }) => re.test(name))?.quant ?? '';
 }
 
 /** Multi-part shards need every piece; one download cannot assemble them. */
@@ -46,9 +56,22 @@ export function isShard(filename) {
   return /-\d{5}-of-\d{5}\.gguf$/i.test(String(filename ?? ''));
 }
 
-/** The download URL for one file in a repository. */
+/**
+ * The download URL for one file in a repository.
+ *
+ * Each path segment is encoded on its own. `encodeURI` leaves `#` and `?`
+ * alone, so a repository file named `model#2-Q4_K_M.gguf` reaches `fetch` as a
+ * path ending at `model` with a fragment hanging off it — the same thing the
+ * media scheme is careful about, arriving here as a 404 for a file that is
+ * plainly there. `encodeURIComponent` over the whole string would eat the
+ * separators instead, so the split is what keeps a nested path a path.
+ */
 export function downloadUrlFor(repoId, path) {
-  return `https://huggingface.co/${repoId}/resolve/main/${encodeURI(path)}`;
+  const encoded = String(path ?? '')
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+  return `https://huggingface.co/${repoId}/resolve/main/${encoded}`;
 }
 
 async function getJson(url, signal) {

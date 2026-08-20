@@ -1,40 +1,46 @@
 # Wasteland Next
 
-**A local LLM terminal that can drive your browser.** Amber-on-black CRT interface, Electron, no cloud required.
+**A local LLM terminal you can teach new tricks.** Amber-on-black CRT interface, Electron, no cloud required.
 
-Wasteland Next is the [Wasteland Terminal](https://github.com/alexbeatnik/wasteland) interface rebuilt on Electron, with
-the browser-control pipeline from [OS-Manul](https://github.com/alexbeatnik/OS-MANUL) and the
-[manul-browser](https://github.com/alexbeatnik/manul-browser) engine underneath it. The look is the original's; the
-security architecture is not — there is no seccomp lockdown, no encrypted chat store, no sandboxed executor. What
-replaces them is a browser the model can actually use.
+There is no sandbox here, no encrypted chat store and no locked-down executor. What stands in for them is the plugin
+system: everything the model may *do* arrives as a plugin, is listed on a row you can read, and is switched on by you —
+and a capability that is switched off is absent from the system prompt rather than described to the model and then
+refused.
+
+That includes driving a browser, which used to be built in and is now
+[a plugin of its own](https://github.com/alexbeatnik/wasteland-plugin-manul-browser) carrying the
+[manul-browser](https://github.com/alexbeatnik/manul-browser) engine inside it.
 
 ## What it does
 
 Type a request. The model answers, or emits a fenced action block and the app carries it out:
 
-| Action | What happens |
-|---|---|
-| `browser_steps` | Runs manul-browser DSL against your visible Chrome — navigate, click, fill, press, scroll |
-| `browser_close` | Shuts the controlled browser down |
-| `web_lookup` | A silent search in a **separate headless browser**, so your open tab is untouched |
-| `read_file` | Reads one file, read-only, inside your home directory |
-| `system_shell` | Runs a shell command — but only after you approve it in a dialog |
-
-The browser is always one the app launches itself; there is no attach-to-your-own-Chrome mode, so a failure can never
-look like the app meddling with tabs you were using.
+| Action | What happens | Where it comes from |
+|---|---|---|
+| `read_file` | Reads one file, read-only, inside your home directory | built in |
+| `system_shell` | Runs a shell command — but only after you approve it in a dialog | built in |
+| `browser_steps` | Runs manul-browser DSL against a real browser — navigate, click, fill, press, scroll | [browser control](https://github.com/alexbeatnik/wasteland-plugin-manul-browser) |
+| `browser_close` | Shuts that browser down | browser control |
+| `web_lookup` | A silent search in a **separate headless browser**, so your open tab is untouched | browser control |
 
 **Every one of those is a plugin**, switched on and off in the PLUGINS section of the left panel — and more can be
-installed. See [Plugins](#plugins) below.
+installed. Two ship inside the app because they reach this machine's own files and shell, and there is nowhere else for
+them to come from; everything else, browser control included, is installed from a registry. See [Plugins](#plugins)
+below.
 
-After a browser batch the page is scanned and its real labels are fed back, so the next step targets text that is
-actually on screen instead of a guess. A title that is not on screen yet takes two turns by design: search on the
-first, click an exact result on the second. The model is told that in so many words, with the search-and-stop shape
-written out, because "never use positional targets" on its own leaves it choosing between guessing and refusing.
+Replies are rendered as markdown — headings, lists, links, emphasis, inline code and code blocks. The system prompt
+permits it because this view can draw it: a rule forbidding what the interface renders perfectly well buys nothing and
+costs a model real time deliberating over whether a fenced action block counts as formatting. The text is parsed into
+plain data and built into DOM nodes, never assigned as HTML, so a reply that happens to contain markup is displayed
+rather than executed.
 
-Replies are rendered as markdown — headings, lists, links, emphasis, inline code and code blocks. The original forbade
-it because Nuklear drew glyphs rather than documents, so `**bold**` reached the user as four asterisks; this view can
-draw it, so the model is allowed to use it. The text is parsed into plain data and built into DOM nodes, never assigned
-as HTML, so a reply that happens to contain markup is displayed rather than executed.
+**A reply can end in buttons.** A numbered list is not a menu: "1. Open it 2. Show other versions — which would you
+like?" is a control nobody can press, and it was the only thing a model could produce. A reply may instead end in a
+fenced `choices` block stating the options as data; the app reads it, draws a button each, and pressing one sends that
+text down exactly the path typed words take. The fence itself is never shown. Only the newest offer is live — a turn
+with follow-ups can put two on screen, and the older one is answering a question about a world several steps back — but
+a spent row is greyed rather than removed, because the fence is stripped out of the prose and deleting the buttons would
+leave the message that answered them replying to nothing visible.
 
 **Thinking** is off by default and toggled beside the composer. Off, the model is asked to skip reasoning in the two
 ways that work — a hard budget and the chat template's own flag — and whatever still arrives is hidden. It is shown
@@ -74,16 +80,19 @@ credential directories — `.ssh`, `.aws`, `.gnupg` and friends — are refused 
 
 ## Plugins
 
-Everything the model may *do* is a plugin. The four capabilities above ship with the app and cannot be removed, only
-switched off; **GET PLUGINS** lists what the [registry](https://github.com/alexbeatnik/wasteland-plugins) offers — with
-icons, descriptions, and an UPDATE button when a newer version is published — and installs into the data directory on a
-click.
+Everything the model may *do* is a plugin. Two of them — the file reader and the shell — ship inside the app and cannot
+be removed, only switched off; **GET PLUGINS** lists what the registries offer — with icons, descriptions, and an UPDATE
+button when a newer version is published — and installs into the data directory on a click. The app ships knowing one
+repository per plugin, listed in [`registry.mjs`](src/main/plugins/registry.mjs), and a user may add more. Listing one
+there is this build saying a plugin is worth offering, not that the code was written here — a couple of them are other
+people's repositories.
 
 A plugin contributes its action handlers **and** the slice of the system prompt that documents them, in one act. That
 is the point of the indirection: a switched-off capability is absent from the prompt rather than described and then
 refused, so the model never reaches for a tool it cannot have, and the two halves cannot drift apart. What a plugin may
-reach for — the browser, the headless lookup browser, audio output — is declared in its manifest and handed over by
-name, so the plugin list is a true account of what is running rather than a summary somebody wrote.
+reach for — audio output, the microphone, notifications, the game panel — is declared in its manifest and handed over
+by name, so the plugin list is a true account of what is running rather than a summary somebody wrote. A plugin that
+needs something the app does not have brings it: browser control ships the engine it drives.
 
 **Two kinds, and only one of them is code.** A theme pack is a manifest and some CSS, read by the app's own protocol
 handler; there is nothing to run, so there is nothing to consent to. Anything with an entry point runs in the main
@@ -94,6 +103,23 @@ its row. Installing is not switching on — a directory that appeared in `plugin
 `wasteland-plugin://` scheme, because `style-src 'self'` on a `file://` page rejects both an inline `<style>` built
 from IPC text and a stylesheet in another directory. Scripts stay `'self'` alone — no plugin runs code in the chat
 window, which is why one that wants to play audio asks the app for the `audio` service instead of shipping a player.
+
+**Languages** are chosen in INTERFACE too, and are the same kind of thing a theme is: a manifest, a dictionary, no code
+to approve. The app captures its own markup at boot and swaps the strings it recognises, and it skips any node holding
+something neither it captured nor last wrote — the mic button gains the name of whichever plugin is listening, and
+putting the original English back over that would be an erasure rather than a translation. Anything written while the
+app runs goes through the same dictionary instead. The
+[Ukrainian](https://github.com/alexbeatnik/wasteland-plugin-ukrainian) pack is the worked example.
+
+**A plugin can put a game in the chat window.** The `scene` service is the bargain the audio bar strikes, played out at
+a larger size: a plugin cannot run code in this window, so it holds the game and says what the panel *contains* — a
+hero strip with meters, a row of moves, an inventory, a journal, a chooser of cards, a map with markers and roads — and
+every node on screen is built here from a document with a fixed set of keys. The app assigns the hotkeys by position,
+so no two moves can claim the same digit, and a digit typed into the composer stays a digit. A move is sent by the
+window down exactly the path typed text takes, which is also what stops a game looping: nothing in the service can
+start a turn, so a move happens because somebody pressed a key. The panel belongs to the conversation the game is
+played in, and is drawn nowhere else. [Space Trader](https://github.com/alexbeatnik/wasteland-plugin-space-trader) and
+[Fantasy RPG](https://github.com/awakeserg/wasteland-plugin-fantasy-rpg) both drive it.
 
 **Audio** is the smallest part of a music player that cannot be a plugin: an `<audio>` element, the transport bar under
 the transcript, and a scheme that serves one file with Range support so seeking works. It has no queue, no shuffle and
@@ -108,14 +134,23 @@ files, and what stops the alternative — asking someone to retype a file name.
 the recording and the encoding to 16 kHz mono, because `getUserMedia` only exists in the window and no plugin runs code
 there — and a plugin owns turning the sound into words. The button appears only once something can actually
 transcribe, dictated text lands in the composer rather than being sent, and the recording is deleted the moment it has
-been read, whether or not the engine worked. The [voice input](https://github.com/alexbeatnik/wasteland-plugins)
-plugin runs whisper.cpp locally: pick small, medium or large, it is downloaded once, and no audio leaves the machine.
+been read, whether or not the engine worked. The
+[voice input](https://github.com/alexbeatnik/wasteland-plugin-voice-input) plugin runs whisper.cpp locally: pick small, medium or large, it is downloaded once, and no audio leaves the machine.
 
 **A plugin can say something without being asked.** Everything else in the transcript is an answer to something you
 typed; a reminder coming due is not. The `notify` service puts a card in the transcript *and* raises an operating
 system notification, because neither is enough alone — the first is invisible to somebody in another window, the second
 is gone the moment it is dismissed. Notices raised before the window was listening are kept and shown on the way in,
 which is how a reminder that came due while the app was closed still reaches you.
+
+**A setting can be drawn twice.** Every control on a plugin's row is declared in its manifest — a folder to pick, an
+endpoint to type, a list to choose from — so the row can be drawn before a line of the plugin's code has run, and a
+value it never offered is refused. A row in PLUGINS is where a plugin is *decided* about, beside its description and
+the switch that turns it off, and a poor place to actually *use* one: a music folder and a model size get changed far
+more often than the plugin gets reconsidered, and reaching either meant opening the section and reading a dozen rows.
+A manifest may therefore ask for a section of its own in the left panel, drawn from the same declarations, with nothing
+for the plugin's code to do — and it goes away with the plugin, because a control that cannot work is worse than one
+that is absent.
 
 **A plugin keeps its own state.** Settings are the questions its manifest asked you and each one is a control on its
 row; a list of reminders is neither of those, so a plugin also gets one JSON document of its own under `plugin-state/`,
@@ -145,53 +180,41 @@ to defeat the cache by importing the entry point under a unique query made it wo
 plugin's own imports, so a new entry point linked against cached dependencies and failed outright.
 
 **Writing one is documented in full in [docs/PLUGIN-API.md](docs/PLUGIN-API.md)** — the manifest, every method on
-`ctx`, all five services, the rules that are not negotiable, and a checklist. It is written to be followed straight
-through by a person or by an agent. The
-[registry repository](https://github.com/alexbeatnik/wasteland-plugins) holds the published plugins and how to publish
-one.
+`ctx`, every service, the rules that are not negotiable, and a checklist. It is written to be followed straight
+through by a person or by an agent. Each published plugin has a repository of its own, holding its source, its tests
+and the workflow that publishes it:
+[audio player](https://github.com/alexbeatnik/wasteland-plugin-audio-player),
+[voice input](https://github.com/alexbeatnik/wasteland-plugin-voice-input),
+[reminders](https://github.com/alexbeatnik/wasteland-plugin-reminders),
+[browser control](https://github.com/alexbeatnik/wasteland-plugin-manul-browser),
+[Space Trader](https://github.com/alexbeatnik/wasteland-plugin-space-trader),
+[Fantasy RPG](https://github.com/awakeserg/wasteland-plugin-fantasy-rpg),
+[Ukrainian](https://github.com/alexbeatnik/wasteland-plugin-ukrainian) and
+[phosphor themes](https://github.com/alexbeatnik/wasteland-plugin-phosphor-themes).
 
 ## Requirements
 
 | Component | Why | How |
 |---|---|---|
 | Node ≥ 22 | build and run | [nodejs.org](https://nodejs.org) |
-| Go ≥ 1.26 | builds the engine | [go.dev](https://go.dev/dl/) |
-| A [manul-browser](https://github.com/alexbeatnik/manul-browser) checkout | engine source + Node binding | clone it **beside this repo** |
-| Google Chrome | what the engine drives | system install |
 | `llama-server` | local inference | **downloaded on first model load** — or supply your own on `PATH` |
+| Chrome or Firefox | only for browser control | system install, and the plugin brings the engine |
 
-Only Node is needed to start the app. Without Go and the manul-browser checkout you get chat but no browser control;
-without `llama-server` you can still point the app at any OpenAI-compatible endpoint.
+Node is the whole build requirement. There is no Go toolchain and no second checkout any more: the browser engine used
+to be compiled from source here and is now a released binary inside
+[its own plugin](https://github.com/alexbeatnik/wasteland-plugin-manul-browser). Without `llama-server` you can still
+point the app at any OpenAI-compatible endpoint.
 
 ## Install
 
 ```bash
-git clone https://github.com/alexbeatnik/manul-browser   # beside this repo
 git clone <this repo> WastelandNext
 cd WastelandNext
-npm install          # also builds the engine into resources/bin
+npm install
 npm start
 ```
 
-`npm install` runs `scripts/build-manul-browser.mjs`, which stages **both halves** of manul-browser into `resources/`:
-
-```
-resources/bin/manul.exe      the Go engine, built from the checkout's core/
-resources/manul-browser/     the Node binding's compiled dist, copied
-```
-
-The binary keeps manul-browser's own CLI name (`manul`) — that is what its binding looks for.
-
-The checkout is found by looking for a sibling directory named `manul-browser` (then `Manul`, then `ManulEngineGo`,
-which are what older local clones were called). `MANUL_SOURCE` overrides the search and may name either the repository
-root or the `core` directory inside it.
-
-There is deliberately **no npm dependency** on `manul-browser`: the package publishes no platform packages yet, and a
-`file:` dependency would have to hard-code one directory name that npm resolves before any script could correct it. The
-binding is loaded by path at runtime instead — and an installed `manul-browser` package still wins if one ever exists, so
-this keeps working the day it is published.
-
-A developer working on the engine can set `MANUL_BINARY` to their own build; the app leaves that override alone.
+Then open **GET PLUGINS** and install what you want the model to be able to do. Browser control is listed there.
 
 ## Building a Windows executable
 
@@ -199,7 +222,7 @@ A developer working on the engine can set `MANUL_BINARY` to their own build; the
 npm run dist
 ```
 
-Stages manul-browser, then runs electron-builder. Two artifacts land in `dist/`:
+Runs electron-builder. Two artifacts land in `dist/`:
 
 | File | What it is |
 |---|---|
@@ -220,24 +243,20 @@ also refuses if the installer name recorded inside it does not match the asset b
 resolves the download through that name and would otherwise 404 on every machine. The `.blockmap` is not required, but
 without it an update re-downloads all 75 MB instead of the parts that changed.
 
-The runner builds the engine from source, so it checks out `manul-browser` alongside, installs Go, compiles the Node
-binding, and **fails the release if `resources/bin/manul.exe` is not there afterwards** — a release that quietly ships
-without browser control is worse than one that does not ship.
-
 The installed build checks for updates a few seconds after launch, downloads in the background and installs on
 restart, so nothing interrupts a turn. `[ ABOUT ]` shows what it is doing and offers `[ CHECK ]`, or `[ RESTART ]` once
-a build is waiting. Before the installer runs, llama-server and the controlled Chrome are shut down: `quitAndInstall`
-starts the installer and *then* asks the app to quit, and an orphaned llama-server holding port 8080 would make the
-next run report a model as loaded while talking to something else.
+a build is waiting. Before the installer runs, llama-server is shut down and every plugin is deactivated — which is
+what closes a browser one of them opened: `quitAndInstall` starts the installer and *then* asks the app to quit, and an
+orphaned llama-server holding port 8080 would make the next run report a model as loaded while talking to something
+else.
 
 The **portable** exe does not self-update — there is no installed copy to replace — and says so rather than offering a
 button that could only fail. Downloading a new portable exe is the whole update.
 
 Nothing is signed, so SmartScreen warns on first run and after each update.
 
-The packaged app carries the engine and the binding in its own `resources/`, so it needs neither the checkout nor Go on
-the machine that runs it. It still needs Chrome for browser control and `llama-server` (or a remote endpoint) for
-inference. The build is unsigned — Windows SmartScreen will warn on first run.
+The packaged app is the app and its plugins' host, nothing else: capabilities are installed from a registry at runtime,
+so a release does not have to carry them. It still needs `llama-server` (or a remote endpoint) for inference.
 
 ## First run
 
@@ -381,38 +400,40 @@ src/
 │   ├── config.mjs          persisted settings
 │   ├── chats.mjs           one JSON file per chat
 │   ├── paths.mjs           data root, injected at boot so the rest stays testable
+│   ├── updater.mjs         the release feed, and shutting everything down before it installs
+│   ├── audio.mjs           audio output, driven by whichever plugin wants it
+│   ├── mic.mjs             the microphone, driven by whichever plugin can transcribe
+│   ├── notify.mjs          the one message with no question in front of it
+│   ├── scene.mjs           the game panel: what a plugin says it holds, drawn by the app
 │   ├── llm/
 │   │   ├── server.mjs      llama-server child process
 │   │   ├── client.mjs      OpenAI-compatible streaming, endpoint-agnostic
 │   │   ├── tools.mjs       fetching llama-server when there is none
 │   │   ├── gguf.mjs        model header parsing + context sizing
 │   │   ├── gpu.mjs         VRAM detection, layer fitting, context trade
+│   │   ├── offload.mjs     reading where the weights actually went, in bytes not layers
 │   │   ├── failure.mjs     turning a crash log into a sentence
+│   │   ├── zip.mjs         reading an archive's directory before anything is unpacked
 │   │   └── port.mjs        refusing to start onto an occupied port
 │   ├── models/
 │   │   ├── manager.mjs     vault scan, HuggingFace resolve, resumable download
 │   │   ├── rate.mjs        download speed and time remaining
 │   │   ├── search.mjs      in-app model search + per-repo file listing
 │   │   └── placement.mjs   where a model would run, before it is loaded
-│   ├── browser/
-│   │   └── manul-browser.mjs  the manul-browser bridge
 │   ├── plugins/
 │   │   ├── host.mjs        the registry: discovery, activation, contributions
 │   │   ├── manifest.mjs    validating what a plugin claims about itself
 │   │   ├── registry.mjs    the published index: fetch, verify, install, remove
+│   │   ├── state.mjs       one JSON document per plugin, outside its installed tree
 │   │   └── protocol.mjs    serving a plugin's files and one audio file
-│   ├── audio.mjs           audio output, driven by whichever plugin wants it
 │   └── agent/
 │       ├── agent.mjs       the turn pipeline, compaction, window budgeting
 │       ├── attach.mjs      files and folders the user put in front of the model
 │       ├── actions.mjs     reading actions out of a reply
-│       ├── batch-guard.mjs refusing a browser batch identical to one already run
 │       ├── prompts.mjs     assembling the system prompt from plugin fragments
 │       └── readfile.mjs    the read-only file path
 ├── plugins/                the plugins that ship with the app
 │   ├── index.mjs           the static list of built-ins
-│   ├── browser-control.mjs browser_steps · browser_close
-│   ├── web-lookup.mjs      web_lookup, in its own headless browser
 │   ├── read-file.mjs       read_file
 │   └── system-shell.mjs    system_shell, behind the approval dialog
 ├── preload/preload.cjs     the renderer's whole view of main
@@ -421,32 +442,39 @@ src/
     ├── render.mjs          text shaping both processes need
     ├── markdown.mjs        markdown → data the renderer builds nodes from
     ├── media.mjs           MIME types, Range parsing, clock formatting
-    ├── schemes.mjs         how a wasteland-plugin:// or wasteland-media:// URL is spelled
-    └── engine.mjs          finding the manul-browser checkout
+    ├── categories.mjs      the plugin sections, and the order they are drawn in
+    ├── updates.mjs         what an update is doing, in words both processes agree on
+    └── schemes.mjs         how a wasteland-plugin:// or wasteland-media:// URL is spelled
 ```
 
 ## Testing
 
 ```bash
-npm test       # 437 unit tests, no Electron, no network
+npm test       # 552 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
 ```
 
-`npm test` covers the pure logic: action extraction and its JSON repair, `<think>` splitting and stripping, markdown
-parsing, chat storage and id validation, path vetting, HuggingFace URL rewriting and quantisation choice, prompt
-assembly, plugin manifest validation and host activation, registry entries and version comparison, Range parsing and
-custom-scheme URLs, GGUF header parsing and the context/GPU arithmetic, the compaction threshold and the window backstop, folder
-collection and its budget, download speed and resume, crash-log summarising, checkout resolution, and where a
-*packaged* app looks for the engine.
+`npm test` covers the pure logic: action extraction and its JSON repair, the `choices` fence, `<think>` splitting and
+stripping, markdown parsing, chat storage and id validation, path vetting, HuggingFace URL building and quantisation
+choice, prompt assembly, plugin manifest validation and host activation, the scene document and what a game may offer,
+registry entries and version comparison, Range parsing and custom-scheme URLs, GGUF header parsing and the context/GPU
+arithmetic, the compaction threshold and the window backstop, folder collection and its budget, download speed and
+resume, notices, dictation, and crash-log summarising.
 
-`npm run smoke` boots the real window offscreen — 134 checks — and covers what unit tests cannot: a renderer that throws
+`npm run smoke` boots the real window offscreen — 285 checks — and covers what unit tests cannot: a renderer that throws
 on boot, a preload that failed to expose its bridge, an IPC channel renamed on one side only, a layout that breaks at
 one screen shape, or a control that stops resetting what it should. It clicks NEW CHAT, presses Enter, attaches a
 folder and detaches one of two, switches a plugin off and checks the main process agrees, allows a plugin that brings
-code and watches it start, installs a theme and asserts the window actually repaints, plays a real audio file through
-the media scheme, presses one of the options an action offered and checks the plugin answered, deletes a conversation
-from the picker without opening it, opens the About box and checks every link in it would leave the window, resizes through seven screen shapes, and checks that a reply containing
-`<img onerror=…>` is drawn as text rather than run.
+code and watches it start, installs a theme and asserts the window actually repaints, translates the interface and puts
+the English back, plays a real audio file through the media scheme, presses a button a reply offered and checks the
+words went out as an ordinary message, plays a turn of a game — hotkeys, the sheet, the map, a chooser — and checks a
+digit typed into the composer stays a digit, deletes a conversation from the picker without opening it, opens the About
+box and checks every link in it would leave the window, resizes through seven screen shapes, and checks that a reply
+containing `<img onerror=…>` is drawn as text rather than run.
+
+A check the running screen cannot answer is reported as `skip` with the reason, never quietly relaxed until it fits. A
+hosted runner's display is 1024×768: every layout shape goes unasked there, and the map is checked against the rule
+that is actually sizing it rather than against an ordinary dialog it cannot outgrow on a screen that short.
 
 Where a fix is for something a user reported, the test reproduces *their* case rather than a tidy abstraction of it:
 the numbers in the GPU tests are a 25 GB model on a 12 GB card, the context tests use 4594 of 4608, and the crash-log
@@ -464,41 +492,26 @@ version, not this app's, because `app.getVersion()` falls back to it when it can
 precisely what running the smoke script does. The version is read from `package.json` directly now, and the check
 compares against that same manifest rather than against a pattern.
 
-## How it differs from the original
-
-| | Wasteland | Wasteland Next |
-|---|---|---|
-| Language | C11 + Nuklear + SDL2 | Electron |
-| Inference | llama.cpp linked in | `llama-server` subprocess, OpenAI-compatible |
-| Network | seccomp kills any new socket after load | open — the browser needs it |
-| Chat store | XChaCha20-Poly1305 | plain JSON |
-| Agent | sandboxed filesystem tools | browser control, lookup, read-only file, gated shell |
-| Context | fixed window, no compaction | budgeted against the reply, compacted, with a hard backstop |
-| Layout | fixed panels | aspect-ratio responsive |
-| Replies | plain text — Nuklear drew glyphs, not documents | markdown, parsed to data and built as DOM nodes |
-| Context / offload | fixed `N_CTX`, `-ngl` as set | sized from the model header and the card |
-
 ## Known gaps
 
-- The engine and binding come from a sibling checkout rather than from npm — `manul-browser` has no published platform
-  packages yet, so there is nowhere else for either to come from.
-- `web_lookup` reads DuckDuckGo result text. It has no AI-overview extraction and no CAPTCHA handling.
+- An index entry has no field for the platform it runs on. That matters for a plugin whose archive carries a compiled
+  binary — browser control is published per platform, and the index offers the Windows build.
 - VRAM is detected through `nvidia-smi` only. On an AMD or Intel card the offload is left exactly as configured, because
   a wrong number would be worse than none — Windows reports 4 GB for anything larger.
 - Only Windows is packaged so far. macOS and Linux targets are a config change away but have not been built or tested.
-- Builds are unsigned; there is no auto-update feed.
+- Builds are unsigned, so SmartScreen warns on first run and after every update. The update feed itself works: a release
+  carrying `latest.yml` is picked up by every installed copy, and the portable exe says plainly that it cannot self-update
+  rather than offering a button that could only fail.
 - Compaction is triggered by an estimated token count, not a real one — the endpoint only reports actual usage after
   the fact. The estimate counts Latin and Cyrillic separately (about 3.6 and 1.6 characters to the token), because one
   ratio for both undercounted a Ukrainian conversation by roughly half.
 - An attached folder is read once, at the moment it is sent. Nothing watches it afterwards, so a file edited later is
   the version the model first saw until you attach it again.
 - There is no agent mode. The model reads what you attach and answers in the chat; it cannot edit or write anything.
-- There is no automatic ad skipping. It was built and withdrawn: the engine can find an element by CSS selector and it
-  can click one by its visible label, but it cannot click *the element the selector found*. On a page where an ad
-  overlays the player, the label resolved to the ad instead of the skip button and opened the advertiser in a new tab,
-  repeatedly. Doing this properly needs a click-by-selector primitive in the engine.
+- Whatever a plugin does is that plugin's own gap now, not this repository's. Browser control's DuckDuckGo lookup and
+  its withdrawn ad skipper both moved out with the engine when it stopped being built in.
 
 ## License
 
 [Apache License 2.0](LICENSE) — the same licence as
-[manul-browser](https://github.com/alexbeatnik/manul-browser), whose engine and binding this ships.
+[manul-browser](https://github.com/alexbeatnik/manul-browser), which browser control ships.

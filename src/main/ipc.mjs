@@ -16,13 +16,14 @@ import { planFor } from './models/placement.mjs';
 import { detectVram, placementForSize } from './llm/gpu.mjs';
 import { server } from './llm/server.mjs';
 import { downloadLlamaServer, llamaServerStatus } from './llm/tools.mjs';
-import { BrowserBridge, browser, engineAvailable } from './browser/manul-browser.mjs';
 import { PluginHost } from './plugins/host.mjs';
+import { pluginDataDir } from './paths.mjs';
 import { serveProtocols } from './plugins/protocol.mjs';
 import * as registry from './plugins/registry.mjs';
 import { audio } from './audio.mjs';
 import { mic } from './mic.mjs';
 import { notify } from './notify.mjs';
+import { scene } from './scene.mjs';
 import { Agent } from './agent/agent.mjs';
 import { Updater } from './updater.mjs';
 
@@ -44,17 +45,19 @@ const VERSION = (() => {
   }
 })();
 
-/** Lookups get their own headless browser so they never touch the visible one. */
-const lookupBrowser = new BrowserBridge();
-
 /**
- * The two browsers are handed to the host as *services*, not imported by the
- * plugins that use them. That is what makes "which plugin can reach what" a
- * fact readable from a manifest, and what lets the host be tested with a stub
- * browser and no Chrome anywhere.
+ * Services are handed to the host by name, never imported by the plugins that
+ * use them. That is what makes "which plugin can reach what" a fact readable
+ * from a manifest, and what lets the host be tested with stubs and none of the
+ * real machinery anywhere.
+ *
+ * There is no browser among them. Driving one is a plugin's job now, engine and
+ * all — the app used to own a `BrowserBridge`, two IPC handlers and a pair of
+ * buttons for a Chrome that only ever existed because a plugin asked it to, and
+ * a capability the app half-owns is one that cannot be uninstalled.
  */
-const plugins = new PluginHost({ services: { browser, lookupBrowser, audio, notify, mic } });
-const agent = new Agent({ server, plugins });
+const plugins = new PluginHost({ services: { audio, notify, mic, scene } });
+const agent = new Agent({ server, plugins, scene });
 
 /**
  * Install the custom-scheme handlers. Called from `main.mjs` once the app is
@@ -67,6 +70,9 @@ const agent = new Agent({ server, plugins });
 export function serveAssets() {
   serveProtocols({
     pluginDir: (id) => plugins.dirFor(id),
+    // The tree updates do not wipe. Only asked for by name, so a plugin that
+    // never wanted one never causes an empty directory to be created.
+    pluginData: (id) => (plugins.dirFor(id) ? pluginDataDir(id) : null),
     mediaAllows: (path) => audio.allows(path),
   });
 }
@@ -86,8 +92,6 @@ function snapshot() {
   return {
     settings: config.load(),
     llm: server.status,
-    browser: browser.status,
-    engine: engineAvailable(),
     busy: agent.busy,
     version: VERSION,
     update: updater?.status ?? { state: 'idle' },
@@ -96,6 +100,15 @@ function snapshot() {
     locales: plugins.locales(),
     audio: audio.status(),
     mic: mic.status(),
+    /**
+     * Whatever game is on screen.
+     *
+     * In the snapshot rather than fetched afterwards because it survives a
+     * reload: the scene lives in the main process, so a window that came back
+     * has to come back to the same panel it left, not to an empty one that
+     * fills in whenever the plugin next happens to redraw.
+     */
+    scene: scene.status(),
     /**
      * Anything said before the window was listening.
      *
@@ -139,7 +152,15 @@ function showDesktopNotice(notice) {
 export function registerIpc(windowGetter) {
   getWindow = windowGetter;
 
-  agent.on('event', ({ event, ...payload }) => send(event, payload));
+  agent.on('event', ({ event, ...payload }) => {
+    // Which conversation a turn belongs to is knowable here and nowhere else:
+    // the agent announces it, the scene service must not learn what a chat is,
+    // and a plugin is never told. Stamped on the scene so a game panel stays in
+    // the conversation the game is played in.
+    if (event === 'turn:start') scene.setTurn(payload.chatId);
+    else if (event === 'turn:end') scene.setTurn('');
+    send(event, payload);
+  });
   plugins.on('changed', (list) =>
     send('plugins:changed', { plugins: list, themes: plugins.themes(), locales: plugins.locales() }),
   );
@@ -148,6 +169,7 @@ export function registerIpc(windowGetter) {
   plugins.on('progress', (detail) => send('plugins:working', detail));
   audio.on('state', (status) => send('audio:state', status));
   mic.on('state', (status) => send('mic:state', status));
+  scene.on('state', (status) => send('scene:state', status));
   notify.on('notice', (notice) => {
     send('notice', { notice });
     if (notice.desktop) showDesktopNotice(notice);
@@ -156,9 +178,6 @@ export function registerIpc(windowGetter) {
   server.on('state', (status) => send('llm:state', status));
   server.on('log', (line) => send('llm:log', { line }));
   server.on('tool', (progress) => send('tool:progress', progress));
-  browser.on('state', (status) => send('browser:state', status));
-  browser.on('step', (outcome) => send('browser:step', { outcome }));
-  browser.on('log', (line) => send('browser:log', { line }));
 
   const handle = (channel, fn) =>
     ipcMain.handle(channel, async (_event, ...args) => {
@@ -236,20 +255,37 @@ export function registerIpc(windowGetter) {
     return { ...outcome, models: await models.listLocal() };
   });
   handle('models:download', async (input) => {
+    // The slot is claimed before the first `await`. `resolveTarget` is a network
+    // round trip for a repo id, and two clicks landing inside it both read
+    // `download` as null: the second then overwrites the controller the first is
+    // holding, so CANCEL stops one transfer while the other goes on writing with
+    // nothing on screen saying it is there. Three buttons can start a download —
+    // DOWNLOAD, RESUME and a search result — and each disables only itself.
     if (download) throw new Error('a download is already running');
-    const target = await models.resolveTarget(input);
-    download = new AbortController();
+    const controller = (download = new AbortController());
+
+    let target;
+    try {
+      target = await models.resolveTarget(input);
+    } catch (err) {
+      // Nothing was announced, so nothing is concluded: a `download:done` for a
+      // download that never started would blank the meter of nothing and write
+      // over the status line the rejected invoke is about to fill in.
+      download = null;
+      throw err;
+    }
+
     send('download:start', target);
     try {
       const result = await models.download({
         ...target,
-        signal: download.signal,
+        signal: controller.signal,
         onProgress: (progress) => send('download:progress', progress),
       });
       send('download:done', result);
       return result;
     } catch (err) {
-      const cancelled = download.signal.aborted;
+      const cancelled = controller.signal.aborted;
       send('download:done', { cancelled, error: cancelled ? '' : err.message });
       throw cancelled ? new Error('download cancelled') : err;
     } finally {
@@ -534,6 +570,22 @@ export function registerIpc(windowGetter) {
   handle('audio:ended', () => audio.command('ended'));
   handle('audio:failed', (message) => audio.fail(message));
 
+  /* ---------- the game panel ---------- */
+
+  handle('scene:status', () => scene.status());
+  /**
+   * A button on the action row.
+   *
+   * The answer may carry `submit` — the words that button stands for — and the
+   * renderer is what sends them, as an ordinary message in the conversation it
+   * has open. Deliberately not sent from here: a turn belongs to a chat, and the
+   * main process has no current one. Routing it back through the window also
+   * means a pressed button goes down exactly the path typed text does, rather
+   * than a second one that would have to re-learn the busy check, the transcript
+   * entry and what to do when a send fails.
+   */
+  handle('scene:act', (actionId, value) => scene.act(actionId, value));
+
   /* ---------- dictation ---------- */
 
   handle('mic:status', () => mic.status());
@@ -548,17 +600,6 @@ export function registerIpc(windowGetter) {
    */
   handle('mic:transcribe', (bytes) => mic.hear(bytes));
   handle('mic:failed', (message) => mic.fail(message));
-
-  /* ---------- browser ---------- */
-  handle('browser:status', () => browser.status);
-  handle('browser:open', async () => {
-    await browser.ensureOpen();
-    return browser.status;
-  });
-  handle('browser:close', async () => {
-    await browser.close();
-    return browser.status;
-  });
 
   // Started last and deliberately not awaited: registering the handlers is what
   // lets the window boot, and a plugin that is slow to import must not hold the
@@ -589,9 +630,17 @@ async function restoreModel() {
   }
 }
 
-/** Called from `before-quit`. Stops the browsers; the model is unloaded after. */
+/**
+ * Called from `before-quit`. Stops the plugins; the model is unloaded after.
+ *
+ * `plugins.shutdown()` is where a browser gets closed now — it calls every
+ * active plugin's `deactivate`, and browser control's closes both of its
+ * sessions there. An orphaned Chrome outliving the app is the failure this
+ * prevents, and it is the plugin's to prevent because it is the plugin's
+ * Chrome.
+ */
 export async function shutdown() {
   download?.abort();
   agent.stop();
-  await Promise.allSettled([plugins.shutdown(), browser.close(), lookupBrowser.close()]);
+  await plugins.shutdown();
 }

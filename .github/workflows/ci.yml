@@ -35,10 +35,6 @@ jobs:
           node-version: 22
           cache: npm
 
-      # `postinstall` stages the browser engine and is deliberately tolerant:
-      # with no manul-browser checkout and no Go it reports and exits 0, which
-      # is what lets this job skip both. The unit tests never touch the engine —
-      # `bundled.test.mjs` exercises the packaged resolution in plain Node.
       - name: Install dependencies
         run: npm ci
 

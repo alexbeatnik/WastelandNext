@@ -31,8 +31,8 @@ export const SERVER_EXE = process.platform === 'win32' ? 'llama-server.exe' : 'l
  * Which release asset this machine wants, best first.
  *
  * Vulkan is preferred on Windows and Linux because it uses the GPU on both
- * NVIDIA and AMD without a CUDA toolkit — the same reasoning OS-Manul uses. The
- * CPU build is the fallback for machines with no Vulkan runtime.
+ * NVIDIA and AMD without a CUDA toolkit. The CPU build is the fallback for
+ * machines with no Vulkan runtime.
  */
 export function assetPatterns() {
   if (process.platform === 'win32') {

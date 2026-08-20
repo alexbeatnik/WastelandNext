@@ -1,9 +1,9 @@
 /**
  * Getting plugins: from a registry, or from an archive on disk.
  *
- * The app ships knowing one registry — the `wasteland-plugins` repository — and
- * the user may add others. That is a real widening of trust and it is treated as
- * one: adding a registry is a deliberate act with a URL typed into it, the row
+ * The app ships knowing a handful of registries — one repository per plugin —
+ * and the user may add others. That is a real widening of trust and it is treated
+ * as one: adding a registry is a deliberate act with a URL typed into it, the row
  * it produces says which registry a plugin came from, and nothing installed from
  * any of them runs code until it is separately approved. What a second registry
  * cannot do is quietly *become* the first: when two publish the same id the
@@ -43,26 +43,56 @@ import { extractZip } from '../llm/tools.mjs';
 import { PLUGIN_API_VERSION, parseManifest } from './manifest.mjs';
 import { normaliseCategory } from '../../shared/categories.mjs';
 
-export const DEFAULT_REGISTRY = 'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugins/main/index.json';
+/**
+ * The indexes the app ships knowing about, in the order they are asked.
+ *
+ * One repository per plugin, rather than the `wasteland-plugins` monorepo these
+ * used to live in. That repository published five plugins from one index, which
+ * meant a push republished all five whatever had changed and the release history
+ * of one was a log of the others; Space Trader and browser control were already
+ * outside it for the same reason, each carrying an engine with a release cycle
+ * of its own. Splitting the rest is the same move finished. Asking every user to
+ * paste a URL to find a plugin the app already knows exists is a worse answer
+ * than listing them, so they are all here.
+ *
+ * Browser control is first for a second reason. It used to be built in, and a
+ * capability that disappears in an upgrade with no way to find it again reads as
+ * one that was taken away. It is one row in GET PLUGINS instead.
+ *
+ * The order is the one the plugin sections are drawn in — capability, input,
+ * media, everyday, games, language, appearance — so the list reads the way the
+ * screen does rather than the way the repositories were created.
+ *
+ * Adding to this list is a decision about what this build vouches for, and it is
+ * not the same act as a user adding a registry. Not every index here is this
+ * project's own repository either, which is the half worth being deliberate
+ * about: listing one says the plugin is worth offering, not that the code was
+ * written here. Everything downstream is unchanged whichever it is — a checksum
+ * is still mandatory, an archive is still checked before it is unpacked, and
+ * code still runs only once somebody switches it on.
+ */
+export const SHIPPED_REGISTRIES = [
+  'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-manul-browser/main/index.json',
+  'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-voice-input/main/index.json',
+  'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-audio-player/main/index.json',
+  'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-reminders/main/index.json',
+  'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-space-trader/main/index.json',
+  'https://raw.githubusercontent.com/awakeserg/wasteland-plugin-fantasy-rpg/main/index.json',
+  'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-ukrainian/main/index.json',
+  'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-phosphor-themes/main/index.json',
+];
 
 /**
- * Further indexes the app ships knowing about.
+ * The one `pluginRegistry` overrides, and the head of the list above.
  *
- * One repository per plugin is a reasonable way to publish something large —
- * Space Trader carries a bundled game engine and has its own release cycle —
- * and asking every user to paste a URL to find a plugin the app already knows
- * exists is a worse answer than listing it. These are asked *as well as* the
- * primary and, like the primary, cannot be removed: they are part of the build,
- * so a remove button on one would come back at the next launch.
- *
- * Adding to this list is a decision about what this build vouches for, and it
- * is not the same act as a user adding a registry. Everything downstream is
- * unchanged — a checksum is still mandatory, an archive is still checked before
- * it is unpacked, and code still runs only once somebody switches it on.
+ * There is no longer a single repository that is "the" registry, so the primary
+ * is simply the first shipped index — it is what the override replaces and what
+ * the list is drawn from, and neither of those needs it to be special.
  */
-export const BUNDLED_REGISTRIES = [
-  'https://raw.githubusercontent.com/alexbeatnik/-wasteland-plugin-space-trader/main/index.json',
-];
+export const DEFAULT_REGISTRY = SHIPPED_REGISTRIES[0];
+
+/** The rest, asked as well as the primary and, like it, not removable. */
+export const BUNDLED_REGISTRIES = SHIPPED_REGISTRIES.slice(1);
 
 /** A plugin archive is manifest, code and a stylesheet; megabytes are a mistake. */
 const MAX_ARCHIVE_BYTES = 25 * 1024 * 1024;

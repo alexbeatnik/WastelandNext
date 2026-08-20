@@ -30,7 +30,7 @@ import { mimeFor, parseRange } from '../../shared/media.mjs';
 // The scheme names and the URL builders live in `shared/` because this file
 // imports `electron` and therefore cannot be unit-tested at all — the same
 // reasoning that put `classifyError` next to the updater rather than in it.
-import { MEDIA_SCHEME, PLUGIN_SCHEME } from '../../shared/schemes.mjs';
+import { DATA_SEGMENT, MEDIA_SCHEME, PLUGIN_SCHEME } from '../../shared/schemes.mjs';
 
 /**
  * Must run before `app.whenReady()`; after it, the schemes are already fixed.
@@ -95,15 +95,12 @@ async function serveFile(filePath, rangeHeader) {
  * Install both handlers.
  *
  * @param pluginDir  id → the plugin's directory on disk, or null
+ * @param pluginData id → the plugin's data directory, which updates do not touch
  * @param mediaAllows path → may the renderer read this file right now?
  */
-export function serveProtocols({ pluginDir, mediaAllows }) {
+export function serveProtocols({ pluginDir, pluginData, mediaAllows }) {
   protocol.handle(PLUGIN_SCHEME, async (request) => {
     const url = new URL(request.url);
-    // With `standard: true` the host is the plugin id, already lowercased by
-    // the URL parser — which is why plugin ids are lowercase to begin with.
-    const dir = pluginDir(url.hostname);
-    if (!dir) return new Response('Unknown plugin', { status: 404 });
 
     let decoded;
     try {
@@ -111,6 +108,23 @@ export function serveProtocols({ pluginDir, mediaAllows }) {
     } catch {
       return new Response('Bad request', { status: 400 });
     }
+    if (!decoded) return new Response('Not found', { status: 404 });
+
+    /**
+     * Two roots, one scheme, chosen by a reserved first segment.
+     *
+     * The installed tree is deleted and rewritten on every update, so anything
+     * a *user* put there is gone on a version bump — a generated map, a
+     * portrait. `ctx.dataDir()` survives that, and this is the door to it. Both
+     * roots are still one plugin's own, so the confinement check below is
+     * unchanged and does the same job for either.
+     */
+    const wantsData = decoded === DATA_SEGMENT || decoded.startsWith(`${DATA_SEGMENT}/`);
+    if (wantsData) decoded = decoded.slice(DATA_SEGMENT.length + 1);
+    // With `standard: true` the host is the plugin id, already lowercased by
+    // the URL parser — which is why plugin ids are lowercase to begin with.
+    const dir = wantsData ? pluginData?.(url.hostname) : pluginDir(url.hostname);
+    if (!dir) return new Response('Unknown plugin', { status: 404 });
     if (!decoded) return new Response('Not found', { status: 404 });
 
     // The manifest was validated, but this path comes off a URL rather than out

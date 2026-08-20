@@ -1,9 +1,10 @@
 /**
  * Electron entry point.
  *
- * Owns the window and the lifetime of the two child processes (llama-server,
- * the manul-browser engine). Everything else is wired in `ipc.mjs`; this file stays
- * short enough to read in one go.
+ * Owns the window and the lifetime of everything spawned under it —
+ * llama-server, and whatever a plugin has started, which is where a browser
+ * comes from now. Everything else is wired in `ipc.mjs`; this file stays short
+ * enough to read in one go.
  */
 import { app, BrowserWindow, shell } from 'electron';
 import { dirname, join, resolve } from 'node:path';
@@ -103,8 +104,8 @@ app.on('window-all-closed', () => {
 /**
  * Tear the children down before we go.
  *
- * A llama-server holding a multi-gigabyte model, or a Chrome we launched, would
- * otherwise outlive the window that owns it.
+ * A llama-server holding a multi-gigabyte model, or a Chrome a plugin
+ * launched, would otherwise outlive the window that owns it.
  */
 let quitting = false;
 app.on('before-quit', (event) => {
@@ -113,10 +114,10 @@ app.on('before-quit', (event) => {
   quitting = true;
 
   // Everything is awaited before `app.exit`, and the whole sequence — not just
-  // the browser half — is what the timeout races. An earlier version called
+  // the plugin half — is what the timeout races. An earlier version called
   // `server.unload()` without awaiting it and exited in the same tick, which
   // left llama-server holding several gigabytes as an orphan.
-  // Concurrent, not sequential: the browser and the model are independent, and
+  // Concurrent, not sequential: the plugins and the model are independent, and
   // a Chrome that refuses to close must not eat the budget that would have
   // stopped llama-server.
   const teardown = Promise.allSettled([shutdown(), server.unload()]);

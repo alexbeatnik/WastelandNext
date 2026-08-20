@@ -5,9 +5,14 @@ name: Release
 # run on every push: it no-ops if a release for the current version already
 # exists. Can also be triggered by hand to (re)build the current version.
 #
-# The version check is a separate job so the Windows build — which compiles a Go
-# engine and a TypeScript binding before it even starts — never starts for a
+# The version check is a separate job so the Windows build never starts for a
 # version that is already out.
+#
+# Nothing is compiled here but the app. The browser engine used to be built from
+# source in this workflow — a manul-browser checkout, a Go toolchain and a
+# TypeScript build before packaging could begin — and it is not part of the app
+# any more: browser control is a plugin with its own repository and its own
+# released binary.
 on:
   push:
     branches: [main]
@@ -67,71 +72,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          path: WastelandNext
-
-      # Both halves of the browser engine are built from source and staged into
-      # resources/ — a packaged .exe cannot reach a checkout, so if this is not
-      # here the release ships without browser control and nothing says so.
-      - name: Checkout manul-browser
-        uses: actions/checkout@v4
-        with:
-          repository: alexbeatnik/manul-browser
-          path: manul-browser
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: WastelandNext/package-lock.json
+          cache-dependency-path: package-lock.json
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache-dependency-path: manul-browser/core/go.sum
-
-      # The binding ships as compiled JavaScript; `npm run build` is what turns
-      # its TypeScript into the dist that gets staged.
-      - name: Build the manul-browser Node binding
-        working-directory: manul-browser/bindings/node
-        run: |
-          npm ci
-          npm run build
-
-      # MANUL_SOURCE is set for every step that stages the engine, because the
-      # search only looks for sibling directories by name and the checkout paths
-      # here are whatever this workflow chose. postinstall stages it once; the
-      # explicit run below is what fails loudly if the engine did not build.
       - name: Install dependencies
-        working-directory: WastelandNext
-        env:
-          MANUL_SOURCE: ${{ github.workspace }}/manul-browser
         run: npm ci
-
-      - name: Stage the engine
-        working-directory: WastelandNext
-        env:
-          MANUL_SOURCE: ${{ github.workspace }}/manul-browser
-        run: node scripts/build-manul-browser.mjs
-
-      - name: Fail if the engine is missing
-        shell: pwsh
-        working-directory: WastelandNext
-        run: |
-          foreach ($f in @('resources/bin/manul.exe', 'resources/manul-browser')) {
-            if (-not (Test-Path $f)) {
-              Write-Error "Engine not staged: $f - the release would ship without browser control."
-              exit 1
-            }
-          }
 
       # Unit tests only. `npm run smoke` boots a real window and drives the
       # renderer, which is worth running before a release but needs a desktop
       # session it does not reliably get here.
       - name: Test
-        working-directory: WastelandNext
         run: npm test
 
       # --publish never: the release is created by gh below, so electron-builder
@@ -142,14 +97,10 @@ jobs:
       # electron-builder.yml, not from this flag — and MUST be uploaded with the
       # installer. It is the file the in-app updater reads to find a new build.
       - name: Package
-        working-directory: WastelandNext
-        env:
-          MANUL_SOURCE: ${{ github.workspace }}/manul-browser
         run: npx electron-builder --win nsis portable --publish never
 
       - name: Create tag and GitHub Release
         shell: pwsh
-        working-directory: WastelandNext
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

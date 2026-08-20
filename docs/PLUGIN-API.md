@@ -1,13 +1,15 @@
 # Writing a plugin for Wasteland Next
 
-Everything the model may *do* is a plugin. So is every theme, every language, and dictation. The four capabilities that
-ship with the app — browser control, web lookup, file reading, shell commands — are plugins too, imported from
-`src/plugins/` instead of from disk, and they use the same API as anything you write.
+Everything the model may *do* is a plugin. So is every theme, every language, and dictation. The two capabilities that
+ship with the app — file reading and shell commands — are plugins too, imported from `src/plugins/` instead of from
+disk, and they use the same API as anything you write. Browser control is not among them any more: it lives in
+[its own repository](https://github.com/alexbeatnik/wasteland-plugin-manul-browser) and carries the engine it drives,
+which is the best worked example of a plugin that brings something the app does not have.
 
 This document is the whole of it. It is written to be followed straight through by a person or by an agent: the
 [skeleton](#a-plugin-that-works) below is a working plugin, and everything after it is reference.
 
-**Plugin API version 5.** Put the number your plugin actually needs in the manifest — see
+**Plugin API version 9.** Put the number your plugin actually needs in the manifest — see
 [API versions](#api-versions). Declaring a version the user's build does not implement means your plugin is listed
 with "update Wasteland Next" instead of being loaded, which is deliberate and much better than failing halfway through
 `activate` on a function that does not exist yet.
@@ -144,8 +146,9 @@ screen, with the reason on it — it is never silently absent.
 | `main` | for code | Entry point, a path inside your own directory. Its presence is what makes this a plugin that needs approval. |
 | `icon` | no | A path inside your directory. SVG with open strokes survives the app's colour filter best. |
 | `actions` | no | Action types the model may emit. `[a-z][a-z0-9_]{0,39}`. Registering one you did not declare throws. |
-| `services` | no | `browser`, `lookupBrowser`, `audio`, `mic`, `notify`. Asking for one you did not declare throws. |
+| `services` | no | `audio`, `mic`, `notify`, `scene`. Asking for one you did not declare throws. |
 | `settings` | no | Controls drawn on your row — see [Settings](#settings). |
+| `panel` | no | Draw those settings as a section of the left panel too. A heading, or `true` for your own name — see [Settings](#settings). |
 | `themes` | no | `[{id, name, file}]` — see [Themes](#themes). |
 | `locales` | no | `[{id, name, file}]` — see [Languages](#languages). |
 | `order` | no | Where your prompt fragment sits relative to others. Lower goes first. Default 100. |
@@ -324,8 +327,8 @@ Also worth doing:
 - **Say what to do when it fails**, not just when it works.
 - **Say how to answer.** "Say what is playing in one short sentence" prevents a model reading your whole feedback
   string out loud.
-- **Push back against neighbouring sections.** The browser fragment carries a worked example of playing a song on
-  YouTube; anything competing with that has to say so explicitly.
+- **Push back against neighbouring sections.** If browser control is installed, its fragment is long, prescriptive and
+  carries a worked example of playing a song on YouTube; anything competing with that has to say so explicitly.
 
 Your fragment is in the prompt only while your plugin is switched on. A disabled capability is *absent* from the
 prompt, never forbidden in it — a model told about a tool reaches for it, and the resulting refusal reads to the user
@@ -357,7 +360,8 @@ say.
 
 ## Settings
 
-Declared in the manifest, drawn on your row, edited by the user, read live through `ctx.store`.
+Declared in the manifest, drawn on your row — and in a panel section of your own if you ask for one — edited by the
+user, read live through `ctx.store`.
 
 ```json
 "settings": [
@@ -383,6 +387,33 @@ A `select` names its options in the manifest so the control can be drawn before 
 `ctx.store.get(key)` reads live rather than at activation, so a value the user changed a moment ago is the one you see.
 `ctx.onSettingsChanged(key, value)` exists for the settings that invalidate work already done — a music folder is the
 case in point, since nothing else would make the library rescan.
+
+### A section of your own
+
+Your row in PLUGINS is where somebody *decides* about your plugin: it is beside the description, the version and the
+switch that turns the whole thing off. It is a poor place to *use* a setting — reported of a music folder and a browser
+choice, both changed almost daily, that reaching either meant opening PLUGINS and reading a dozen rows to remember
+which control was which.
+
+`panel` puts the same settings in the left panel, under a heading of your own:
+
+```json
+"panel": "MUSIC"
+```
+
+`true` uses your plugin's name instead. Nothing else changes: the same declarations, the same controls, the same
+storage — the app simply draws them in a second place. There is no second way to define a control, and nothing your
+code has to do.
+
+Two rules follow from what a section is:
+
+- **It is only drawn while your plugin is running.** Switched off, the section goes with it — the same rule the audio
+  transport and the game panel follow, because a control that is drawn and cannot work is worse than one that is absent.
+- **A `panel` with no `settings` is refused at load time**, with a reason. A section that opens onto nothing is a
+  promise of controls that are not there.
+
+The heading is trimmed to 24 characters and flattened to one line: the panel is a narrow column, and a heading that
+wraps to three lines pushes everything below the fold.
 
 ---
 
@@ -415,6 +446,12 @@ your own directory would be downloaded again on every version bump. Both are rem
 
 Named in the manifest, handed over by name. Asking for one you did not declare throws — that is what makes the plugin
 list a true account of what a plugin can reach rather than a summary somebody wrote.
+
+There are four, and the list is short on purpose. A service exists for what has to be **shared**: one audio bar, one
+microphone button, one game panel, one notification queue, each of which needs an owner to arbitrate between two
+plugins wanting it. Everything else you can simply do — your plugin runs in the main process with everything Node can
+reach, and may spawn a process, open a socket or ship a binary in its own archive. If you are looking for a service
+that would only ever have one caller, you are looking for code you can write yourself.
 
 ### `notify`
 
@@ -476,25 +513,154 @@ audio.setTransport({
 There is no queue in the service on purpose: what "next" means is your business, and two plugins with different ideas
 can drive the same bar. The bar's second line is your words — "3 of 47", "shuffled" — because only you know them.
 
-### `browser` and `lookupBrowser`
+### `scene`
 
-The visible Chrome and a headless one. `lookupBrowser` exists so a lookup never disturbs the tab the user is looking
-at; never use `browser` for background work.
+A panel the app draws from a document you fill in, and a row of buttons above the composer. For a game, a tracker,
+anything with state a user needs to see at a glance and act on without typing a sentence.
 
 ```js
-const browser = ctx.service('browser');
-const outcomes = await browser.runSteps(dsl, { signal: turn.signal });
-const map = await browser.pageMap();
-const text = await browser.readText('body', 4000);
-await browser.close();
+const scene = ctx.service('scene');
+
+scene.present({
+  pluginId: ctx.id,
+  pluginName: 'Fantasy RPG',
+  act: async (actionId) => {
+    if (actionId === 'bag') {
+      scene.show(sheetFor(state));            // redraws the panel, costs nothing
+      return { status: 'Inventory.' };
+    }
+    return { submit: 'I look around' };       // sent as if the player typed it
+  },
+});
+
+scene.show({
+  title: 'Village of Mara — day 4',
+  subtitle: 'the common room',
+  meters: [{ label: 'HP', value: 12, max: 20, tone: 'bad' }, { label: 'GOLD', value: 14 }],
+  fields: [{ label: 'QUEST', value: 'find the hunters' }],
+  tags:   [{ label: 'BLEEDING', tone: 'bad' }],
+  groups: [{ label: 'ITEMS', items: [{ label: 'Notched sword', note: 'a weapon' }], empty: 'nothing on you' }],
+  actions: [{ id: 'look', label: 'Look around', hint: 'costs a turn' }, { id: 'bag', label: 'Inventory' }],
+});
+
+scene.clear();                                 // the game is over; the panel goes
 ```
 
-`runSteps` takes manul-browser DSL, one command per line. See `src/plugins/browser-control.mjs` for the full DSL as
-documented to the model, and note that **a step reporting `ok` means the engine resolved a target and acted on it —
-not that the page did what was wanted.**
+Every field is optional and every one has a shape. What does not fit is dropped rather than thrown over: a game that
+stops working because one label was a number is worse than a game with one label missing. Labels are collapsed to one
+line, because they are drawn in a flex row. `tone` is `good`, `warn` or `bad` — anything else becomes plain, and it is
+the only field that reaches a class name.
 
-`readText` falls back to the whole page body when its selector matches nothing, so you cannot infer presence from a
-non-empty answer.
+A meter with no `max` is drawn as a bare number, not as a bar filled to an imaginary limit. `groups` appear behind the
+**[ SHEET ]** button and in no other place, so a long inventory never competes with the transcript; `empty` is your
+words for an empty one, since only you know whether the sentence is "nothing on you" or "the journal is blank".
+
+**A list row can be a control.** Give an item an `action` and it is drawn as a button that calls `act` with that id:
+
+```js
+groups: [{
+  label: 'ITEMS',
+  items: [
+    { label: 'Notched sword', note: 'in hand — press to put away', tone: 'good', action: 'item-sword' },
+    { label: 'Herb',          note: 'press to use',                 action: 'item-herb' },
+  ],
+}]
+```
+
+Optional on purpose — a journal is not an inventory, and an entry that could be clicked and did nothing is worse than
+one that plainly cannot be. Those ids are on offer exactly as the moves are, so a row from a bag emptied three turns ago
+is refused with the same sentence.
+
+**A board is a picture with pressable places on it.** For a map, a chart, anything positional:
+
+```js
+board: {
+  image: 'map.png',                     // a file in ctx.dataDir(), or omit it
+  points: [
+    { id: 'village', label: 'Village', x: 50, y: 84, here: true },
+    { id: 'forest',  label: 'Forest',  x: 58, y: 56, tone: 'good', action: 'go-forest' },
+    { id: 'tower',   label: 'Tower',   x: 55, y: 11 },              // seen, not reachable
+  ],
+  links: [{ from: 'village', to: 'forest', tone: 'good' }],
+}
+```
+
+`x` and `y` are percentages, so the same numbers work at any size. `here` marks where the piece stands — its own fact
+rather than a fourth tone, because "you are here" is not a shade of good or bad. A point with an `action` is a button;
+one without is a label. A link naming a point that is not on the board is dropped rather than drawn off the edge.
+
+**The picture is scenery and nothing else.** The markers, the roads and the labels are drawn by the app over the top,
+from this data. Do not paint them into the image: a game whose map differs from run to run — a shuffled layout, a road
+that opens later — would be showing something false, and a marker would land where the artist put it rather than where
+you said. Generate a background, and let this be the map.
+
+`image` names a file in **`ctx.dataDir()`**, not in your installed tree: that tree is deleted and rewritten on every
+update, so a map the user generated themselves would disappear on a version bump. Omit it entirely and the board still
+works — the markers and roads are the map, the picture only makes it pleasant.
+
+**`act` may answer `{board: true}`** to open it, exactly as `{sheet: true}` opens the lists.
+
+**A chooser is cards.** For the question a run opens with, or any other point where a handful of options each want a
+picture and a paragraph:
+
+```js
+cards: {
+  label: 'Who are you',
+  items: [
+    { label: 'Ranger', note: 'a bow and a long memory for tracks', image: 'class-ranger.jpg', action: 'class-ranger' },
+    { label: 'Warrior', note: 'heavy, and hard to put down',       image: 'class-warrior.jpg', action: 'class-warrior' },
+  ],
+}
+```
+
+Pictures come from `ctx.dataDir()`, as the board's does. Cards are equal by construction — the grid gives each the same
+width — so a longer description cannot quietly make one of them look like the recommended answer. Eight at most: more
+than that is a list, and a list is the sheet.
+
+**`act` answers `{cards: true}` to open it, and the answer is what closes it.** There is no close button and no Escape:
+this is a question, and a question with a way out leaves your game waiting for an answer that never arrives. Redraw the
+scene without `cards` and the dialog goes — which is what answering does anyway.
+
+**`act` may answer `{sheet: true}`** to open the sheet. It is the only way you can: the dialog belongs to the app, so an
+inventory button that merely wrote a line in the status bar would be a control describing the thing it should have
+shown. Honoured before `submit`, so a move that opens the bag *and* takes a turn shows the bag first.
+
+**The app assigns the hotkeys.** The first nine actions get `1`–`9` by position; you do not ask for a key, and two
+actions cannot collide over one. `0` opens the sheet. Every digit is ignored while the composer has focus — a typed
+sentence must not make a move.
+
+**`act` returns, it does not send.** `{status}` writes a line in the status bar; `{submit}` is sent as an ordinary
+message in whatever conversation is open, exactly as if the player had typed it — same busy check, same transcript
+entry, same handling when a send fails. Both are optional, and a move that only redraws the panel involves no model at
+all, which is the point: opening an inventory should not cost a turn or a single token.
+
+Nothing here can start a turn on its own. A move goes out because somebody pressed a key, and `act` is the only way in.
+
+**The panel lives in the conversation the game is played in.** A scene shown during a turn is claimed by that turn's
+chat and drawn only there; open another conversation and it is gone, along with its hotkeys. You are never told which
+chat that is and never need to be — the app stamps it.
+
+The corollary is that **a scene shown outside a turn claims no conversation and is drawn nowhere.** Painting at
+activation therefore shows nothing: at that moment nothing in the app knows where the game is being played, and
+guessing would put your panel over somebody's unrelated chat. Draw when a turn runs. Your state is not at risk either
+way — it is in `ctx.state`, and your `ctx.context()` fragment reaches the model whether or not a panel is on screen.
+
+One plugin drives the panel at a time and the newcomer wins, as with the audio transport. When yours is switched off
+the panel goes with it — and an action id that is no longer on screen is refused, so a stale click cannot make a move
+in a world that has moved on.
+
+### There is no browser service
+
+There used to be two — the visible Chrome and a headless one — and they are gone. Browser control is
+[a plugin](https://github.com/alexbeatnik/wasteland-plugin-manul-browser) that owns its engine, spawns its own
+sessions and closes them in `deactivate`. Declaring `browser` or `lookupBrowser` in a manifest is now a load-time
+error naming the unknown service.
+
+That is worth reading as a pattern rather than as a loss. A plugin runs in the main process with everything Node can
+reach: it may spawn a process, open a socket, ship a binary in its own archive. A service exists only for the things
+that must be *shared* — one audio bar, one microphone button, one game panel, one notification queue — because two
+plugins driving those need an owner to arbitrate. Nothing arbitrates a browser you launched yourself, so nothing needs
+to.
 
 ---
 
@@ -613,23 +779,28 @@ nobody can read as it flickers. Four times a second is plenty.
 
 ## Testing
 
-Plugins in the registry repository are tested two ways, and both are worth copying.
+The published plugins are tested two ways, and both are worth copying.
 
-**Pure logic, in the registry repo.** Put the parts that do not need the app — parsing, scheduling, tag reading — in
-their own module and test them with `node --test`. `tests/schedule.test.mjs` is a worked example.
+**Pure logic, in the plugin's own repo.** Put the parts that do not need the app — parsing, scheduling, tag reading —
+in their own module and test them with `node --test`. `tests/schedule.test.mjs` in
+[wasteland-plugin-reminders](https://github.com/alexbeatnik/wasteland-plugin-reminders) is a worked example. A
+`tests/manifest.test.mjs` beside it is worth having too: it asserts the manifest is true about the directory it sits
+in, which is otherwise only discovered at install time, on somebody else's machine.
 
-**Against the real host, in the app repo.** `test/plugins.test.mjs` loads plugins from a checkout of the registry
-repository sitting beside the app, with stub services, and asserts they activate, register what they claimed, and
-produce the prompt they should:
+**Against the real host, in the app repo.** `test/plugins.test.mjs` loads plugins from their checkouts beside the app,
+with stub services, and asserts they activate, register what they claimed, and produce the prompt they should:
 
 ```js
-const host = new PluginHost({ userDir: pluginsCheckout, services: { mic: stubMic() } });
+const host = new PluginHost({ userDir: checkoutFor('my-plugin'), services: { mic: stubMic() } });
 await host.load();
 const row = host.list().find((plugin) => plugin.id === 'my-plugin');
 assert.equal(row.active, true, row.error);
 ```
 
-Clone `wasteland-plugins` beside `WastelandNext` and those tests run; without it they skip.
+Each plugin has a repository of its own, so `checkoutFor(id)` is `../wasteland-plugin-<id>/plugins`. Clone one beside
+`WastelandNext` and its tests run; without it they skip. A test needing two plugins under one root stages copies into
+a temporary directory — `stagePlugins(...)` does that — because a host reads one directory and an installed tree has
+them side by side.
 
 `row.error` carries the reason a plugin failed to activate, which is why it is passed as the assertion message — a
 bare `false` tells you nothing.
@@ -698,8 +869,13 @@ Users add a registry in **GET PLUGINS → REGISTRIES**; pasting `https://github.
 `index.json` on `main`. Several registries are asked in parallel, and where two publish the same id the newest version
 wins with the source shown on the row.
 
-In the `wasteland-plugins` repository, `scripts/build-index.mjs` packs every plugin and writes `index.json` with the
-digests; the release workflow runs it. An archive uploaded by hand with no regenerated index entry is invisible.
+In a plugin's repository, `scripts/build-index.mjs` packs it and writes `index.json` with the digest; the release
+workflow runs it on a push to `main`. An archive uploaded by hand with no regenerated index entry is invisible.
+
+One repository per plugin, rather than one holding them all: in a monorepo a push republishes everything whatever had
+changed, and the release history of one plugin is a log of the others. Copy the scripts and the workflow from any of
+the published plugins — they are the same file in each, and the only thing that differs is the id in the concurrency
+group.
 
 ---
 
@@ -715,6 +891,11 @@ Declare the **lowest** version that has everything you use. Declaring a higher o
 | 3 | Interactive `choices` and `choose`, language packs |
 | 4 | The `notify` service, and `ctx.state` — the plugin's own JSON document |
 | 5 | The `mic` service, `select` settings, `ctx.progress`, `ctx.dataDir()` |
+| 6 | The `scene` service — a drawn panel, a pinned row of moves and their hotkeys |
+| 7 | Pressable list rows (`item.action`) and `act` answering `{sheet: true}` |
+| 8 | `board` — a picture with pressable places, and files served from `ctx.dataDir()` |
+| 10 | `cards` — a chooser of equal cards, each with a picture, a name and a paragraph |
+| 9 | `panel` — your settings as a section of the left panel. The `browser` and `lookupBrowser` services are **removed** |
 
 **Not every addition moves the number.** `category` arrived after 5 and did not: a build that has never heard of the
 field ignores it and loads the plugin exactly as before, so declaring 6 for it would lock your plugin out of every
@@ -731,6 +912,7 @@ Before publishing, or before telling someone it is finished:
 - [ ] `apiVersion` is the lowest that has everything you use.
 - [ ] `category` names a heading the app knows, in the manifest **and** in your registry entry. An absent one is OTHER.
 - [ ] Every action you register is in `actions`; every service you fetch is in `services`.
+- [ ] If your settings are used often, `panel` gives them a section of their own — and a `panel` needs `settings`.
 - [ ] Your prompt fragment **names the refusal it exists to prevent** and says it is wrong in this session.
 - [ ] Your fragment shows a worked example in a fenced `action` block.
 - [ ] Every `feedback` tells the model what to *say*, not just what happened.

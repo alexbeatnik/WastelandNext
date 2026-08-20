@@ -6,11 +6,6 @@
 /dist/
 /out/
 
-# Staged from the manul-browser checkout by `npm run engine` — build output,
-# not source.
-/resources/bin/
-/resources/manul-browser/
-
 # Downloaded weights. Only the vault at the root, never the source directory.
 /models/
 

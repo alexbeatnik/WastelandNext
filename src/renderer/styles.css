@@ -20,6 +20,18 @@
   --ok: #66cc66;
   --add: #aacc00;
 
+  /* What a bar stands for, as colours a theme can move.
+
+     Separate from the tone palette on purpose: `--warn` means something is
+     going badly, while these say which resource a bar *is*. A player reads the
+     strip by colour before reading a single label, so blood has to be blood
+     and mana has to be mana whatever the theme does to the rest. */
+  --bar-life: #d8442f;
+  --bar-mana: #3fb6f0;
+  --bar-vigour: #e8c34a;
+  --bar-growth: #66cc66;
+  --bar-time: var(--amber);
+
   /* Surfaces a theme has to be able to move. They were literals until themes
      existed, and a theme that has to fight `button { background: #333 }` with
      its own selector is one that breaks the next time a rule is added. */
@@ -91,7 +103,6 @@ body.no-crt .crt {
 
 @media (prefers-reduced-motion: reduce) {
   .crt { animation: none; }
-  .pulse { animation: none; }
 }
 
 /* ============================ Top bar ============================ */
@@ -125,17 +136,6 @@ body.no-crt .crt {
 
 .topbar .stat.warn { color: var(--warn); }
 .topbar .stat.ok { color: var(--ok); }
-
-.pulse {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  background: var(--amber);
-  border-radius: 50%;
-  margin-right: 0.45em;
-  box-shadow: 0 0 6px var(--amber);
-  animation: blink 1.6s step-end infinite;
-}
 
 #toggle-panel {
   margin-left: auto;
@@ -625,6 +625,32 @@ button.choice.chosen .choice-label::before {
   color: var(--amber-bright);
 }
 
+/* An offer made by the reply itself, rather than by a plugin's result — so it
+   sits straight in the transcript under the words that asked, not inside a
+   card. The rule matters as much as the look: these are the buttons a model
+   used to be unable to draw, which is why it wrote numbered lists nobody could
+   click. */
+.choices.offer {
+  margin: 0 0 0.1rem;
+}
+
+/* Answered, and kept. The fence is stripped out of the prose, so this row is
+   the only remaining record of what was on offer — removing it would leave the
+   next message replying to nothing. Greyed, because a control that is drawn
+   and cannot work is worse than one that is absent, and this one has to look
+   as spent as it is. */
+.choices.offer.spent button.choice {
+  border-style: dashed;
+  opacity: 0.75;
+}
+
+/* The one that was taken stays legible even in a spent row: it is the fact the
+   row is being kept for. */
+.choices.offer.spent button.choice.chosen {
+  opacity: 1;
+  border-style: solid;
+}
+
 /* ============================ Player ============================ */
 
 .player {
@@ -709,6 +735,572 @@ button.choice.chosen .choice-label::before {
   .player-vol-icon {
     display: none;
   }
+}
+
+/* ============================ The game panel ============================
+
+   A strip above the context row and a row of moves above the composer. Both
+   live inside the chat column rather than in a fourth grid column, because the
+   workspace picks its column count by aspect ratio and a 4:3 panel has only
+   two — a game that needed the third would be unplayable on half the shapes
+   the layout already supports. The lists that do not fit in a strip are in the
+   sheet dialog instead. */
+
+.scene {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.35rem 0.6rem;
+  border-top: 1px dashed var(--amber-faint);
+  font-size: 0.82em;
+}
+
+/* The same rule `.player[hidden]` needs, for the same reason: `hidden` is only
+   the UA declaration `[hidden] { display: none }`, and the flex above outranks
+   the whole UA sheet. */
+.scene[hidden] {
+  display: none;
+}
+
+.scene-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.scene-title {
+  color: var(--amber-bright);
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+}
+
+.scene-sub {
+  color: var(--amber-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* The part that gives way: the sheet button has a fixed width and must not
+     be pushed off the row by a long location name. */
+  flex: 1 1 4rem;
+}
+
+.scene-head button {
+  flex: none;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.9em;
+}
+
+/* The base `button` rule sets no display, so `hidden` would work through the UA
+   sheet alone — but a theme is free to add one, and the failure mode is a sheet
+   button sitting over a game that has no sheet. One line, stated rather than
+   relied upon. */
+.scene-head button[hidden] {
+  display: none;
+}
+
+.scene-meters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.9rem;
+}
+
+.scene-meter {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 1 1 8rem;
+  min-width: 6rem;
+}
+
+.scene-meter-label {
+  color: var(--amber-dim);
+  white-space: nowrap;
+}
+
+.scene-meter .meter {
+  flex: 1;
+  min-width: 2rem;
+}
+
+.scene-meter-value {
+  color: var(--amber);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* A meter with no maximum is a number, not a bar filled to an imaginary limit. */
+.scene-meter.plain .meter {
+  display: none;
+}
+
+.meter.good > i { background: var(--ok); }
+.meter.bad > i { background: var(--warn); }
+
+/* A bar's own colour, which beats its tone.
+
+   It has to win: a mana bar that turned red when it ran low would be telling
+   the player something true in the one language the strip uses for something
+   else — "which bar am I looking at". So the fill answers that question and
+   only that question, and the alarm moves to the edge, below.
+
+   Won by specificity and not by position, which is the whole point of the extra
+   selector. Being declared lower down was the first attempt and it lost: the
+   health bar came out orange, because `.meter.warn > i` is written eight
+   hundred lines further on for the context gauge, and a rule that has to be
+   below every rule anyone adds later is a rule that will be above one of them
+   eventually. Three classes beat two wherever this sits in the file. */
+.scene-meter .meter.accent-life > i { background: var(--bar-life); }
+.scene-meter .meter.accent-mana > i { background: var(--bar-mana); }
+.scene-meter .meter.accent-vigour > i { background: var(--bar-vigour); }
+.scene-meter .meter.accent-growth > i { background: var(--bar-growth); }
+.scene-meter .meter.accent-time > i { background: var(--bar-time); }
+
+/* Nearly out, said around the bar rather than inside it. */
+.scene-meter .meter.warn { border-color: #ff8000; }
+.scene-meter .meter.bad { border-color: var(--warn); }
+
+.scene-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.8rem;
+}
+
+.scene-field {
+  white-space: nowrap;
+}
+
+.scene-field-label {
+  color: var(--amber-dim);
+}
+
+.scene-tag {
+  padding: 0 0.3rem;
+  border: 1px solid var(--amber-faint);
+  color: var(--amber-dim);
+  white-space: nowrap;
+}
+
+.scene-field.good .scene-field-value,
+.scene-tag.good {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.scene-field.warn .scene-field-value,
+.scene-tag.warn {
+  color: var(--add);
+  border-color: var(--add);
+}
+
+.scene-field.bad .scene-field-value,
+.scene-tag.bad {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+/* ---- the moves ---- */
+
+.scene-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  padding: 0.3rem 0.6rem;
+  border-top: 1px solid var(--amber-faint);
+  /* Wraps rather than scrolling sideways, and is capped so a game offering ten
+     moves cannot push the composer off a short window. Same bargain as the
+     attachment chips: a control out of sight is one that cannot be used. */
+  max-height: 6rem;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.scene-actions[hidden] {
+  display: none;
+}
+
+.scene-action {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.88em;
+}
+
+/* The digit the app assigned. Dim, because it is a shortcut for the label
+   beside it rather than a second thing to read. */
+.scene-action .scene-key {
+  color: var(--amber-faint);
+  font-size: 0.9em;
+}
+
+.scene-action.good { border-color: var(--ok); }
+.scene-action.warn { border-color: var(--add); }
+.scene-action.bad { border-color: var(--warn); }
+
+.scene-action[disabled] {
+  opacity: 0.45;
+}
+
+/* ---- the board ---- */
+
+/**
+ * A map is looked at, not skimmed, and this is the one dialog that wants the
+ * window it is given.
+ *
+ * The third term is a height, in a width. The board holds a 3:2 ratio and fills
+ * this box, so its height follows the box's width — and a dialog sized only in
+ * `vw` grows a picture taller than the screen on a wide, short monitor. At
+ * `112vh` of width the picture lands near 74vh tall, which leaves the heading
+ * and the close button their room at 1920x1080, 1600x900, 1366x768 and
+ * 1280x1024 alike.
+ */
+/* `.modal-box` sizes every dialog in the app and is declared further down this
+   file, so a bare `.board-box` loses to it on order alone — the map spent a
+   build at 46rem while the rule that was supposed to widen it sat right here,
+   reading perfectly. Naming both classes wins on specificity instead, which
+   does not care what order they are in. */
+.modal-box.board-box {
+  width: min(90rem, 96vw, 112vh);
+  max-width: none;
+}
+
+.board {
+  position: relative;
+  width: 100%;
+  /* A shape to hold when there is no picture yet: the markers and the roads are
+     the map, and they must be usable before any artwork exists. */
+  aspect-ratio: 3 / 2;
+  border: 1px solid var(--amber-faint);
+  background: var(--bg-deep);
+  overflow: hidden;
+}
+
+.board-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Drawn at full strength. Fading it was meant to keep the markers legible and
+     only made the map muddy — legibility belongs to the labels, which carry
+     their own dark plate, not to washing out the thing being read. */
+}
+
+.board-roads {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* Drawn under every road so a thin dashed line does not vanish wherever the
+   landscape beneath it happens to match its brightness. Same trick as the dark
+   plate under a place name. */
+.board-road-casing {
+  stroke: rgba(0, 0, 0, 0.65);
+  stroke-width: 6;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+/* `non-scaling-stroke` means the width is in *device* pixels, not in the
+   viewBox's units — so the first version's `0.4` drew every road half a pixel
+   wide and the map came out with no roads on it at all. The dash lengths are in
+   the same units and were as invisible. */
+.board-road {
+  stroke: #d8b26a;
+  stroke-width: 2;
+  stroke-dasharray: 7 6;
+  stroke-linecap: round;
+  opacity: 0.75;
+  vector-effect: non-scaling-stroke;
+}
+
+.board-road.good {
+  stroke: var(--ok);
+  stroke-width: 3;
+  opacity: 1;
+}
+
+.board-point {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: var(--amber-dim);
+  font: inherit;
+  font-size: 0.9em;
+  white-space: nowrap;
+  /* No glow. The body's amber text-shadow is what made these smear over a busy
+     drawing; a name on a map has to be read, not to look lit. */
+  text-shadow: none;
+}
+
+/* The name sits on its own dark plate rather than floating over whatever the
+   picture happens to have underneath it, which is the whole of why the labels
+   were hard to read. */
+.board-label {
+  padding: 0.05rem 0.35rem;
+  background: rgba(0, 0, 0, 0.78);
+  border: 1px solid currentColor;
+  letter-spacing: 0.02em;
+}
+
+.board-dot {
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 2px solid #000;
+  background: currentColor;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px currentColor;
+}
+
+/* Somewhere you can walk to from here. */
+.board-point.good {
+  color: var(--ok);
+}
+
+
+
+/* Where the piece stands. Deliberately the one colour on screen that is not
+   part of the amber palette — "you are here" has to be findable at a glance
+   among a dozen markers, and a brighter amber would only be another amber. */
+.board-point.here {
+  color: #5cc8ff;
+  border-color: #5cc8ff;
+}
+
+.board-point.here .board-dot {
+  box-shadow: 0 0 0 1px currentColor, 0 0 10px #5cc8ff;
+}
+
+.board-point.pressable {
+  cursor: pointer;
+}
+
+.board-point.pressable:hover:not(:disabled) .board-label {
+  background: #000;
+  color: var(--amber-bright);
+}
+
+.board-point:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---- the chooser ---- */
+
+.modal-box.cards-box {
+  width: min(78rem, 96vw);
+  max-width: none;
+}
+
+/**
+ * Equal by construction.
+ *
+ * `1fr` columns give every card the same width whatever its paragraph says, so
+ * a longer description cannot make one of them look like the recommended
+ * answer. `auto-fit` is what lets five cards become three and two on a narrow
+ * window instead of scrolling off the side.
+ */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.7rem;
+  max-height: 76vh;
+  overflow-y: auto;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  text-align: left;
+  background: var(--bg-deep);
+  border: 1px solid var(--amber-faint);
+  color: var(--amber);
+  font: inherit;
+  white-space: normal;
+}
+
+.card-art {
+  width: 100%;
+  /* The pictures are 2:3 portraits. Naming the ratio here means a card keeps
+     its shape before the image has loaded, so the grid does not jump. */
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border: 1px solid var(--amber-faint);
+}
+
+.card-label {
+  color: var(--amber-bright);
+  letter-spacing: 0.06em;
+}
+
+.card-note {
+  color: var(--amber-dim);
+  font-size: 0.86em;
+  line-height: 1.3;
+}
+
+.card.good { border-color: var(--ok); }
+.card.warn { border-color: var(--add); }
+.card.bad { border-color: var(--warn); }
+
+button.card:hover:not(:disabled) {
+  border-color: var(--amber);
+  background: var(--btn-bg);
+}
+
+button.card:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---- the one field ----
+
+   A question the game asks rather than the model, so it is answered here and
+   not at the composer. Narrow on purpose: it holds a name. */
+
+.modal-box.entry-box {
+  width: min(28rem, 92vw);
+}
+
+.entry-hint {
+  color: var(--amber-dim);
+  font-size: 0.9em;
+  line-height: 1.35;
+  margin-bottom: 0.6rem;
+}
+
+.entry-form {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.entry-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.4rem 0.5rem;
+  color: var(--amber-bright);
+  background: var(--bg-deep);
+  border: 1px solid var(--amber-faint);
+  font: inherit;
+}
+
+.entry-input:focus {
+  outline: none;
+  border-color: var(--amber);
+  box-shadow: var(--glow);
+}
+
+.entry-send {
+  white-space: nowrap;
+}
+
+.entry-input:disabled,
+.entry-send:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---- the sheet ---- */
+
+.modal-box.sheet-box {
+  max-width: 40rem;
+  max-height: 86vh;
+  overflow-y: auto;
+}
+
+.sheet-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--amber-faint);
+  padding-bottom: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+
+.sheet-title {
+  color: var(--amber-bright);
+  letter-spacing: 0.08em;
+}
+
+.sheet-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.sheet-group-label {
+  color: var(--amber-dim);
+  letter-spacing: 0.1em;
+  border-bottom: 1px dashed var(--amber-faint);
+  margin-bottom: 0.25rem;
+}
+
+.sheet-item {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.05rem 0;
+}
+
+/* A row the game gave something to do. It is a real <button>, so it keeps the
+   keyboard and the focus ring; everything the base button rule would impose on
+   a list is taken back off, because this has to read as a line in an inventory
+   rather than as a control bolted into one. */
+.sheet-item.pressable {
+  width: 100%;
+  text-align: left;
+  align-items: baseline;
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 0.05rem 0.3rem;
+  margin: 0 -0.3rem;
+  font: inherit;
+  white-space: normal;
+}
+
+.sheet-item.pressable:hover:not(:disabled) {
+  background: var(--btn-bg);
+  border-color: var(--amber-dim);
+}
+
+.sheet-item.pressable:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.sheet-item-label {
+  flex: 0 0 auto;
+}
+
+.sheet-item-note {
+  color: var(--amber-dim);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sheet-item.good .sheet-item-label { color: var(--ok); }
+.sheet-item.warn .sheet-item-label { color: var(--add); }
+.sheet-item.bad .sheet-item-label { color: var(--warn); }
+
+.sheet-empty {
+  color: var(--amber-faint);
 }
 
 /* ============================ Plugins ============================ */
@@ -856,6 +1448,47 @@ button.choice.chosen .choice-label::before {
 .plugin-setting button {
   font-size: 0.92em;
   padding: 0.05rem 0.3rem;
+}
+
+/**
+ * A plugin's own section in the left panel.
+ *
+ * The same controls the plugin's row draws, restyled to read as part of the
+ * panel rather than as a row's afterthought: no dashed rail, the panel's own
+ * type size, and the label above its control the way every field the app owns
+ * is laid out. A section that looked like a transplant would be read as one.
+ */
+#plugin-panels .plugin-settings {
+  border-left: none;
+  margin-top: 0;
+  padding-left: 0;
+  gap: 0.5rem;
+}
+
+#plugin-panels .plugin-setting {
+  align-items: stretch;
+  flex-direction: column;
+  font-size: 0.84em;
+  gap: 0.15rem;
+}
+
+#plugin-panels .plugin-setting-label {
+  color: var(--amber-dim);
+  text-transform: uppercase;
+}
+
+/* A toggle is the exception: a checkbox under its own caption reads as a
+   heading with a stray box beneath it, so it stays on one line. */
+#plugin-panels .plugin-setting:has(input[type='checkbox']) {
+  align-items: center;
+  flex-direction: row-reverse;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+#plugin-panels .plugin-setting select,
+#plugin-panels .plugin-setting input[type='text'] {
+  width: 100%;
 }
 
 .plugin-meta {
@@ -1481,32 +2114,70 @@ button.choice.chosen .choice-label::before {
   display: none;
 }
 
+/* The prompt line: a field and the buttons that act on it, not three things
+   that happen to be next to each other. `flex-end` is what keeps it straight —
+   the buttons sit on the bottom edge of the box however tall it has grown,
+   where a stacked column used to hang below a two-line field and leave the
+   whole row looking crooked. */
 .composer {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   gap: 0.4rem;
   padding: 0.4rem 0.6rem;
   border-top: 1px solid var(--amber-faint);
 }
 
+/* The caret and the text share one border, so the `>` reads as part of the
+   prompt. The border is here rather than on the textarea for that reason, and
+   the focus ring has to follow it: `:focus` on a child cannot paint a parent. */
+.composer-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0.4rem;
+  background: var(--bg-deep);
+  border: 1px solid var(--amber-faint);
+}
+
+.composer-field:focus-within {
+  border-color: var(--amber);
+}
+
+/* Sized like the text it sits in front of, so the two share a first line. It
+   used to be nudged down with a padding, which held for exactly one font. */
 .composer .caret {
   color: var(--amber-bright);
-  padding-top: 0.25rem;
+  font-size: 0.95em;
+  line-height: 1.35;
 }
 
+/* Height comes from the content, via `growComposer`. Hence `resize: none`:
+   a dragged height and a computed one are two owners for one number. Two lines
+   at rest so the box does not jump on the first keystroke, and a third of the
+   window at most, past which it scrolls. */
 .composer textarea {
   flex: 1;
-  min-height: 2.6em;
-  max-height: 40vh;
+  min-width: 0;
+  min-height: 2.7em;
+  max-height: 32vh;
+  padding: 0;
+  border: 0;
+  background: none;
+  resize: none;
+  line-height: 1.35;
 }
 
+/* Both bounds, or the computed height would shrink it back the moment anything
+   is typed into it. */
 .composer.expanded textarea {
-  min-height: 40vh;
+  min-height: 45vh;
+  max-height: 45vh;
 }
 
 .composer-buttons {
   display: flex;
-  flex-direction: column;
   gap: 0.25rem;
 }
 
@@ -1550,9 +2221,10 @@ button.send.stop {
   border-color: var(--warn);
 }
 
+/* Transient. There is no resting message any more, so nothing reserves a
+   height here: the row is hidden outright whenever it holds nothing. */
 .status-line {
-  padding: 0.15rem 0.6rem 0.4rem;
-  min-height: 1.3em;
+  padding: 0.2rem 0.6rem 0.1rem;
 }
 
 /* ============================ Activity column ============================ */

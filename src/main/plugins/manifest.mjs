@@ -18,7 +18,7 @@ import { normaliseCategory } from '../../shared/categories.mjs';
  * function. Bumped only when the shape of `activate(ctx)` changes in a way a
  * plugin can notice.
  */
-export const PLUGIN_API_VERSION = 5;
+export const PLUGIN_API_VERSION = 11;
 
 /**
  * Services a plugin may ask the host for.
@@ -27,7 +27,7 @@ export const PLUGIN_API_VERSION = 5;
  * is legible from the manifest alone rather than from reading its code. A name
  * that is not on this list is a manifest error, not a runtime `undefined`.
  */
-export const KNOWN_SERVICES = new Set(['browser', 'lookupBrowser', 'audio', 'notify', 'mic']);
+export const KNOWN_SERVICES = new Set(['audio', 'notify', 'mic', 'scene']);
 
 /** Setting kinds the plugin row knows how to draw. */
 export const SETTING_TYPES = new Set(['folder', 'text', 'toggle', 'select']);
@@ -184,6 +184,36 @@ export function parseManifest(raw, { builtin = false } = {}) {
     });
   }
 
+  /**
+   * A section of the plugin's own in the left panel.
+   *
+   * Settings are already drawn on the plugin's row, and that row is the right
+   * place to *decide* something — it is beside the description, the version and
+   * the switch that turns the whole thing off. It is the wrong place to *use*
+   * something: reported, of a music folder and a browser choice, that changing
+   * one meant opening PLUGINS, finding the row among a dozen and reading it to
+   * remember which control was which, for a setting that gets touched every
+   * day. So a plugin may ask for a heading in the panel, and its settings are
+   * drawn under that heading as well — one declaration, two places, no second
+   * way to write a control.
+   *
+   * `true` uses the plugin's own name; a string is a heading of its own,
+   * because "Browser control" is the name of a plugin and "BROWSER" is what a
+   * panel section is called. Trimmed to something that fits a narrow column: a
+   * heading is a word or two, and one that wraps to three lines pushes
+   * everything the user came for below the fold.
+   */
+  const panel = raw.panel === true ? String(raw.name ?? id) : String(raw.panel ?? '');
+  const panelLabel = panel.replace(/\s+/g, ' ').trim().slice(0, 24);
+  // A section with nothing in it is a promise of controls that are not there,
+  // which is the same reason an empty category heading is left out. Refused
+  // rather than dropped: a manifest asking for one has misunderstood what it
+  // is, and a plugin listed as working while doing nothing is worse than a
+  // refusal that says which line to delete.
+  if (panelLabel && settings.length === 0) {
+    return { ok: false, reason: 'a panel section was asked for, but the manifest declares no settings to put in it' };
+  }
+
   return {
     ok: true,
     manifest: {
@@ -206,12 +236,24 @@ export function parseManifest(raw, { builtin = false } = {}) {
        * refusing to load a working plugin over that word would be absurd.
        */
       category: normaliseCategory(raw.category),
+      /**
+       * The picture on its row, as a path inside the plugin.
+       *
+       * Checked above and then dropped, for a while: `list()` builds a URL from
+       * `manifest.icon` and every installed plugin handed it `undefined`, so a
+       * declared icon was validated, refused if it pointed anywhere dangerous,
+       * and then never drawn. Only the registry listing showed one, because
+       * that comes from the index rather than from here.
+       */
+      icon,
       /** Where this one sits in the system prompt; lower goes first. */
       order: Number.isFinite(Number(raw.order)) ? Number(raw.order) : 100,
       enabledByDefault: raw.enabledByDefault !== false,
       themes,
       locales,
       settings,
+      /** The heading its settings get in the left panel, or '' for none. */
+      panel: panelLabel,
       /** Settings keys this plugin replaced, for the one-time migration below. */
       legacy: Array.isArray(raw.legacy) ? raw.legacy.map((key) => String(key)) : [],
     },

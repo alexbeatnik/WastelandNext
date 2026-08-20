@@ -1,9 +1,10 @@
 # Packaging.
 #
-# The app ships both halves of manul-browser from `resources/`: the Go engine
-# binary and the Node binding's compiled dist. A packaged .exe cannot reach the
-# checkout on the build machine, and `npm run engine` is what puts them there —
-# so it runs before this does (see the `dist` script).
+# Nothing is staged before this runs any more. The app used to build the
+# manul-browser engine from source and ship it through `extraResources`, which
+# meant a release needed a Go toolchain and a checkout of another repository on
+# the build machine. Browser control is a plugin now and carries its own engine,
+# so what is packaged here is the app and nothing else.
 appId: com.alexbeatnik.wasteland-next
 productName: Wasteland Next
 copyright: Copyright 2026 Oleksii Poliakov
@@ -20,9 +21,8 @@ publish:
     owner: alexbeatnik
     repo: WastelandNext
 
-# Only what the app actually loads at runtime. Tests, build scripts and the
-# staged resources are excluded here — the last of those is shipped through
-# extraResources instead, so it lands beside the app rather than inside it.
+# Only what the app actually loads at runtime. Tests and build scripts are
+# excluded here.
 files:
   - src/**/*
   - package.json
@@ -35,14 +35,6 @@ files:
   # prunes devDependencies itself, so this ships the updater and nothing else.
   - node_modules/**/*
   - '!**/*.map'
-
-extraResources:
-  - from: resources
-    to: .
-    filter:
-      - '**/*'
-      - '!**/*.map'
-      - '!**/*.d.ts'
 
 win:
   icon: assets/icon.ico

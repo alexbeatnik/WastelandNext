@@ -6,7 +6,14 @@
  * reload of this window can never leave the two disagreeing about whether a
  * turn is running.
  */
-import { describePlacement, formatDuration, formatSize, splitThinking, stripActionBlocks } from '../shared/render.mjs';
+import {
+  describePlacement,
+  formatDuration,
+  formatSize,
+  parseChoices,
+  splitThinking,
+  stripBlocks,
+} from '../shared/render.mjs';
 import { describeUpdate, isBusy, isReady } from '../shared/updates.mjs';
 import { parseMarkdown } from '../shared/markdown.mjs';
 import { formatTime } from '../shared/media.mjs';
@@ -40,8 +47,34 @@ const state = {
   audio: { source: null },
   /** Whether anything can transcribe, and whether it is doing so right now. */
   mic: { available: false, listening: false, working: false },
+  /**
+   * The game panel, exactly as the main process reports it.
+   *
+   * Kept whole rather than unpacked: the hotkey handler needs the action list
+   * to answer "what does 3 mean right now", and reading it back off the buttons
+   * would make the DOM the source of truth for something the main process owns.
+   */
+  scene: { active: false, scene: null },
+  /**
+   * Which chooser has already been put on screen.
+   *
+   * A chooser is a question, so it opens itself when it arrives — but a game
+   * repaints its panel every turn, and one that reopened on every repaint could
+   * never be dismissed. This is what makes "a new question" different from "the
+   * same question, drawn again".
+   */
+  cardsAsked: '',
   /** `id → {text, received, total}` for a plugin that is fetching something. */
   pluginProgress: {},
+  /**
+   * Which plugin sections in the left panel are open.
+   *
+   * Held here rather than read off the DOM for the same reason the progress
+   * meter is: every saved setting repaints the whole list, and a section that
+   * folded shut because a checkbox inside it was ticked looks like the click
+   * closed it. `<details open>` is DOM state, and the DOM is rebuilt.
+   */
+  pluginPanels: new Set(),
   /**
    * Notices already shown, `id → notice`.
    *
@@ -68,8 +101,37 @@ function el(tag, className, text) {
   return node;
 }
 
+/**
+ * The one transient line, above the composer.
+ *
+ * Empty means idle, and idle is drawn as nothing at all: the line used to rest
+ * on "Ready", which is a row of the transcript's height spent saying what the
+ * app is doing whenever it is doing nothing — and a message nobody reads when
+ * it finally changes.
+ */
 function status(text) {
-  $('status-line').textContent = text;
+  const line = $('status-line');
+  line.textContent = text;
+  line.hidden = !text;
+}
+
+/**
+ * The composer is as tall as what is in it.
+ *
+ * A fixed two-line box scrolls a pasted paragraph out of sight while the
+ * buttons beside it stay where they are; the height is computed from the
+ * content instead, floored at two lines and capped in the stylesheet, past
+ * which it scrolls. Setting `auto` first is not a flourish — `scrollHeight`
+ * never reports less than the height already applied, so without it the box
+ * grows and never comes back down.
+ *
+ * Every programmatic write to the composer owes a call: a cleared box still
+ * five lines tall is the same bug from the other side.
+ */
+function growComposer() {
+  const input = $('input');
+  input.style.height = 'auto';
+  input.style.height = `${input.scrollHeight}px`;
 }
 
 function activity(text, kind = '') {
@@ -194,8 +256,99 @@ function addAttachmentTurn(content) {
   return node;
 }
 
-/** Draw one stored message, splitting reasoning out and hiding action fences. */
-function renderMessage(message) {
+/**
+ * The options a reply offered, as buttons that send.
+ *
+ * The model cannot draw a control, so a reply that ends "1. open it 2. pick
+ * another" is a menu the user cannot use — reported exactly that way, against a
+ * model that had just found the video it was asking permission to open. This is
+ * the answer: the offer arrives as data in a fence, the app builds the buttons,
+ * and pressing one goes down the same path typed words take.
+ *
+ * `send` is what goes, `label` is what it says. They are usually the same, so
+ * the tooltip is set only when they are not — a button whose hint repeats the
+ * button is noise, and one that quietly sends something else is a trap.
+ */
+function offerNode(choices, { live = true, taken = '' } = {}) {
+  const box = el('div', 'choices offer');
+  if (!live) box.classList.add('spent');
+
+  for (const choice of choices) {
+    const button = el('button', 'choice');
+    button.append(el('span', 'choice-label', choice.label));
+    if (choice.note) button.append(el('span', 'choice-note', choice.note));
+    if (choice.send !== choice.label) button.title = choice.send;
+    // Which way an old offer went, read back off the message that answered it.
+    if (taken && choice.send === taken) button.classList.add('chosen');
+    button.disabled = !live || state.streaming;
+
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+      button.classList.add('chosen');
+      // Retiring the row is `submitPrompt`'s, and doing it here as well was a
+      // bug the smoke run caught: the second call found nothing left to retire
+      // and handed back a restore that restored nothing, so a send that failed
+      // left the offer dead with no way to answer it.
+      //
+      // Nowhere to hand the words back to either: they came from a button, not
+      // the composer, and dropping the model's phrasing into the box the user
+      // types in would be worse than losing it.
+      void submitPrompt(choice.send);
+    });
+    box.append(button);
+  }
+  return box;
+}
+
+/**
+ * Spend every offer still on screen, and return what puts them back.
+ *
+ * A row of buttons outlives the reply that drew it. Three turns later the world
+ * has moved on and pressing one sends words answering a question nobody is
+ * still asking — the same staleness the game panel refuses a move for. The
+ * buttons stay drawn, greyed, rather than being removed: the fence they came
+ * from is stripped out of the prose, so taking them away would leave the user
+ * message that follows answering nothing visible.
+ *
+ * The restore is for the send that never happened — `submitPrompt` hands the
+ * text back when the turn was never recorded, and an offer retired for a
+ * message that does not exist is a dead row of buttons with no explanation.
+ */
+function retireOffers() {
+  const spent = [...$('chat-log').querySelectorAll('.choices.offer:not(.spent)')];
+  for (const box of spent) {
+    box.classList.add('spent');
+    for (const button of box.querySelectorAll('button.choice')) button.disabled = true;
+  }
+  return () => {
+    for (const box of spent) {
+      box.classList.remove('spent');
+      for (const button of box.querySelectorAll('button.choice')) button.disabled = state.streaming;
+    }
+  };
+}
+
+/**
+ * Grey the offers out while a turn runs — the mirror of `syncSceneBusy`.
+ *
+ * Not merely cosmetic, and not optional: an offer is drawn on `reply:end`,
+ * which lands while the turn is still running, so every button would be born
+ * disabled and nothing would ever enable it again.
+ */
+function syncOfferBusy() {
+  for (const box of $('chat-log').querySelectorAll('.choices.offer:not(.spent)')) {
+    for (const button of box.querySelectorAll('button.choice')) button.disabled = state.streaming;
+  }
+}
+
+/**
+ * Draw one stored message, splitting reasoning out and hiding the fences.
+ *
+ * `live` is whether this is the newest message, which is the only one whose
+ * choices may still be pressed; `taken` is the user message that answered it,
+ * so a spent offer can show which way it went.
+ */
+function renderMessage(message, { live = false, taken = '' } = {}) {
   if (message.role === 'user') return void addTurn('user', message.content);
   if (message.role === 'tool') {
     if (message.content.startsWith('[ATTACHED ')) return void addAttachmentTurn(message.content);
@@ -203,21 +356,48 @@ function renderMessage(message) {
   }
 
   const segments = splitThinking(message.content);
+  const offered = parseChoices(message.content);
   // With thinking switched off, the reasoning is hidden — but only when there
   // is an answer to show instead. A model that ignores the setting and thinks
   // without concluding would otherwise leave a blank turn, which tells the user
-  // nothing and looks like a failure.
-  const hasAnswer = segments.some((s) => s.kind === 'text' && stripActionBlocks(s.content));
+  // nothing and looks like a failure. A row of options counts: a reply that
+  // asked a question and drew the buttons for it has answered.
+  const hasAnswer = offered.length > 0 || segments.some((s) => s.kind === 'text' && stripBlocks(s.content));
   const hideThinking = !state.settings.thinking && hasAnswer;
 
   for (const segment of segments) {
     if (segment.kind === 'think') {
       if (!hideThinking) addTurn('think', segment.content);
     } else {
-      const prose = stripActionBlocks(segment.content);
+      const prose = stripBlocks(segment.content);
       if (prose) addMarkdownTurn('assistant', prose);
     }
   }
+
+  if (offered.length > 0) {
+    // A newer offer supersedes every older one. A turn with follow-ups emits a
+    // reply — and therefore an offer — per model call, so without this a model
+    // that asked, acted and asked again would leave two live rows of buttons
+    // for a question that has one answer. Nothing to retire on a stored chat:
+    // everything above the newest message was drawn spent already.
+    if (live) retireOffers();
+    $('chat-log').append(offerNode(offered, { live, taken }));
+  }
+}
+
+/**
+ * What answered the offer in message `index`, if anything did.
+ *
+ * Only up to the next reply: a user message further down the transcript belongs
+ * to a later exchange, and marking a button because words matched three turns
+ * on would be a record of something that never happened.
+ */
+function answeredBy(messages, index) {
+  for (let i = index + 1; i < messages.length; i += 1) {
+    if (messages[i].role === 'assistant') return '';
+    if (messages[i].role === 'user') return messages[i].content;
+  }
+  return '';
 }
 
 function scrollChat() {
@@ -250,11 +430,19 @@ async function loadChat(id) {
   // across a switch — but whether *this* chat already holds it changes with the
   // chat, and that is what the chips say.
   paintAttachments(state.attachments);
+  // A game belongs to the conversation it is played in, so the panel goes with
+  // the switch — same reason the transcript and the meter do.
+  paintScene(state.scene);
   $('chat-log').replaceChildren();
   if (state.chatId) {
     const chat = await api.chats.read(state.chatId);
     if (seq !== chatLoadSeq) return;
-    for (const message of chat?.messages ?? []) renderMessage(message);
+    const messages = chat?.messages ?? [];
+    for (const [index, message] of messages.entries()) {
+      // Only the newest reply's offer is still live; every earlier one is a
+      // record, and the message that followed it says which way it went.
+      renderMessage(message, { live: index === messages.length - 1, taken: answeredBy(messages, index) });
+    }
   }
   // Notices belong to no conversation, so they survive every switch: the
   // transcript was just cleared wholesale, and the dedup map would otherwise
@@ -670,16 +858,6 @@ function paintCompute(llm) {
   label.className = `stat ${!real ? '' : real.where === 'cpu' ? 'warn' : 'ok'}`.trim();
 }
 
-function paintBrowser(browser) {
-  const label = $('stat-browser');
-  label.textContent = browser.open ? `BROWSER: ${(browser.mode || 'open').toUpperCase()}` : 'BROWSER: IDLE';
-  label.className = `stat ${browser.open ? 'ok' : ''}`;
-
-  const engine = $('stat-engine');
-  engine.textContent = browser.engine ? 'ENGINE: MANUL-BROWSER' : 'ENGINE: MISSING';
-  engine.className = `stat ${browser.engine ? '' : 'warn'}`;
-}
-
 /* ============================ the model picker ============================ */
 
 function setModelMenu(open) {
@@ -790,19 +968,31 @@ function pluginIcon(plugin) {
 }
 
 /** The controls a plugin declared for its own settings. */
-function settingControls(plugin) {
+function settingControls(plugin, where = 'row') {
   const box = el('div', 'plugin-settings');
 
   for (const setting of plugin.settings ?? []) {
     const row = el('div', 'plugin-setting');
     row.append(el('span', 'plugin-setting-label', setting.label));
+    // Which control this is, in words that survive the element being thrown
+    // away: saving repaints the list, and `restoreFocus` has to find the same
+    // control again in a tree that no longer contains the one it started in.
+    // `where` is part of it because the same setting is drawn twice — once on
+    // the plugin's row and once in its panel — and putting the caret back in
+    // the wrong copy would scroll the panel out from under the user.
+    const mark = (node) => {
+      node.dataset.plugin = plugin.id;
+      node.dataset.setting = setting.key;
+      node.dataset.where = where;
+      return node;
+    };
 
     if (setting.type === 'toggle') {
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.checked = Boolean(setting.value);
       input.addEventListener('change', () => saveSetting$(plugin.id, setting.key, input.checked));
-      row.append(input);
+      row.append(mark(input));
     } else if (setting.type === 'folder') {
       const value = el('span', 'plugin-setting-value', setting.value || 'not set');
       value.title = setting.value || '';
@@ -818,7 +1008,7 @@ function settingControls(plugin) {
           pick.disabled = false;
         }
       });
-      row.append(value, pick);
+      row.append(value, mark(pick));
     } else if (setting.type === 'select') {
       // The manifest names the choices, so the control can be drawn before a
       // line of the plugin's code has run — and what a plugin may be set to
@@ -840,7 +1030,7 @@ function settingControls(plugin) {
       }
       select.value = setting.value ?? '';
       select.addEventListener('change', () => saveSetting$(plugin.id, setting.key, select.value));
-      row.append(select);
+      row.append(mark(select));
     } else {
       const input = document.createElement('input');
       input.type = 'text';
@@ -851,11 +1041,99 @@ function settingControls(plugin) {
         clearTimeout(timer);
         timer = setTimeout(() => saveSetting$(plugin.id, setting.key, input.value), 500);
       });
-      row.append(input);
+      row.append(mark(input));
     }
     box.append(row);
   }
   return box;
+}
+
+/**
+ * Where the caret was, so a repaint can put it back.
+ *
+ * Every saved setting repaints the whole plugin list, which throws away the
+ * control being used. On a checkbox that is invisible; in a text field it means
+ * the caret jumps out of the box half a second after the user starts typing,
+ * and the rest of the word goes into the page. Nothing on screen says why.
+ */
+function focusedSetting() {
+  const node = document.activeElement;
+  if (!node?.dataset?.setting) return null;
+  return {
+    plugin: node.dataset.plugin,
+    setting: node.dataset.setting,
+    where: node.dataset.where,
+    // Only a text field has one, and reading it off anything else throws in
+    // some browsers — hence the guard rather than an optional chain.
+    start: node.selectionStart ?? null,
+    end: node.selectionEnd ?? null,
+  };
+}
+
+/** Put it back, if the same control is still on screen. */
+function restoreFocus(mark) {
+  if (!mark) return;
+  const node = document.querySelector(
+    `[data-plugin="${mark.plugin}"][data-setting="${mark.setting}"][data-where="${mark.where}"]`,
+  );
+  if (!node) return;
+  node.focus();
+  if (mark.start !== null && typeof node.setSelectionRange === 'function') {
+    try {
+      node.setSelectionRange(mark.start, mark.end);
+    } catch {
+      /* not a field that has a selection */
+    }
+  }
+}
+
+/**
+ * A plugin's own section in the left panel.
+ *
+ * The settings on a plugin's row are where a choice is *made* — beside the
+ * description, the version and the switch that turns the whole thing off. This
+ * is where one gets *used*: a music folder, which browser to drive, the things
+ * that are changed often enough that opening PLUGINS and reading a dozen rows
+ * to find the right control is the wrong shape of work. Same declaration, same
+ * controls, same IPC — the manifest's `panel` only says where else to draw it.
+ *
+ * Only for a plugin that is actually running. A section drawn for something
+ * switched off would offer controls that change nothing anyone can see, which
+ * is the rule the audio transport and the game panel both already follow: a
+ * driver that went away takes its controls with it.
+ */
+function paintPluginPanels(list = []) {
+  const host = $('plugin-panels');
+  if (!host) return;
+  host.replaceChildren();
+
+  for (const plugin of list) {
+    if (!plugin.panel || !plugin.active || !plugin.settings?.length) continue;
+
+    const section = el('details', 'section');
+    section.dataset.pluginPanel = plugin.id;
+    // Rebuilt from `state`, never from the element that was here a moment ago:
+    // this function is called from `paintPlugins`, which runs on every saved
+    // setting, and a section that folded shut mid-click reads as the click
+    // having closed it.
+    section.open = state.pluginPanels.has(plugin.id);
+    section.addEventListener('toggle', () => {
+      if (section.open) state.pluginPanels.add(plugin.id);
+      else state.pluginPanels.delete(plugin.id);
+    });
+
+    const summary = document.createElement('summary');
+    summary.textContent = plugin.panel;
+    // The name is worth having somewhere: the heading is the plugin's own
+    // wording and need not say which plugin it belongs to.
+    summary.title = plugin.name;
+
+    const body = el('div', 'section-body');
+    body.append(settingControls(plugin, 'panel'));
+
+    section.append(summary, body);
+    host.append(section);
+  }
 }
 
 async function saveSetting$(id, key, value) {
@@ -877,6 +1155,9 @@ async function saveSetting$(id, key, value) {
  */
 function paintPlugins(list = []) {
   state.plugins = list;
+  // Taken before anything is torn down: `replaceChildren` below removes the
+  // element the user is typing in, and after that there is nothing left to ask.
+  const focused = focusedSetting();
   const host = $('plugin-list');
   host.replaceChildren();
 
@@ -1034,6 +1315,11 @@ function paintPlugins(list = []) {
   // question nobody asked. It is also how a previous error message goes away.
   const active = list.filter((plugin) => plugin.active).length;
   $('plugin-status').textContent = list.length ? `${active} of ${list.length} active` : 'No plugins found.';
+
+  // From the same list and in the same breath: a plugin switched off here has
+  // to lose its panel section now, not at the next repaint of something else.
+  paintPluginPanels(list);
+  restoreFocus(focused);
 }
 
 /**
@@ -1787,6 +2073,516 @@ function wirePlayer() {
   });
 }
 
+/* ============================ the game panel ============================ */
+
+/**
+ * A game, drawn from a document the main process holds.
+ *
+ * Nothing here is markup from a plugin. Every string arrives as data and is put
+ * into a `textContent`; the only field that becomes a class name is `tone`, and
+ * `scene.mjs` has already reduced that to one of three words. This is the same
+ * rule model output lives under, and it applies for the same reason — most of
+ * what a game shows is model output that a plugin wrote down on the way past.
+ */
+function meterNode(meter) {
+  // No maximum means no bar: a health bar filled against an imaginary limit
+  // says something false, where a bare number says only what is known.
+  const row = el('div', `scene-meter${meter.max > 0 ? '' : ' plain'}`);
+  row.append(el('span', 'scene-meter-label', meter.label));
+
+  // Two classes, and they answer different questions: the accent says which
+  // resource this is, the tone says how it is going. A theme decides both.
+  const bar = el('div', `meter ${meter.accent ? `accent-${meter.accent}` : ''} ${meter.tone}`.replace(/\s+/g, ' ').trim());
+  const fill = el('i');
+  const share = meter.max > 0 ? (meter.value / meter.max) * 100 : 0;
+  fill.style.width = `${Math.max(0, Math.min(100, share))}%`;
+  bar.append(fill);
+  row.append(bar);
+
+  row.append(el('span', 'scene-meter-value', meter.max > 0 ? `${meter.value}/${meter.max}` : String(meter.value)));
+  return row;
+}
+
+function actionNode(action) {
+  const button = el('button', `scene-action ${action.tone}`.trim());
+  if (action.key) button.append(el('span', 'scene-key', action.key));
+  button.append(el('span', 'scene-action-label', action.label));
+  if (action.hint) button.title = action.hint;
+  button.addEventListener('click', () => pressAction(action.id));
+  return button;
+}
+
+/**
+ * Grey the moves out while a turn is running.
+ *
+ * The keyboard is refused separately, in the hotkey handler: a disabled button
+ * cannot be clicked but a digit is still a digit, and the two have to agree or
+ * the keyboard becomes a way to do what the buttons say is impossible.
+ */
+function syncSceneBusy() {
+  for (const button of $('scene-actions').querySelectorAll('.scene-action')) button.disabled = state.streaming;
+  // The sheet's pressable rows are the same kind of thing as a move — some of
+  // them send one — so they are refused on the same terms. The dialog can be
+  // open while a turn runs, since reading the bag is not doing anything.
+  for (const row of $('sheet-body').querySelectorAll('.sheet-item.pressable')) row.disabled = state.streaming;
+  // Walking somewhere is a move like any other, so the map is refused on the
+  // same terms as the row of buttons.
+  for (const point of $('board').querySelectorAll('.board-point.pressable')) point.disabled = state.streaming;
+  for (const card of $('cards').querySelectorAll('button.card')) card.disabled = state.streaming;
+  // The field sends a move like anything else, so it waits its turn like
+  // anything else — and a disabled input also says why nothing is happening.
+  if (!$('entry-modal').hidden) paintEntry();
+}
+
+/**
+ * Does this scene belong to the conversation that is open?
+ *
+ * A game is played in a conversation, and the panel belongs there with it. The
+ * first version drew the strip over every chat in the app, because the scene
+ * lives in the main process and nothing tied it to anything: open a new
+ * conversation with an empty transcript and there was still a character sheet
+ * and a row of moves, offering a game that was not being played.
+ *
+ * An unclaimed scene — one painted outside any turn, which is what activation
+ * does — shows nowhere. `state.chatId` is '' on a new conversation, so the two
+ * must both be non-empty rather than merely equal, or "no chat" and "no game"
+ * would match each other.
+ */
+function sceneShowing() {
+  const owner = state.scene?.chatId ?? '';
+  return Boolean(state.scene?.scene && owner && owner === state.chatId);
+}
+
+function paintScene(status = { active: false, scene: null }) {
+  state.scene = status;
+  const scene = sceneShowing() ? status.scene : null;
+
+  $('scene').hidden = !scene;
+  const actions = $('scene-actions');
+  actions.replaceChildren();
+  actions.hidden = !scene?.actions?.length;
+
+  if (!scene) {
+    // A game that ended takes its dialogs with it, or they go on describing a
+    // hero who is no longer anywhere.
+    $('sheet-modal').hidden = true;
+    $('board-modal').hidden = true;
+    $('cards-modal').hidden = true;
+    $('entry-modal').hidden = true;
+    return;
+  }
+
+  $('scene-title').textContent = scene.title;
+  $('scene-sub').textContent = scene.subtitle;
+  // A button that opens an empty dialog is a dead control.
+  $('btn-scene-sheet').hidden = scene.groups.length === 0;
+  $('btn-scene-cards').hidden = !scene.cards;
+
+  const meters = $('scene-meters');
+  meters.replaceChildren();
+  for (const meter of scene.meters) meters.append(meterNode(meter));
+
+  const facts = $('scene-facts');
+  facts.replaceChildren();
+  for (const field of scene.fields) {
+    const box = el('span', `scene-field ${field.tone}`.trim());
+    box.append(el('span', 'scene-field-label', `${field.label} `));
+    box.append(el('span', 'scene-field-value', field.value));
+    facts.append(box);
+  }
+  for (const tag of scene.tags) facts.append(el('span', `scene-tag ${tag.tone}`.trim(), tag.label));
+
+  for (const action of scene.actions) actions.append(actionNode(action));
+  syncSceneBusy();
+
+  // Repainted in place rather than closed: a game that redrew itself while the
+  // sheet was open — which is every turn, since a move changes the inventory —
+  // would otherwise shut the dialog the player was reading.
+  if (!$('sheet-modal').hidden) paintSheet();
+  // The board moves with every step, so this is the case that matters most:
+  // walking into the forest must move the marker under the open map.
+  if (!$('board-modal').hidden) paintBoard();
+  /**
+   * The chooser opens itself, as well as closing itself.
+   *
+   * Closing was already here — a scene redrawn without cards has nothing left
+   * to ask — and opening is the same job from the other end. Without it a game
+   * could put a question in a scene that nothing on screen could reach: the
+   * dialog was only ever opened by an `act` answering `cards: true`, so a scene
+   * arriving with cards and no actions was a dead end. A fantasy game shipped
+   * exactly that for its class chooser, and the model spent the whole session
+   * telling the player to press a card that had never been drawn.
+   *
+   * Two conditions, and the smoke run insisted on the second. The question has
+   * to be a *new* one, keyed off what is being asked, or a chooser reopened on
+   * every repaint could not be dismissed at all — a game redraws its panel
+   * every turn. And the scene has to offer no moves: cards a game keeps around
+   * as a "who is here" list, reachable from a button on the row, are a
+   * reference and not a question, and throwing that open unasked put a dialog
+   * over the panel that swallowed the next hotkey. A scene with nothing else to
+   * do is asking now; a scene with moves has given the player something else,
+   * and the chooser waits behind its own button.
+   */
+  if (!scene.cards) {
+    $('cards-modal').hidden = true;
+    state.cardsAsked = '';
+  } else {
+    const asked = cardsKey(scene.cards);
+    if (asked !== state.cardsAsked) {
+      state.cardsAsked = asked;
+      // A new question decides the dialog either way, and the second half was
+      // the smoke run's again: opening it when the scene has nothing else to
+      // do, and *closing* whatever the last question was when it does. The
+      // player was answering something else; leaving that dialog up over a
+      // different list is worse than shutting it.
+      setCards(scene.actions.length === 0);
+    } else if (!$('cards-modal').hidden) paintCards();
+  }
+  // Same rule for the field, and for the same reason: a scene redrawn without
+  // one has nothing left to ask. Repainted without resetting it, so a repaint
+  // mid-turn cannot swallow a half-typed name.
+  if (!scene.entry) $('entry-modal').hidden = true;
+  else if (!$('entry-modal').hidden) paintEntry();
+}
+
+function paintSheet() {
+  const scene = state.scene?.scene;
+  if (!scene) return;
+
+  $('sheet-title').textContent = scene.title || state.scene.pluginName || '';
+  $('sheet-sub').textContent = scene.subtitle;
+
+  const body = $('sheet-body');
+  body.replaceChildren();
+  for (const group of scene.groups) {
+    const box = el('div', 'sheet-group');
+    box.append(el('div', 'sheet-group-label', group.label));
+    if (group.items.length === 0) {
+      // The plugin's own words for an empty list. It knows whether the sentence
+      // is "no items" or "the journal is blank"; we only know there is nothing.
+      box.append(el('div', 'sheet-empty', group.empty || '—'));
+    } else {
+      for (const item of group.items) {
+        // A row is a button only when the game gave it something to do. A
+        // journal entry that could be clicked and did nothing would be worse
+        // than one that plainly cannot be.
+        const row = el(item.action ? 'button' : 'div', `sheet-item ${item.tone}`.trim());
+        row.append(el('span', 'sheet-item-label', item.label));
+        if (item.note) row.append(el('span', 'sheet-item-note', item.note));
+        if (item.action) {
+          row.classList.add('pressable');
+          row.disabled = state.streaming;
+          row.addEventListener('click', () => pressAction(item.action));
+        }
+        box.append(row);
+      }
+    }
+    body.append(box);
+  }
+}
+
+/**
+ * The board: a picture with pressable places on it.
+ *
+ * The markers, the roads and the labels are built here from data rather than
+ * read off the image. A game's map can differ from run to run — this one
+ * shuffles which places connect — and a painted map would be confidently wrong
+ * two runs in three. Drawn from data they are always the roads that exist, the
+ * labels are legible and localised, and a marker is where the game says it is
+ * rather than where a painter happened to put it.
+ */
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function paintBoard() {
+  const board = sceneShowing() ? state.scene.scene.board : null;
+  const host = $('board');
+  host.replaceChildren();
+  if (!board) return;
+
+  $('board-title').textContent = state.scene.scene.title;
+  $('board-sub').textContent = state.scene.scene.subtitle;
+
+  if (board.src) {
+    const art = el('img', 'board-art');
+    art.src = board.src;
+    art.alt = '';
+    host.append(art);
+  }
+
+  /**
+   * The roads, in their own coordinate space.
+   *
+   * `viewBox="0 0 100 100"` with `preserveAspectRatio: none` means the points'
+   * percentages are the SVG's units too, so nothing here has to know how big
+   * the picture is or what shape it ended up.
+   */
+  const at = new Map(board.points.map((point) => [point.id, point]));
+  if (board.links.length) {
+    const roads = document.createElementNS(SVG_NS, 'svg');
+    roads.setAttribute('class', 'board-roads');
+    roads.setAttribute('viewBox', '0 0 100 100');
+    roads.setAttribute('preserveAspectRatio', 'none');
+    for (const link of board.links) {
+      const from = at.get(link.from);
+      const to = at.get(link.to);
+      if (!from || !to) continue;
+      /**
+       * Each road twice: a dark casing, then the road on top.
+       *
+       * A thin dashed line over a drawn landscape disappears wherever the
+       * landscape happens to be the same brightness, which on a hand-drawn map
+       * is most of it. The casing is the same trick as the plate under a label.
+       */
+      for (const kind of ['board-road-casing', `board-road ${link.tone}`.trim()]) {
+        const line = document.createElementNS(SVG_NS, 'line');
+        line.setAttribute('x1', String(from.x));
+        line.setAttribute('y1', String(from.y));
+        line.setAttribute('x2', String(to.x));
+        line.setAttribute('y2', String(to.y));
+        line.setAttribute('class', kind);
+        roads.append(line);
+      }
+    }
+    host.append(roads);
+  }
+
+  for (const point of board.points) {
+    const marker = el(point.action ? 'button' : 'div', 'board-point');
+    if (point.here) marker.classList.add('here');
+    if (point.tone) marker.classList.add(point.tone);
+    marker.style.left = `${point.x}%`;
+    marker.style.top = `${point.y}%`;
+    marker.append(el('span', 'board-dot'));
+    marker.append(el('span', 'board-label', point.label));
+    if (point.note) marker.title = point.note;
+    if (point.action) {
+      marker.classList.add('pressable');
+      marker.disabled = state.streaming;
+      marker.addEventListener('click', () => pressAction(point.action));
+    }
+    host.append(marker);
+  }
+}
+
+/**
+ * The chooser: equal cards, each a picture over a name over a paragraph.
+ *
+ * No close button on purpose. This window is a question — who are you — and a
+ * question with a way to dismiss it leaves the game waiting for an answer that
+ * is never coming. The plugin closes it by redrawing the scene without cards,
+ * which is what answering does.
+ */
+function paintCards() {
+  const cards = sceneShowing() ? state.scene.scene.cards : null;
+  const host = $('cards');
+  host.replaceChildren();
+  if (!cards) return;
+
+  $('cards-title').textContent = cards.label;
+  for (const card of cards.items) {
+    const button = el(card.action ? 'button' : 'div', `card ${card.tone}`.trim());
+    if (card.src) {
+      const art = el('img', 'card-art');
+      art.src = card.src;
+      art.alt = '';
+      button.append(art);
+    }
+    button.append(el('span', 'card-label', card.label));
+    if (card.note) button.append(el('span', 'card-note', card.note));
+    if (card.action) {
+      button.disabled = state.streaming;
+      button.addEventListener('click', () => pressAction(card.action));
+    }
+    host.append(button);
+  }
+}
+
+/**
+ * What is being asked, as one string.
+ *
+ * The label and the ids, because those are what change when the question does.
+ * Not the whole document: a game that repaints the same chooser with a tweaked
+ * note would reopen a dialog the player had put away.
+ */
+function cardsKey(cards) {
+  return [cards.label, ...cards.items.map((item) => item.action)].join('\u0000');
+}
+
+function setCards(open) {
+  const show = Boolean(open) && Boolean(sceneShowing() && state.scene.scene.cards);
+  if (show) paintCards();
+  $('cards-modal').hidden = !show;
+}
+
+/**
+ * The one field, and what it is for.
+ *
+ * Never repainted over what somebody is halfway through typing: a game redraws
+ * its panel on every turn, and a field that reset itself because the plugin
+ * repainted would lose the name a letter before it was finished.
+ */
+function paintEntry({ reset = false } = {}) {
+  const entry = sceneShowing() ? state.scene.scene.entry : null;
+  if (!entry) return;
+  $('entry-title').textContent = entry.label;
+  $('entry-hint').textContent = entry.hint;
+  $('entry-hint').hidden = !entry.hint;
+  $('entry-send').textContent = entry.submit;
+  const field = $('entry-input');
+  field.placeholder = entry.placeholder;
+  if (reset) field.value = entry.value;
+  $('entry-send').disabled = state.streaming;
+  field.disabled = state.streaming;
+}
+
+function setEntry(open) {
+  const show = Boolean(open) && Boolean(sceneShowing() && state.scene.scene.entry);
+  if (show) paintEntry({ reset: true });
+  $('entry-modal').hidden = !show;
+  // A field nobody is standing in is a field nobody can type into. The focus is
+  // the whole difference between "a question was asked" and "a question was
+  // asked and answering it takes one more click than it should".
+  if (show) $('entry-input').focus();
+}
+
+/** Whatever is in the field, sent as the answer to the question that drew it. */
+async function sendEntry() {
+  const entry = sceneShowing() ? state.scene.scene.entry : null;
+  if (!entry) return;
+  const typed = $('entry-input').value.trim();
+  // Refused rather than sent: an empty answer would have the game name the hero
+  // for the player, which is the one thing this window exists to avoid.
+  if (!typed) return status('Type something first.');
+  await pressAction(entry.action, typed);
+}
+
+function setBoard(open) {
+  const show = Boolean(open) && Boolean(sceneShowing() && state.scene.scene.board);
+  if (show) paintBoard();
+  $('board-modal').hidden = !show;
+}
+
+function setSheet(open) {
+  const groups = sceneShowing() ? state.scene.scene.groups : [];
+  const show = Boolean(open) && groups.length > 0;
+  if (show) paintSheet();
+  $('sheet-modal').hidden = !show;
+}
+
+/**
+ * One move.
+ *
+ * The plugin answers with a line for the status bar, words to send, or both.
+ * A move that only redraws the panel — opening the inventory, reading the
+ * journal — costs nothing and involves no model at all, which is most of what
+ * made those commands slow and unreliable when they had to be typed at one.
+ */
+async function pressAction(actionId, value = '') {
+  if (state.streaming) return status('A turn is running — wait for it to finish.');
+  try {
+    const answer = await api.scene.act(actionId, value);
+    if (answer.status) status(answer.status);
+    // Asked for before anything is sent: a game that opens the bag and then
+    // takes a turn should show the bag first, not after the reply lands.
+    if (answer.sheet) setSheet(true);
+    if (answer.board) setBoard(true);
+    if (answer.cards) setCards(true);
+    if (answer.entry) setEntry(true);
+    // Sent from here, not from the main process, so a pressed button is an
+    // ordinary message in the conversation this window has open.
+    if (answer.submit) {
+      // A move made from a dialog closes it. Pressing a place on the map and
+      // then watching the reply arrive behind the still-open map is the map
+      // refusing to get out of the way of the thing it was used to do.
+      setBoard(false);
+      setCards(false);
+      setEntry(false);
+      await submitPrompt(answer.submit);
+    }
+  } catch (err) {
+    status(err.message);
+    activity(err.message, 'bad');
+  }
+}
+
+function wireScene() {
+  $('btn-scene-sheet').addEventListener('click', () => setSheet($('sheet-modal').hidden));
+  $('btn-scene-cards').addEventListener('click', () => setCards($('cards-modal').hidden));
+  $('entry-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    sendEntry();
+  });
+  $('entry-modal').addEventListener('click', (event) => {
+    // Only the backdrop, as with the sheet. Unlike the chooser this one can be
+    // dismissed: a text field with no way out would trap a player who changed
+    // their mind, and the game still takes the same answer typed at the
+    // composer if they would rather.
+    if (event.target === $('entry-modal')) setEntry(false);
+  });
+  $('btn-sheet-close').addEventListener('click', () => setSheet(false));
+  $('btn-board-close').addEventListener('click', () => setBoard(false));
+  $('board-modal').addEventListener('click', (event) => {
+    if (event.target === $('board-modal')) setBoard(false);
+  });
+  $('sheet-modal').addEventListener('click', (event) => {
+    // Only the backdrop closes it, as with the About box: a click on the box
+    // itself must not dismiss the thing being read.
+    if (event.target === $('sheet-modal')) setSheet(false);
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      setSheet(false);
+      setBoard(false);
+      setEntry(false);
+    }
+    // The digits belong to the game, so they belong to its conversation too: a
+    // hidden panel must not still answer the keyboard.
+    if (!sceneShowing()) return;
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || event.isComposing) return;
+
+    /**
+     * Typing is typing, whatever the character is.
+     *
+     * The composer is where this game is played from, so without this every
+     * digit in a sentence would make a move — and the move would go out while
+     * the half-written message sat in the box. `isContentEditable` is checked
+     * too: it is not a tag name, and an element can be one without being an
+     * input.
+     */
+    const target = event.target;
+    if (target?.isContentEditable) return;
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName)) return;
+
+    const sheetOpen = !$('sheet-modal').hidden;
+    // The chooser counts as ours so the digits stay quiet over it — and it has
+    // no Escape either: it is a question, and dismissing a question leaves the
+    // game waiting for an answer that never comes.
+    const mine = sheetOpen || !$('board-modal').hidden || !$('cards-modal').hidden;
+    // Any other dialog owns the keyboard. The shell approval one is a question
+    // that has to be answered before anything else happens, and a digit
+    // pressed over it must not quietly do something behind it.
+    if (!mine && [...document.querySelectorAll('.modal')].some((modal) => !modal.hidden)) return;
+
+    // 0 is the sheet's, whichever dialog happens to be up: reading the bag with
+    // the map open should show the bag, not toggle something invisible.
+    if (event.key === '0') {
+      event.preventDefault();
+      setBoard(false);
+      setSheet(!sheetOpen);
+      return;
+    }
+    // With a dialog up, the digits belong to nothing: reading the inventory and
+    // swinging a sword are different activities.
+    if (mine) return;
+
+    const action = (state.scene.scene.actions ?? []).find((entry) => entry.key === event.key);
+    if (!action) return;
+    event.preventDefault();
+    pressAction(action.id);
+  });
+}
+
 /* ============================ dictation ============================ */
 
 /**
@@ -1937,7 +2733,8 @@ async function startDictation() {
       input.value = input.value ? `${input.value.replace(/\s*$/, '')} ${text}` : text;
       input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
-      status('Ready');
+      growComposer();
+      status('');
     } catch (err) {
       status(err.message);
       activity(`dictation failed — ${err.message}`, 'bad');
@@ -2064,7 +2861,7 @@ async function attachVia(run) {
     paintAttachments(items);
     for (const error of result.errors ?? []) activity(`not attached — ${error}`, 'bad');
 
-    if (result.canceled) status('Ready');
+    if (result.canceled) status('');
     else if (result.errors?.length) status(`Not attached: ${result.errors[0]}`);
     else status(items.length === 1 ? '1 attachment ready.' : `${items.length} attachments ready.`);
   } catch (err) {
@@ -2226,9 +3023,6 @@ function applySettings(settings) {
   $('set-llama-path').value = settings.llamaServerPath;
   $('set-system-prompt').value = settings.systemPrompt;
 
-  $('set-browser-headless').checked = settings.browserHeadless;
-  $('set-chrome').value = settings.chromePath;
-
   // What the model may do is not painted from here any more: it belongs to the
   // plugin list, which the main process owns and reports whole.
   $('set-thinking').checked = settings.thinking;
@@ -2246,18 +3040,30 @@ function setStreaming(on) {
   send.textContent = on ? '■' : '▶';
   send.classList.toggle('stop', on);
   send.title = on ? 'Stop' : 'Send';
+  // The moves on the action row are refused while a turn runs, and have to look
+  // refused: a button that silently does nothing reads as a broken game.
+  syncSceneBusy();
+  // A reply's own options are the same kind of control, and are drawn mid-turn:
+  // without this they would be born disabled and never come back.
+  syncOfferBusy();
 }
 
-async function send() {
-  if (state.streaming) {
-    await api.agent.stop();
-    return;
-  }
-  const input = $('input');
-  const prompt = input.value.trim();
-  if (!prompt) return;
-
-  input.value = '';
+/**
+ * Run one turn for `prompt`.
+ *
+ * Split out from `send` because a pressed action button is the same event as a
+ * typed message and must not become a second implementation of it — the busy
+ * check, the transcript entry and what happens when a send fails are all
+ * subtle enough once.
+ *
+ * `restoreTo` is the composer, when the words came from it. A move made by
+ * pressing a button has nowhere to go back to, and dropping the game's own
+ * phrasing into the box the player types in would be worse than losing it.
+ */
+async function submitPrompt(prompt, { restoreTo = null } = {}) {
+  // Whether the words came from a button or the composer, the offer on screen
+  // has now been answered and must stop being pressable.
+  const restoreOffers = retireOffers();
   const userTurn = addTurn('user', prompt);
   scrollChat();
   setStreaming(true);
@@ -2278,12 +3084,33 @@ async function send() {
     status(err.message);
     activity(err.message, 'bad');
     if (!state.turnStarted) {
-      if (!input.value) input.value = prompt;
+      // Nothing was recorded, so nothing answered the offer: put it back with
+      // the words, or the user is left looking at buttons that died for a
+      // message that does not exist.
+      restoreOffers();
+      if (restoreTo && !restoreTo.value) {
+        restoreTo.value = prompt;
+        growComposer();
+      }
       userTurn.remove();
     }
   } finally {
     setStreaming(false);
   }
+}
+
+async function send() {
+  if (state.streaming) {
+    await api.agent.stop();
+    return;
+  }
+  const input = $('input');
+  const prompt = input.value.trim();
+  if (!prompt) return;
+
+  input.value = '';
+  growComposer();
+  await submitPrompt(prompt, { restoreTo: input });
 }
 
 /* ============================ event stream ============================ */
@@ -2330,6 +3157,10 @@ function handleEvent(payload) {
       // The first message of a session is what creates the chat, so this is
       // where a new conversation gets its id.
       if (payload.chatId) state.chatId = payload.chatId;
+      // A game started in a fresh conversation is claimed by the id that only
+      // arrives here; without this the panel would stay hidden for the whole
+      // turn that summoned it.
+      paintScene(state.scene);
       break;
 
     case 'reply:start':
@@ -2357,7 +3188,7 @@ function handleEvent(payload) {
       if (payload.error) {
         addTurn('assistant error', `✗ ${payload.error}`);
       } else {
-        renderMessage({ role: 'assistant', content: payload.text });
+        renderMessage({ role: 'assistant', content: payload.text }, { live: true });
       }
       if (payload.aborted) activity('stopped by user', 'bad');
       scrollChat();
@@ -2392,23 +3223,6 @@ function handleEvent(payload) {
       scrollChat();
       break;
     }
-
-    case 'browser:step':
-      activity(
-        `${payload.outcome.ok ? '✓' : '✗'} ${payload.outcome.step}${
-          payload.outcome.error ? ` — ${payload.outcome.error}` : ''
-        }`,
-        payload.outcome.ok ? 'ok' : 'bad',
-      );
-      break;
-
-    case 'browser:state':
-      paintBrowser(payload);
-      break;
-
-    case 'browser:log':
-      activity(payload.line);
-      break;
 
     case 'llm:state':
       paintLlm(payload);
@@ -2480,6 +3294,13 @@ function handleEvent(payload) {
 
     case 'audio:state':
       paintPlayer(payload);
+      break;
+
+    // A game redrawing itself. It arrives on the same stream as everything
+    // else, so a plugin that changed the world outside a turn — a timer, a
+    // button that only opens the inventory — reaches the panel without one.
+    case 'scene:state':
+      paintScene(payload);
       break;
 
     // A plugin appearing, going away, or finishing a download is what makes the
@@ -2567,7 +3388,23 @@ function wire() {
     send();
   });
 
-  $('btn-expand').addEventListener('click', () => $('composer').classList.toggle('expanded'));
+  // Typing is what sets the height, so the handler is on the box itself rather
+  // than on the keys: a paste, a drop and an undo all arrive as `input` and
+  // none of them is a keystroke.
+  $('input').addEventListener('input', growComposer);
+
+  // One button, two states, and it has to say which one it is in — the only
+  // other feedback is the size of the box, which is the thing being changed.
+  // Written through `t()` because `applyDictionary` walks markup captured at
+  // boot, and putting the captured original back over a string the app has
+  // since written is an erasure rather than a translation.
+  $('btn-expand').addEventListener('click', () => {
+    const open = $('composer').classList.toggle('expanded');
+    const button = $('btn-expand');
+    button.textContent = open ? '⤡' : '⤢';
+    button.title = t(open ? 'Shrink the composer' : 'Expand the composer');
+    $('input').focus();
+  });
 
   // The links inside carry `target="_blank"`, which the main process turns into
   // `shell.openExternal` — this window must never navigate away from itself.
@@ -2708,19 +3545,6 @@ function wire() {
 
   $('btn-cancel-download').addEventListener('click', () => api.models.cancelDownload());
 
-  $('btn-browser-open').addEventListener('click', async () => {
-    status('Opening browser…');
-    try {
-      paintBrowser(await api.browser.open());
-      status('Browser ready.');
-    } catch (err) {
-      status(err.message);
-      activity(err.message, 'bad');
-    }
-  });
-
-  $('btn-browser-close').addEventListener('click', async () => paintBrowser(await api.browser.close()));
-
   $('btn-shell-approve').addEventListener('click', () => answerShell(true));
   $('btn-shell-reject').addEventListener('click', () => answerShell(false));
 
@@ -2734,9 +3558,7 @@ function wire() {
   bindText('set-endpoint', 'externalEndpoint');
   bindText('set-llama-path', 'llamaServerPath');
   bindText('set-system-prompt', 'systemPrompt');
-  bindText('set-chrome', 'chromePath');
 
-  bindCheck('set-browser-headless', 'browserHeadless');
   bindCheck('set-crt', 'crtEffects');
 
   $('btn-store-refresh').addEventListener('click', () => refreshStore());
@@ -2773,6 +3595,7 @@ function wire() {
 
   wirePlayer();
   wireMic();
+  wireScene();
 
   $('set-crt').addEventListener('change', (event) => document.body.classList.toggle('no-crt', !event.target.checked));
 }
@@ -2798,7 +3621,6 @@ async function boot() {
   applySettings(snapshot.settings);
   paintLlm(snapshot.llm);
   paintCompute(snapshot.llm);
-  paintBrowser({ ...snapshot.browser, engine: snapshot.engine });
   paintCtx({ used: 0, max: snapshot.settings.nCtx, percent: 0 });
   // A first paint from the snapshot, which may have been taken while discovery
   // was still running; `refreshPlugins` below waits for it to settle.
@@ -2809,6 +3631,10 @@ async function boot() {
   paintLocales(snapshot.locales ?? []);
   paintPlayer(snapshot.audio ?? { source: null });
   paintMic(snapshot.mic ?? { available: false });
+  // A game outlives this window: the scene lives in the main process, so a
+  // reload comes back to the panel it left rather than to an empty one that
+  // fills in whenever the plugin next happens to redraw.
+  paintScene(snapshot.scene ?? { active: false, scene: null });
 
   // Attachments outlive a reload — they live in the main process — so the row
   // is painted from what is actually pending, not assumed empty.
@@ -2830,8 +3656,7 @@ async function boot() {
   // the app was closed is reported during boot, which is earlier than this.
   for (const notice of snapshot.notices ?? []) showNotice(notice);
 
-  if (!snapshot.engine) activity('manul-browser engine not built — run `npm run engine` for browser control.', 'bad');
-  status('Ready');
+  status('');
 
   // Last, unawaited and quiet. It is what puts UPDATE on an installed row, so
   // it cannot wait for the section to be opened — but a machine with no network

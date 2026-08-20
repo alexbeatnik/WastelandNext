@@ -104,7 +104,8 @@ export class Updater {
    * `quitAndInstall` spawns the installer and only then asks the app to quit,
    * so everything this process owns must already be gone: llama-server holds a
    * port, and an orphan of it makes the *next* run report a model as loaded
-   * while talking to a stranger. Chrome is torn down for the same reason.
+   * while talking to a stranger. A plugin's Chrome goes for the same reason,
+   * which `shutdown()` reaches by deactivating every plugin.
    *
    * Silent, because the alternative runs the full NSIS wizard — which opens by
    * asking the user to close an app the updater has just closed for them.

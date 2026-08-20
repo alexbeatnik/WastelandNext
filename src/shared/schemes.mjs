@@ -32,6 +32,23 @@ export function pluginAssetUrl(pluginId, file) {
   return `${PLUGIN_SCHEME}://${pluginId}/${path}`;
 }
 
+/**
+ * The reserved first segment that means "this plugin's data directory".
+ *
+ * A plugin's installed tree is deleted and rewritten on every update, so
+ * anything the *user* put there — a generated map, a portrait — would vanish on
+ * a version bump. `ctx.dataDir()` survives, and this is how its contents reach
+ * the page. Reserved rather than guessed at: a plugin shipping a real directory
+ * called `@data` would otherwise be shadowed, and `@` is not a character the
+ * manifest validator lets into a path.
+ */
+export const DATA_SEGMENT = '@data';
+
+/** A file from a plugin's data directory: `wasteland-plugin://<id>/@data/<path>`. */
+export function pluginDataUrl(pluginId, file) {
+  return pluginAssetUrl(pluginId, `${DATA_SEGMENT}/${String(file ?? '')}`);
+}
+
 /** One audio file: `wasteland-media://track/<encoded absolute path>`. */
 export function mediaUrl(filePath) {
   return `${MEDIA_SCHEME}://${MEDIA_HOST}/${encodeURIComponent(filePath)}`;

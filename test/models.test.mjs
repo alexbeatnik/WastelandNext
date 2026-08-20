@@ -111,6 +111,24 @@ test('a percent-encoded filename is decoded for disk', async () => {
   assert.equal(target.filename, 'my model.gguf');
 });
 
+test('a repo id encodes its chosen filename the same way a direct URL does', async () => {
+  // The repo-id branch built its own URL with `encodeURI`, so a `#` in a
+  // filename ended the path and started a fragment — and this half had no test
+  // on it. It now shares `downloadUrlFor` with the search list.
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({ siblings: [{ rfilename: 'model#2-Q4_K_M.gguf' }] }),
+  });
+  try {
+    const target = await resolveTarget('owner/repo');
+    assert.equal(target.url, 'https://huggingface.co/owner/repo/resolve/main/model%232-Q4_K_M.gguf');
+    assert.equal(target.filename, 'model#2-Q4_K_M.gguf');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test('removeWhenReleased reports success when the file is already gone', async () => {
   assert.equal(await removeWhenReleased(join(tmpdir(), 'wl-not-here-at-all.part')), true);
 });

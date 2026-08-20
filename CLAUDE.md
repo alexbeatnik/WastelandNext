@@ -28,8 +28,9 @@ the whole indirection is for; do not add an action type to `prompts.mjs`.
 `audio-player`'s first fragment did exactly that and never said "I can't play music" was false, and the first request
 to play a song got "I can't directly play music. However, I can search for it on YouTube" — from a model holding
 `play_music`. That is the same failure as answering "I have no access to real-time information" with `web_lookup` in
-hand, and the same cure applies. It is worse inside this app than most, because `BROWSER` is long, prescriptive and
-carries a worked example of playing a song on YouTube; a fragment that does not push back is competing with that.
+hand, and the same cure applies. It is worse inside this app than most, because a fragment competes with whatever else is
+installed — browser control's is long, prescriptive and carries a worked example of playing a song on YouTube, and one
+that does not push back loses to it.
 
 **Built-ins are imported statically from `src/plugins/index.mjs`, never discovered on disk.** They are part of the
 build, so there is nothing to discover — and a packaged app keeps `src/` inside `app.asar`, where whether a dynamic
@@ -158,6 +159,25 @@ has run, and so what a plugin may be set to stays readable without reading it. `
 not offered: a row displaying a state the plugin has no code for is worse than a refused click, and the plugin reading
 it back would be entitled to assume otherwise.
 
+**A plugin's settings can be drawn twice, and `panel` is the whole of what it takes.** A row in PLUGINS is where a
+plugin is *decided* about — beside its description, its version and the switch that turns it off — and a poor place to
+*use* a setting: reported of a music folder and a browser choice, both changed almost daily, that reaching either meant
+opening the section and reading a dozen rows to remember which control was which. The manifest declares the settings
+once; `panel` only says to draw them in the left panel as well, so there is no second way to define a control and
+nothing for the plugin's code to do. A `panel` with no `settings` is refused at load, for the same reason an empty
+category heading is left out: a section promises controls, and one that opens onto nothing is a worse lie than none.
+
+**A panel section belongs to a plugin that is running.** `paintPluginPanels` skips anything not `active`, which is the
+rule the audio transport and the game panel already follow — a driver that went away takes its controls with it, and a
+control that is drawn and cannot work is worse than one that is absent.
+
+**Which sections are open lives in `state`, and so does the caret.** Saving a setting repaints the whole plugin list,
+which throws away the `<details>` that was open and the input being typed into. Both are read back afterwards:
+`state.pluginPanels` for the open sections, and `focusedSetting`/`restoreFocus` for the control that had focus, keyed
+by plugin, setting and *which copy* — the same setting exists on the row and in the panel, and putting the caret in the
+wrong one scrolls the panel out from under the user. Without the second half a text setting loses the caret half a
+second after typing starts and the rest of the word goes into the page, with nothing on screen saying why.
+
 **`ctx.progress` draws on the plugin's own row, and the renderer keeps it in `state`.** The activity log is the wrong
 place for a 1.5 GB download — it scrolls, the narrow layout hides that column, and a percentage that has to be hunted
 for is one nobody watches. It is held in `state.pluginProgress` rather than left in the DOM because `paintPlugins`
@@ -196,6 +216,13 @@ downloaded and unpacked, and anything on the path could rewrite it — with loop
 sit on. Two registries publishing the same id is a fork or a mirror rather than an error, so the newest wins; what
 makes that safe is that it is not silent, and the source label travels with the entry to the row.
 
+**Adding to `SHIPPED_REGISTRIES` is a different act from a user adding one, and not every entry is ours.** The user's
+own registries are a widening of *their* trust; the shipped list is this build saying a plugin is worth offering, which
+is not the same claim as having written it — one of the indexes is another account's repository, and the order is the
+one the plugin sections are drawn in rather than the order they were added. What makes either safe is that nothing
+downstream cares which it was: the checksum is still mandatory, `assertSafeArchive` still reads the archive before it
+is unpacked, and code still runs only once somebody switches it on.
+
 **One registry failing must not empty the list, and *all* of them failing must not hide which were asked.** `fetchIndex`
 reports per source and never throws: it returns `error` only when nothing answered, because throwing lost exactly the
 thing worth showing in that state. Removing the broken registry is how the user gets the list back, and they cannot
@@ -216,6 +243,87 @@ install fail at the very end — after the download, the checksum and the unpack
 message goes away; the first version of the toggle handler cleared the line immediately afterwards and blanked the
 count it had just written. The smoke check asserts the number, not that the text changed — an empty string is
 different from anything, so the weaker check passed on the bug.
+
+**A scene is data, and the app draws it.** The `scene` service is the same bargain the audio bar struck: a plugin cannot run code in this window, so it holds the game and says what the panel *contains*, while every node on screen is built here from a document with a fixed set of keys. `normaliseScene` is where "whatever the plugin passed" becomes that document, and the reason it is strict is that most of what a game shows is model output at one remove — an item a language model named, a journal line it wrote, stored by the plugin on the way past and no more trustworthy for having been stored.
+
+**`tone` is the only field that becomes a class name, so it is the only field taken from a list.** Everything else in a scene lands in a `textContent`, where the worst a hostile string can do is look silly. A tone passed through would let a plugin — or the model writing through it — name any class in the stylesheet.
+
+**The app assigns the hotkeys, by position.** Two actions asking for the same key is a conflict with no good resolution, and a key that silently did nothing because something else had claimed it is indistinguishable from a broken button. The cost is that `3` means a different move after the list changes, which is true of the buttons themselves anyway.
+
+**A digit typed into the composer is a digit.** The hotkey handler is on `document`, and the composer is where the game is played from — without the check for an input, a typed sentence would fire a move on every numeral in it, while the half-written message sat in the box. `isContentEditable` is tested as well as the tag name: an element can be an editing host without being an `<input>`. The smoke check types into the composer and asserts both that nothing was pressed and that the text is untouched; nothing in the source distinguishes the working handler from the broken one.
+
+**A move is sent by the renderer, and `scene.act` only hands the words back.** A turn belongs to a conversation and the main process does not have a current one — the same fact `attach.mjs` records. Routing a pressed button back through the window that does know also means it goes down exactly the path typed text takes, so `submitPrompt` is shared and the busy check, the transcript entry and the hand-back on failure are not implemented twice. It is also the whole of what stops a game looping: nothing in the service can start a turn, so a move happens because a person pressed a key.
+
+**`submitPrompt` gives the composer its text back only when the composer is where it came from.** A move made by pressing a button has nowhere to return to, and dropping the game's own phrasing into the box the player types in is worse than losing it.
+
+**A game is played in a conversation, and the panel belongs there with it.** The first version tied the scene to nothing, so the strip and the row of moves were drawn over every chat in the app: opening a new conversation gave an empty transcript under a character sheet and a list of moves, offering a game that was not being played. `show()` stamps the scene with the conversation the turn is running in, `ipc.mjs` supplies that off `turn:start` because it is the only place that sees both, and the renderer draws nothing unless the open chat is that one. Both ids must be non-empty rather than merely equal — `state.chatId` is `''` on a new conversation, and "no chat" must not match "no game".
+
+**A game that *acts* in a turn claims the panel, even when it does not repaint.** `show()` claiming the scene covers
+every game that redraws when it acts, and leaves a hole behind it: a scene painted *outside* a turn — from a timer, at
+activation — belonged to nobody and nothing could claim it afterwards, so it stayed drawn nowhere until the plugin
+happened to repaint. `claimTurn(pluginId)` is called from `#dispatch`'s `finally`, on the failing path too, since the
+game acted in this conversation either way. It is deliberately not "claim it for whichever conversation runs next",
+which is the harm the rule below exists to prevent; it is accepted only for the plugin driving the panel, only inside a
+turn, and only when something is drawn, and it announces only on a change.
+
+**It cannot invent a scene, and that is the limit worth knowing.** A reported dead end looked exactly like the hole
+above and was not it: `fantasy-rpg` draws nothing at activation *on purpose* (its own comment explains why — a game left
+open yesterday would otherwise be on screen at boot, over a conversation that has nothing to do with it), and while a
+class is unchosen its handler answers "choose a class on the cards" without repainting. A pending setup plus a restart
+therefore leaves no scene at all — not an unclaimed one — and the app has nothing to draw and no way to ask for it. The
+panel comes back only when the plugin repaints, which is the contract that plugin states for itself. When a chooser
+never appears, check whether a scene exists before reaching for the claiming rules.
+
+**A scene painted outside a turn claims no conversation, and one that claimed none is drawn nowhere.** Activation and timers both land there. Nothing outside a turn knows which chat a game is being played in, and taking "whichever is open" is exactly how the panel got everywhere in the first place. The cost is that a run reopened after a restart has no panel until the first move; that is a smaller wrong answer than a hero on screen for somebody who opened the app to ask about something else, and the run itself is never at risk — it is in the plugin's save, and `context()` hands it to the model whether or not anything is drawn.
+
+**The hotkeys are hidden with the panel.** A digit answered by a panel the user cannot see would make a move in a conversation the game is not being played in. `sceneShowing()` is the single answer to "is this game on screen", and the keyboard, the sheet and the paint all ask it.
+
+**A list row is a control only when the game gave it one.** An inventory is what `action` on an item exists for: putting the sword in your hand is a thing to do to a row, not a move to pick off a bar. It is optional because a journal is not an inventory, and an entry that could be clicked and did nothing would be worse than one that plainly cannot be. `#offered()` folds those ids in with the moves', so a stale click on a bag emptied three turns ago is refused exactly as a stale move is.
+
+**A chooser opens itself, because closing itself was only half the job.** The dialog used to be opened solely by an
+`act` answering `cards: true`, so a scene arriving *with* cards and no actions was a dead end: the question existed in
+the document and nothing on screen could reach it. `fantasy-rpg` ships exactly that for its class chooser — picking a
+class is the turn, so there is no move to offer beside it — and the model spent whole sessions telling the player to
+press a card that had never been drawn. Two conditions, both learned from the smoke run rather than from reading: the
+question must be a *new* one (keyed off the label and the ids, or a chooser reopened on every repaint could never be
+dismissed, and a game repaints every turn), and the scene must offer no moves. Cards kept beside a row of moves are a
+reference — "who is here" — and throwing that open unasked put a dialog over the panel that swallowed the next hotkey.
+A new question when the scene *does* have moves closes the old dialog instead: the player was answering something else,
+and leaving that up over a different list is worse than shutting it.
+
+**`[ CHOOSE ]` is the way back, and exists for the same reason `[ SHEET ]` does.** A dismissed chooser with no action to
+reopen it would be the dead end again, one click later. It is drawn only while the scene has cards, like the sheet
+button is drawn only when there are groups.
+
+**An action can arrive without its fence, and only then is a bare line read as one.** Reported as a playlist that never
+played: the model emitted `{"type":"queue_music","steps":"pearl jam"}` alone on a line, nothing matched it, and the JSON
+was printed at the user. `BARE_ACTION_RE` is anchored to both ends of a single line, the fallback runs only when the
+reply holds no fenced action at all, and the type must be one some plugin *declares* — `owner()`, not the active handler
+map, so a switched-off plugin still answers with the sentence the model can act on. All three narrow the same risk, the
+one the fenced path already carries: a reply that is discussing an action rather than asking for one. `stripBlocks`
+removes such a line only when it parses, so prose that merely starts with a brace is never quietly edited.
+
+**`sheet: true` is the only way a plugin can open the dialog.** The sheet is the app's, so a game asking to "look in the bag" had no way to show one — an inventory button that only wrote a line in the status bar would be a control describing the thing it should have shown. It is honoured before `submit`, so a move that opens the bag *and* takes a turn shows the bag first rather than after the reply lands.
+
+**A dialog that means to be wider than `.modal-box` must say so by specificity, not by order.** `.modal-box` sizes every dialog in the app and is declared near the bottom of `styles.css`; a bare `.board-box` above it loses the tie and the map sat at 46rem through a whole build while the rule meant to widen it read perfectly. `.modal-box.board-box` wins wherever it is written. The smoke check that was supposed to catch this asked for "wider than 500px", which `.modal-box` clears on its own, because a threshold the bug also passes is not a check.
+
+**Which rule is in force and which rule is wider are two different questions, and a short screen can only answer the first.** The replacement for that threshold compared the map against a nominal 46rem, and it was right on the machine it was written on and wrong on a hosted runner: `112vh` is one of the terms `.modal-box.board-box` minimises over, so on a 1024×768 display the map asks for 734px where an ordinary dialog would take 736 — correctly sized, by the rule that was supposed to win, and reported as a failure on every CI run since `112vh` arrived. Both rules are computed at whatever viewport the run happens to have, and what is asserted is that the width matches the map's own; that it is also the wider of the two is asked only where the screen can show it, and `skip()` says so out loud otherwise. Check it on a short window before trusting it — a temporary `setContentSize(1024, 660)` reproduces the runner, and weakening `.modal-box.board-box` back to `.board-box` there is what proves the check still bites.
+
+**A chooser is cards, and cards are equal by construction.** `1fr` columns give every card the same width whatever its paragraph says, so a longer description cannot quietly make one option look like the recommended answer. It is a separate dialog from the sheet on purpose: picking who you are is not the same act as reading your inventory, and the sheet's rows would have made it one. It has no close button and no Escape — it is a question, and dismissing a question leaves the game waiting for an answer that never comes. What closes it is the answer: a scene redrawn without cards has nothing left to ask, and the renderer keys on exactly that.
+
+**A board's markers, roads and labels are data, not paint.** The picture is scenery; the interactive layer is built by the renderer from the point list. That is not tidiness: the game this was built for shuffles which places connect on every run, so a painted map would be confidently wrong two runs in three, and a marker would sit wherever the artist put it rather than where the game says it is. Coordinates are percentages, so the same numbers work at any size and nothing has to know how big the image turned out. `#offered()` folds point actions in with the moves and the pressable rows — one guard for all three, or they drift.
+
+**`vector-effect: non-scaling-stroke` makes `stroke-width` a count of *device pixels*, not viewBox units.** The roads shipped at `0.4` and were drawn four tenths of a pixel wide — a map with no roads on it, from a stylesheet that read perfectly well. The smoke run now reads the computed `strokeWidth` rather than counting the elements, because counting them passed while the bug was on screen. Everything a board draws over artwork needs the same treatment a label does: a dark casing under each road and a dark plate under each name, or a thin line vanishes wherever the picture beneath it happens to match its brightness.
+
+**A backtick inside a template literal ends it.** `smoke.mjs` drives the renderer with `executeJavaScript(\`…\`)`, and a comment inside one of those strings mentioning a CSS property in backticks turned into `SyntaxError: missing ) after argument list` — thrown at *module load*, so Electron never reached `whenReady`, the 45-second watchdog never armed, no report was written and `npm run smoke` simply hung. `node --check scripts/smoke.mjs` answers in a second and is worth reaching for the moment a run stops producing a report at all.
+
+**A board picture comes from the plugin's data directory, not its installed tree.** That tree is deleted and rewritten on every update, so a map the *user* generated would vanish on a version bump. `@data` is a reserved first segment on `wasteland-plugin:` that routes to `pluginDataDir` instead; the confinement check afterwards is unchanged and does the same job for either root. The URL is built in the main process for the reason the audio bar records — the scheme and its encoding belong to the process that takes them apart again.
+
+**A scene with no presenter offers no moves.** Same rule as the transport's button list: a driver that went away takes its buttons with it. What the hero looked like stays on screen — that is a readable end state — but a control that is drawn and cannot work is worse than one that is absent.
+
+**A button that is not on screen cannot be pressed.** `act` refuses an id that is not in the current scene. A click carries an id the renderer read off a button, and a button can outlive the scene that drew it; a stale one firing a move in a world three turns further on is impossible to reproduce and easy to refuse.
+
+**The game panel is inside the chat column, not a fourth grid column.** The workspace picks its column count by aspect ratio, and a 4:3 panel has two — a game needing the third would be unplayable on half the shapes the layout already supports. So the strip and the action row sit in the chat column and the lists go in a dialog, which costs the transcript some height: the smoke run checks a 900×700 window with a game up and asserts the log still has 200px, because that is the shape where it is paid for.
 
 ## Traps
 
@@ -347,6 +455,19 @@ it becomes the drag target the instant it appears and flickers under the cursor.
 **Never build a PowerShell command by interpolating a path.** `psQuote` doubles apostrophes; without it a home directory
 like `C:\Users\O'Connor` closes the string early and the unpack fails on the user's own name.
 
+**`chcp` cannot fix the `cmd` it is written in front of.** An instance caches the console's output code page when it
+starts, so `chcp 65001>nul & dir` sets the page and then prints in the old one anyway — the line reads exactly like the
+fix and measures identically to no fix at all. Only a process started *afterwards* reads the new page, which is why
+`shellCommandFor` hands the approved command to a nested `cmd /d /s /c`. What it costs when it is missing is not
+cosmetic: in code page 437 `dir` writes a literal `?` for every character it cannot render, so a folder of Cyrillic
+filenames arrives as `??????-????.txt` and no decoding downstream can undo it — the loss happened inside `cmd`, and the
+model is then asked to summarise a row of question marks. `shell.test.mjs` forces the console back to 437 before each
+half, because the page is shared with whatever ran before and a run that left it at 65001 lets the broken version pass.
+
+**`npm test` from PowerShell can fail before Node is reached.** `npm.ps1` is blocked by the default ExecutionPolicy
+(`PSSecurityException`), which reads as a broken test script rather than a machine setting. `cmd /c npm test` runs, and
+so does `node --test test/*.test.mjs` — the tests themselves are not involved either way.
+
 ## Invariants
 
 **The system prompt must not contradict itself.** It once said "no markdown" one paragraph before requiring a fenced
@@ -359,41 +480,71 @@ returns plain objects; the renderer turns them into elements. A reply containing
 displayed rather than run, and the smoke test checks exactly that. Emphasis requires its delimiters to hug the text,
 or `2 * 3 * 4 = 24` comes out italicised.
 
-**There is no attach-to-an-existing-browser mode.** The app always launches its own Chrome. Driving tabs the user is
-working in, and leaving that browser open afterwards, makes every failure look like the app interfering with their
-session.
-
-**"Look it up before saying you do not know" lives inside the lookup section, not in the base rules.** A model that
-answers "I have no access to real-time information" while holding a search action is describing a session it is not in
-— it did exactly that for the date, two messages after using the same action for the weather. The instruction names the
-class (anything that moves with time: the date, weather, prices, scores, versions, who holds an office) rather than
-listing questions, and it is part of `WEB_LOOKUP`, so a session with lookup switched off never sees it. `prompts.test.mjs`
-asserts both halves — present with the capability, absent without it — because encouraging a tool that is not there is
-the same bug as forbidding one that is.
-
 **A disabled capability is absent from the system prompt, not forbidden in it.** A model told about a tool reaches for
 it, and the resulting refusal reads to the user as a bug. `buildSystemPrompt` assembles from parts; `prompts.test.mjs`
 guards this.
 
+**A numbered list is not a menu, and the model cannot draw a button.** A reply ending "1. Open it 2. Pick another
+version — which would you like?" is a control the user cannot press, and it was reported exactly that way, from a model
+that had already found the video it was asking permission to open. The ```choices fence is the cure: the model states
+the options as data, `parseChoices` reads them, and the renderer builds the buttons — the same bargain the scene panel
+and the audio bar strike, for the same reason. Pressing one goes through `submitPrompt`, so a chosen option takes
+exactly the path typed text takes and the busy check, the transcript entry and the hand-back on failure are not
+implemented twice. The prompt fragment naming the refusal is not optional decoration: a model that does not know the
+fence exists writes the numbered list, which is the failure this exists to prevent, and the same rule `audio-player`'s
+first fragment records.
+
+**The choice fence is absent whenever a game is driving the session.** Not qualified with an exception — the rule this
+file opens with, met from the other direction: it is the *app's* own text that has to go quiet. `fantasy-rpg` is a
+third-party plugin whose whole interaction is "press what the panel offers", and whose fragment says in as many words
+to end a turn on the scenery and never list the options. Shipping `OFFERING A CHOICE` unconditionally put the app's
+instruction against the plugin's, with the worked example on the app's side. It cost two things: replies ending in a
+menu the panel had already drawn, and — worse — "press one of the class cards on screen" from a model that had never
+called `fantasy_rpg`, so no cards existed. That plugin has no per-message hook; a run starts only when the model emits
+the action, and the section pulled it into describing the game instead of playing it.
+
+**The gate is a registered presenter, not a scene on screen.** `showingIn(chatId)` was written first and is the
+tighter, more careful-looking question — and it is open at the only moment that matters, because a run *starts* with
+the panel empty. `hasPresenter()` is true from the plugin's `activate`, which is also when its fragment enters the
+prompt, so the two go quiet together. The cost is that a game switched on takes the reply's own buttons out of every
+conversation; that is the right trade, since the game is the thing that breaks and switching the plugin off is one
+click on the row that turned it on. `agent.mjs` takes `scene` in its constructor for this and nothing else.
+
+**A rule the prompt keeps and a fact the service reports are two tests that both pass while the wiring is missing.**
+`prompts.test.mjs` proves `choices: false` removes the section, `scene.test.mjs` proves `hasPresenter` answers
+correctly, and the agent could simply never ask. `game-prompt.test.mjs` is the third test: it builds a real `Agent`
+over a real `Scene` and reads `contextFor` before and after a presenter registers, because the size of a prompt is the
+cheapest thing about it observable from outside. Check it fails with the flag hard-coded back to `true` before
+trusting it.
+
+**Only the newest offer is live, and a spent one stays on screen.** Those are two halves of one rule. A turn with
+follow-ups emits a `reply:end` — and therefore an offer — per model call, so without retiring the older row there are
+two sets of buttons answering a question that has one answer, the older about a world several steps back; that is the
+staleness `scene.act` refuses an unoffered id for. But the row is greyed rather than removed, because `stripBlocks`
+takes the fence out of the prose: delete the buttons and the user message that answered them is replying to nothing
+visible. Which way it went is read back off the message that follows, not stored.
+
+**`retireOffers` returns its own undo, and only one caller may retire.** `submitPrompt` hands the text back when
+`turn:start` never arrived, and an offer retired for a message that does not exist is a dead row with nothing on screen
+saying why. Retiring a second time from the click handler as well looked harmless and was not: the second call found
+nothing live left, so the restore it returned restored nothing, and a send that failed left the buttons dead. The
+smoke run caught it — nothing in the source distinguishes the working version from the broken one.
+
+**An offer is drawn on `reply:end`, which lands while the turn is still running.** So every button is born disabled,
+and `syncOfferBusy` in `setStreaming` is what hands them back — the mirror of `syncSceneBusy`, and load-bearing rather
+than cosmetic. The smoke check asserts `disabled` is false after the turn ends, because a row of buttons that is drawn,
+styled and permanently unpressable is the exact bug the whole feature was built to remove.
+
 **Chats persist the raw reply, fences and all.** The model needs to see its own actions on the next turn.
-`stripActionBlocks` is a *view*, applied at render time only. Never write stripped text back to storage.
+`stripBlocks` is a *view*, applied at render time only. Never write stripped text back to storage.
 
-**Roles are stored structurally.** The original stored a flat `> prompt\nreply` transcript because C had no JSON; here a
-reply that itself begins with `> ` cannot be mistaken for a new turn. There is a test for that specific case.
+**Roles are stored structurally, never as a flat `> prompt\nreply` transcript.** A reply that itself begins with `> `
+would otherwise be indistinguishable from the start of a new turn. There is a test for that specific case.
 
-**`web_lookup` uses a second, headless browser.** Its entire purpose is not disturbing the tab the user is looking at, so
-it must never share the visible session.
-
-**A step reporting `ok` means the engine resolved a target and acted on it — not that the page did what was wanted.**
-The feedback says so in those words, because an earlier "All N step(s) succeeded" let a model conclude a sort had
-applied when it had not, and repeat the identical batch five times. `BatchGuard` refuses an exact repeat within a turn
-and names a way forward; a bare refusal tends to produce the same batch again, apologetically.
+**Messages that go over the wire as the same role are joined before sending.** Mistral's chat template — and it is not alone — refuses anything but strict alternation after the system message, and it refuses by *raising inside the Jinja*: the request comes back 500 with a template traceback and nothing saying the conversation's shape is the problem. A real session hit it with two `tool` results in a row, because one reply emitted two action blocks and each result is appended separately. Every retry then appended another user turn to a list that could no longer be sent, so the chat was permanently dead — eleven messages ending `user, user, user`. `shapeForTemplate` runs on the way out and not in storage, which is what lets a conversation already wedged by this be sent again rather than lost. It also drops a leading assistant turn, since `fitToWindow` drops oldest-first and can uncover one, and it is idempotent so it can be applied again after that trim.
 
 **The follow-up loop is bounded** (`MAX_FOLLOW_UPS = 3`). A model that keeps emitting actions after every result will
 otherwise loop forever.
-
-**A failed browser step stops the batch.** Every following step assumes a page state that no longer holds; carrying on
-only piles up noise.
 
 **`reply:start` owes a `reply:end` on every path, including the failing one.** The start event puts a live,
 cursor-blinking element on screen; without the matching end a dead endpoint leaves a blinking cursor in the transcript
@@ -531,25 +682,6 @@ payloads rather than materialising them.
 With AUTO off the slider value is passed through **exactly**, including one the model cannot honour. An explicit
 setting that is silently overridden is worse than one that fails loudly.
 
-**Detecting an element by selector and then clicking it by label is not sound, and must not be reintroduced.** The
-engine offers both, but nothing ties them together: the label is re-resolved by the scorer and may land on a different
-element. The YouTube ad skipper was built this way and withdrawn — on a page where an ad overlays the player it clicked
-the ad, opening the advertiser in a new tab every 2.5 seconds. A convenience whose failure mode is worse than the
-problem it solves does not ship. Doing it properly needs a click-by-selector command in the engine.
-
-**`readText` falls back to the whole page body when its selector matches
-nothing** — the engine documents this in `page_text_probe.js`. Presence cannot be inferred from a non-empty answer:
-the ad watcher reads `body` as well and treats an identical answer as "not found". Without that it picked the first
-short line off YouTube and clicked it every few seconds. `scripts/adskip-live.mjs` has a bystander button that proves
-it does not.
-
-**The engine has no top-level JS evaluation.** `page.eval` and `page.url` exist only inside a handler callback, so an
-injected page-side watcher is not possible; detection has to go through `readText`/`read`/`state` and a DSL step. The
-binding exposes `session.pageEval`, which the engine answers with `unknown cmd`.
-
-**manul reuses one Chrome per profile.** Two `BrowserBridge` instances open at once look at the same page — which made
-a live check "fail" with nothing wrong in the code under test. Close one before opening another.
-
 **A chat id becomes a filename, so it is validated first.** `isSafeId` in `chats.mjs` admits only `[A-Za-z0-9_-]`.
 Ids arrive from IPC and are interpolated into a path; without the check a `../` in one would reach outside `chats/`.
 
@@ -558,6 +690,20 @@ nothing but `…-00001-of-00003.gguf`, and `resolveTarget` says so in a sentence
 downloads cleanly, is a real GGUF of a plausible size with a readable header, and is accepted into the vault — and then
 fails inside llama-server minutes later, long after the progress bar the user watched said it had arrived. The refusal
 is the only place they can still be told something useful.
+
+**A download claims its slot before the first `await`, not after.** `resolveTarget` is a network round trip for a repo
+id, and the guard used to sit in front of it while the `AbortController` was created behind: two clicks landing inside
+that window both read the slot as free, and the second overwrote the controller the first was holding — so CANCEL
+stopped one transfer while the other went on writing, with nothing on screen saying it was there. Three controls can
+start one (DOWNLOAD, RESUME, a search result) and each disables only itself, so the renderer cannot be the guard. A
+resolve that fails releases the slot and announces nothing: a `download:done` for a download that never started blanks
+the meter of nothing and writes over the line the rejected invoke is about to fill in.
+
+**A HuggingFace path is encoded segment by segment.** `encodeURI` leaves `#` and `?` alone, so a file named
+`model#2-Q4_K_M.gguf` reached `fetch` as a path ending at `model` with a fragment hanging off it — a 404 for a file
+plainly there, and the same hazard the media scheme records about a filename containing `#`. `encodeURIComponent` over
+the whole string is the other wrong answer: it eats the separators and asks for one oddly named file in the repo root.
+`downloadUrlFor` is the single encoder; `resolveTarget` used to carry a second copy and had no test on it.
 
 **A `.part` file surviving a failed download is the feature, not litter.** It is what `Range`-based resuming reads the
 offset from. `resumed` requires a 206 *and* bytes already on disk — a server volunteering 206 with nothing to resume
@@ -703,44 +849,24 @@ them; `applySettings` used to, and the label read `999` while AUTO was deciding.
 predates a flag we pass and the server exits with "invalid argument". `PINNED_TAG` is only a fallback for when the API
 is unreachable. When changing the flags in `server.mjs`, check them against a current build's `--help`.
 
-**`MANUL_BINARY` set by the user wins, and the app never writes it.** The bundled engine is passed per session as the
-binding's `binary` option instead of through `process.env` — an env mutation is permanent for the life of the process
-and invisible to anything reading it later. The option is omitted when the user set `MANUL_BINARY`, because an explicit
-option outranks the env var inside the binding and passing it would invert their override.
-
-**The browser engine's repository is `manul-browser`, not `Manul`.** The Go module is
-`github.com/alexbeatnik/manul-browser/core`. A local clone may sit under an older directory name, so `shared/engine.mjs`
-searches `../manul-browser`, `../Manul`, `../ManulEngineGo` in that order — canonical name first. Never hard-code one of
-them: an early version pinned `../Manul` and would have found nothing on any machine that cloned the repo by its real
-name.
-
-**There is no npm dependency on `manul-browser`, on purpose.** A `file:` dependency must hard-code one directory name,
-and npm resolves dependencies before any script could correct it. The binding is loaded by path at runtime
-(`loadBinding` in `browser/manul-browser.mjs`), trying the installed package first so this keeps working if the package
-is ever published.
-
-**The engine binary keeps the name `manul`.** That is manul-browser's own CLI name and what its `findBinary` looks for.
-Renaming the file to match this repo's naming would be wrong.
-
 ## Packaging
 
-`npm run engine` stages both halves into `resources/` — `bin/manul.exe` (built) and `manul-browser/` (the binding's
-compiled `dist`, copied). Both are gitignored build output. `npm run dist` re-stages, then runs electron-builder, which
-ships `resources/` through `extraResources`.
+`npm run dist` runs electron-builder and nothing else. Nothing is staged first: the release used to build the
+manul-browser engine from source — a second checkout, a Go toolchain and a TypeScript build before packaging could
+begin — and the engine is not part of the app any more. What ships is `src/`, the manifest, the licence and
+`node_modules`, which electron-builder prunes to the runtime dependencies itself.
 
-**A packaged app cannot reach the checkout**, so anything the engine or binding needs must be staged before the build.
-`resourceRoots()` in `browser/manul-browser.mjs` looks in `process.resourcesPath` first, then the repository's
-`resources/`. It deliberately does not consult `app.isPackaged`: in development `process.resourcesPath` points into
-Electron's own dist, which holds neither, so the check falls through on its own — and this file stays importable without
-`electron`, which is what lets `bundled.test.mjs` exercise the packaged path in plain Node.
-
-That test matters more than it looks: packaged-only resolution is invisible from source, and getting it wrong shows up
-as browser control silently missing in a shipped `.exe`.
+**A capability the app half-owns is one that cannot be uninstalled.** Browser control used to be four things at once: a
+built-in plugin, a `BrowserBridge` in the main process, two IPC handlers, and a pair of buttons with two status chips
+in the window. Switching the plugin off took the model's hands off a Chrome the app still owned and still had controls
+for, and the engine was compiled from a sibling checkout on every release. It is now one plugin in one repository,
+carrying its own engine, and the app has no browser at all — no service, no `resources/`, no Go in the workflow. When
+something similar is proposed, the question to ask is whether the app is still coherent with it uninstalled.
 
 ## Text handling
 
-`src/shared/render.mjs` holds the shaping both processes need (`ACTION_RE`, `stripActionBlocks`, `splitThinking`,
-`formatSize`). One definition imported twice, so main and renderer cannot drift on what counts as prose.
+`src/shared/render.mjs` holds the shaping both processes need (`ACTION_RE`, `CHOICES_RE`, `stripBlocks`,
+`splitThinking`, `formatSize`). One definition imported twice, so main and renderer cannot drift on what counts as prose.
 
 Action JSON arrives malformed often. `parseActionPayload` tries, in order: the first *balanced* `{...}` (string- and
 escape-aware, so a `}` inside the DSL does not truncate it), then a repair pass for the known truncation where a small
@@ -749,6 +875,10 @@ already failed — payloads that were invalid for a real reason must not be quie
 
 `<think>` is only recognised at the start of a line. Models discuss `<think>` in prose often enough that a naive match
 turns a normal answer into a dimmed reasoning block.
+
+The opener may carry attributes — `<think seconds="12">` gets the same treatment as `<think>`, since an unrecognised
+one costs twice: the deliberation is shown as the answer and then resent next turn as settled fact. The separator
+before the attributes is required rather than optional, so `<thinking>` stays a different tag with its own closer.
 
 ## Layout
 
