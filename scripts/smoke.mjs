@@ -48,6 +48,18 @@ function check(label, ok, detail = '') {
   if (!ok) failures.push(label);
 }
 
+/**
+ * A check this screen cannot answer, said out loud rather than passed.
+ *
+ * A hosted runner's display is 1024×768, which several of these need more room
+ * than — and a check quietly relaxed until it fits is worse than one that
+ * plainly did not run, because the relaxed one goes on reporting ok while the
+ * thing it was written for is unproven.
+ */
+function skip(label, reason) {
+  say(`  skip ${label} — ${reason}`);
+}
+
 function finish() {
   say(failures.length === 0 ? 'PASS' : `FAIL (${failures.length})`);
   try {
@@ -93,7 +105,7 @@ async function checkLayouts(window) {
 
   for (const shape of SHAPES) {
     if (shape.height > workArea.height - 60) {
-      say(`  skip ${shape.name} — taller than this display's work area (${workArea.height}px)`);
+      skip(shape.name, `taller than this display's work area (${workArea.height}px)`);
       continue;
     }
 
@@ -1610,6 +1622,7 @@ async function checkScene(window) {
       left: node.style.left,
       top: node.style.top,
     }));
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
     return {
       open: getComputedStyle(document.getElementById('board-modal')).display,
       points,
@@ -1622,10 +1635,14 @@ async function checkScene(window) {
       roadWidth: parseFloat(getComputedStyle(document.querySelector('#board .board-road')).strokeWidth),
       // A name on a busy drawing needs a plate under it, or it smears.
       labelPlate: getComputedStyle(document.querySelector('#board .board-label')).backgroundColor,
-      // The dialog, against what an ordinary dialog would have been: comparing
-      // two measurements survives a change of font size, where a number does not.
+      // The dialog, against the two rules that could be sizing it. An ordinary
+      // .modal-box asks for min(46rem, 92vw); .modal-box.board-box asks for
+      // min(90rem, 96vw, 112vh). Which of them won is readable straight off the
+      // width, and computing both here rather than naming a number survives a
+      // change of font size and a screen this was not written on.
       boxWidth: Math.round(document.querySelector('.board-box').getBoundingClientRect().width),
-      ordinary: Math.round(46 * parseFloat(getComputedStyle(document.documentElement).fontSize)),
+      ordinary: Math.round(Math.min(46 * rem, 0.92 * window.innerWidth)),
+      wanted: Math.round(Math.min(90 * rem, 0.96 * window.innerWidth, 1.12 * window.innerHeight)),
     };
   })()`);
   check('a move can open the board', map.open !== 'none', map.open);
@@ -1649,18 +1666,47 @@ async function checkScene(window) {
     map.labelPlate,
   );
   /**
-   * Wider than an ordinary dialog, not merely "wide".
+   * Sized by its own rule, and — where the screen allows it — wider than an
+   * ordinary dialog. Two questions, because only one of them is always askable.
    *
    * The first version asked for more than 500px, which `.modal-box` clears on
-   * its own — so it kept passing through a build where the rule meant to widen
-   * the map was being overridden by `.modal-box` further down the stylesheet,
-   * and the map sat at 46rem the whole time.
+   * its own, so it kept passing through a build where the rule meant to widen
+   * the map was overridden by `.modal-box` further down the stylesheet and the
+   * map sat at 46rem the whole time.
+   *
+   * The second compared it against a nominal 46rem, which is right on a screen
+   * with room and wrong on one without. `112vh` is one of the terms the map's
+   * own rule minimises over, so on a 768px display the map asks for 734px where
+   * an ordinary dialog would have taken 736 — correctly sized, by the rule that
+   * was supposed to win, and reported as a failure. A hosted runner is exactly
+   * that screen, which is where it was found.
+   *
+   * So what is asserted is which rule is in force, against both rules computed
+   * at whatever viewport this is running in. That the winner is also the wider
+   * of the two is a second question, and a short screen cannot answer it.
    */
-  check(
-    `and the map gets the window — ${map.boxWidth}px against an ordinary ${map.ordinary}px`,
-    map.boxWidth > map.ordinary * 1.2,
-    `${map.boxWidth} vs ${map.ordinary}`,
-  );
+  if (Math.abs(map.wanted - map.ordinary) <= 1) {
+    skip('the map is sized by its own rule', `both rules ask for ${map.wanted}px on this screen`);
+  } else {
+    check(
+      `the map is sized by its own rule — ${map.boxWidth}px, where an ordinary dialog would take ${map.ordinary}`,
+      Math.abs(map.boxWidth - map.wanted) <= 1,
+      `${map.boxWidth} against the ${map.wanted} its rule asks for`,
+    );
+  }
+
+  if (map.wanted > map.ordinary * 1.2) {
+    check(
+      `and the map gets the window — ${map.boxWidth}px against an ordinary ${map.ordinary}px`,
+      map.boxWidth > map.ordinary * 1.2,
+      `${map.boxWidth} vs ${map.ordinary}`,
+    );
+  } else {
+    skip(
+      'and the map gets the window',
+      `this screen tops the map out at ${map.wanted}px, where an ordinary dialog takes ${map.ordinary}`,
+    );
+  }
 
   // Counted from here rather than from before the map was opened: opening it is
   // itself a press, and the delta is the only thing that says the click landed.
