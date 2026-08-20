@@ -446,6 +446,19 @@ it becomes the drag target the instant it appears and flickers under the cursor.
 **Never build a PowerShell command by interpolating a path.** `psQuote` doubles apostrophes; without it a home directory
 like `C:\Users\O'Connor` closes the string early and the unpack fails on the user's own name.
 
+**`chcp` cannot fix the `cmd` it is written in front of.** An instance caches the console's output code page when it
+starts, so `chcp 65001>nul & dir` sets the page and then prints in the old one anyway — the line reads exactly like the
+fix and measures identically to no fix at all. Only a process started *afterwards* reads the new page, which is why
+`shellCommandFor` hands the approved command to a nested `cmd /d /s /c`. What it costs when it is missing is not
+cosmetic: in code page 437 `dir` writes a literal `?` for every character it cannot render, so a folder of Cyrillic
+filenames arrives as `??????-????.txt` and no decoding downstream can undo it — the loss happened inside `cmd`, and the
+model is then asked to summarise a row of question marks. `shell.test.mjs` forces the console back to 437 before each
+half, because the page is shared with whatever ran before and a run that left it at 65001 lets the broken version pass.
+
+**`npm test` from PowerShell can fail before Node is reached.** `npm.ps1` is blocked by the default ExecutionPolicy
+(`PSSecurityException`), which reads as a broken test script rather than a machine setting. `cmd /c npm test` runs, and
+so does `node --test test/*.test.mjs` — the tests themselves are not involved either way.
+
 ## Invariants
 
 **The system prompt must not contradict itself.** It once said "no markdown" one paragraph before requiring a fenced
@@ -669,6 +682,20 @@ downloads cleanly, is a real GGUF of a plausible size with a readable header, an
 fails inside llama-server minutes later, long after the progress bar the user watched said it had arrived. The refusal
 is the only place they can still be told something useful.
 
+**A download claims its slot before the first `await`, not after.** `resolveTarget` is a network round trip for a repo
+id, and the guard used to sit in front of it while the `AbortController` was created behind: two clicks landing inside
+that window both read the slot as free, and the second overwrote the controller the first was holding — so CANCEL
+stopped one transfer while the other went on writing, with nothing on screen saying it was there. Three controls can
+start one (DOWNLOAD, RESUME, a search result) and each disables only itself, so the renderer cannot be the guard. A
+resolve that fails releases the slot and announces nothing: a `download:done` for a download that never started blanks
+the meter of nothing and writes over the line the rejected invoke is about to fill in.
+
+**A HuggingFace path is encoded segment by segment.** `encodeURI` leaves `#` and `?` alone, so a file named
+`model#2-Q4_K_M.gguf` reached `fetch` as a path ending at `model` with a fragment hanging off it — a 404 for a file
+plainly there, and the same hazard the media scheme records about a filename containing `#`. `encodeURIComponent` over
+the whole string is the other wrong answer: it eats the separators and asks for one oddly named file in the repo root.
+`downloadUrlFor` is the single encoder; `resolveTarget` used to carry a second copy and had no test on it.
+
 **A `.part` file surviving a failed download is the feature, not litter.** It is what `Range`-based resuming reads the
 offset from. `resumed` requires a 206 *and* bytes already on disk — a server volunteering 206 with nothing to resume
 would otherwise open the writer in append mode. A server that ignores the range answers 200, and then starting over is
@@ -839,6 +866,10 @@ already failed — payloads that were invalid for a real reason must not be quie
 
 `<think>` is only recognised at the start of a line. Models discuss `<think>` in prose often enough that a naive match
 turns a normal answer into a dimmed reasoning block.
+
+The opener may carry attributes — `<think seconds="12">` gets the same treatment as `<think>`, since an unrecognised
+one costs twice: the deliberation is shown as the answer and then resent next turn as settled fact. The separator
+before the attributes is required rather than optional, so `<thinking>` stays a different tag with its own closer.
 
 ## Layout
 

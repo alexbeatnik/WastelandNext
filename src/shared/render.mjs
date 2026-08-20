@@ -216,11 +216,18 @@ export function parseChoices(text) {
  * often enough that a naive match turns a normal answer into a thinking block.
  * An unclosed opener runs to the end — that is a reply that was cut off
  * mid-thought, and showing the tail as an answer would be a lie.
+ *
+ * The opener may carry attributes. A finetune that emits `<think seconds="12">`
+ * is asking for exactly the same treatment as one that emits `<think>`, and an
+ * opener we do not recognise costs twice: the deliberation is shown as the
+ * answer, and `stripThinking` then sends it back next turn as settled fact. The
+ * separator before the attributes is required rather than optional, so
+ * `<thinking>` — a different tag, with its own closer — is still not this one.
  */
 export function splitThinking(text) {
   const source = String(text ?? '');
   const segments = [];
-  const re = /(?:^|\n)[ \t]*<think>([\s\S]*?)(?:<\/think>|$)/g;
+  const re = /(?:^|\n)[ \t]*<think(?:\s[^>]*)?>([\s\S]*?)(?:<\/think\s*>|$)/g;
   let cursor = 0;
 
   for (const match of source.matchAll(re)) {

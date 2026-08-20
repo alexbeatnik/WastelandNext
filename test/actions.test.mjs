@@ -127,6 +127,22 @@ test('splitThinking drops an empty reasoning block', () => {
   assert.deepEqual(splitThinking('<think></think>\nHi.'), [{ kind: 'text', content: 'Hi.' }]);
 });
 
+test('splitThinking reads an opener that carries attributes', () => {
+  // A finetune emitting `<think seconds="12">` wants the same treatment as one
+  // emitting `<think>`, and an unrecognised opener costs twice: the
+  // deliberation is shown as the answer and then resent as settled fact.
+  const segments = splitThinking('<think seconds="12">\nweigh it\n</think >\nThe answer is 42.');
+  assert.deepEqual(segments, [
+    { kind: 'think', content: 'weigh it' },
+    { kind: 'text', content: 'The answer is 42.' },
+  ]);
+});
+
+test('splitThinking leaves <thinking> alone — it is a different tag', () => {
+  const text = '<thinking>\nnot ours\n</thinking>';
+  assert.deepEqual(splitThinking(text), [{ kind: 'text', content: text }]);
+});
+
 test('an action written without its fence still runs, for a type that exists', () => {
   // Reported as a playlist that never played: the model emitted the object
   // alone on a line and the JSON was printed at the user instead of being run.

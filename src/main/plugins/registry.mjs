@@ -64,9 +64,12 @@ import { normaliseCategory } from '../../shared/categories.mjs';
  * screen does rather than the way the repositories were created.
  *
  * Adding to this list is a decision about what this build vouches for, and it is
- * not the same act as a user adding a registry. Everything downstream is
- * unchanged — a checksum is still mandatory, an archive is still checked before
- * it is unpacked, and code still runs only once somebody switches it on.
+ * not the same act as a user adding a registry. Not every index here is this
+ * project's own repository either, which is the half worth being deliberate
+ * about: listing one says the plugin is worth offering, not that the code was
+ * written here. Everything downstream is unchanged whichever it is — a checksum
+ * is still mandatory, an archive is still checked before it is unpacked, and
+ * code still runs only once somebody switches it on.
  */
 export const SHIPPED_REGISTRIES = [
   'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-manul-browser/main/index.json',
@@ -74,6 +77,7 @@ export const SHIPPED_REGISTRIES = [
   'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-audio-player/main/index.json',
   'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-reminders/main/index.json',
   'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-space-trader/main/index.json',
+  'https://raw.githubusercontent.com/awakeserg/wasteland-plugin-fantasy-rpg/main/index.json',
   'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-ukrainian/main/index.json',
   'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-phosphor-themes/main/index.json',
 ];

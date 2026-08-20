@@ -110,6 +110,28 @@ test('builds a resolve URL, encoding an awkward filename', () => {
   );
 });
 
+test('encodes a filename that would otherwise end the path early', () => {
+  // `encodeURI` leaves `#` and `?`, so this URL used to reach fetch as a path
+  // ending at `model` with a fragment after it — a 404 for a file plainly there.
+  assert.equal(
+    downloadUrlFor('owner/repo', 'model#2-Q4_K_M.gguf'),
+    'https://huggingface.co/owner/repo/resolve/main/model%232-Q4_K_M.gguf',
+  );
+  assert.equal(
+    downloadUrlFor('owner/repo', 'model?x-Q4_K_M.gguf'),
+    'https://huggingface.co/owner/repo/resolve/main/model%3Fx-Q4_K_M.gguf',
+  );
+});
+
+test('a nested path stays a path', () => {
+  // Encoding the whole string in one go would turn the separators into %2F and
+  // ask HuggingFace for one very oddly named file in the root of the repo.
+  assert.equal(
+    downloadUrlFor('owner/repo', 'Q4_K_M/model 1.gguf'),
+    'https://huggingface.co/owner/repo/resolve/main/Q4_K_M/model%201.gguf',
+  );
+});
+
 /* ============================ search ============================ */
 
 test('shapes a search hit down to what the list shows', () => {

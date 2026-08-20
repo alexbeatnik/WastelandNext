@@ -152,6 +152,7 @@ and the workflow that publishes it:
 [reminders](https://github.com/alexbeatnik/wasteland-plugin-reminders),
 [browser control](https://github.com/alexbeatnik/wasteland-plugin-manul-browser),
 [Space Trader](https://github.com/alexbeatnik/wasteland-plugin-space-trader),
+[Fantasy RPG](https://github.com/awakeserg/wasteland-plugin-fantasy-rpg),
 [Ukrainian](https://github.com/alexbeatnik/wasteland-plugin-ukrainian) and
 [phosphor themes](https://github.com/alexbeatnik/wasteland-plugin-phosphor-themes).
 

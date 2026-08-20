@@ -255,20 +255,37 @@ export function registerIpc(windowGetter) {
     return { ...outcome, models: await models.listLocal() };
   });
   handle('models:download', async (input) => {
+    // The slot is claimed before the first `await`. `resolveTarget` is a network
+    // round trip for a repo id, and two clicks landing inside it both read
+    // `download` as null: the second then overwrites the controller the first is
+    // holding, so CANCEL stops one transfer while the other goes on writing with
+    // nothing on screen saying it is there. Three buttons can start a download —
+    // DOWNLOAD, RESUME and a search result — and each disables only itself.
     if (download) throw new Error('a download is already running');
-    const target = await models.resolveTarget(input);
-    download = new AbortController();
+    const controller = (download = new AbortController());
+
+    let target;
+    try {
+      target = await models.resolveTarget(input);
+    } catch (err) {
+      // Nothing was announced, so nothing is concluded: a `download:done` for a
+      // download that never started would blank the meter of nothing and write
+      // over the status line the rejected invoke is about to fill in.
+      download = null;
+      throw err;
+    }
+
     send('download:start', target);
     try {
       const result = await models.download({
         ...target,
-        signal: download.signal,
+        signal: controller.signal,
         onProgress: (progress) => send('download:progress', progress),
       });
       send('download:done', result);
       return result;
     } catch (err) {
-      const cancelled = download.signal.aborted;
+      const cancelled = controller.signal.aborted;
       send('download:done', { cancelled, error: cancelled ? '' : err.message });
       throw cancelled ? new Error('download cancelled') : err;
     } finally {

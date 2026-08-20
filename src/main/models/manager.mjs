@@ -12,6 +12,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import * as config from '../config.mjs';
 import { modelsDir } from '../paths.mjs';
 import { RateMeter } from './rate.mjs';
+import { downloadUrlFor } from './search.mjs';
 
 /** Quantisations we prefer when a repo offers several, best trade-off first. */
 const QUANT_PREFERENCE = ['q4_k_m', 'q4_k_s', 'q4_0', 'q5_k_m', 'q8_0'];
@@ -121,7 +122,9 @@ export async function resolveTarget(input) {
     throw new Error(`no .gguf files in ${value}`);
   }
   return {
-    url: `https://huggingface.co/${value}/resolve/main/${encodeURI(filename)}`,
+    // One encoder, in one place: `encodeURI` here and there was two chances
+    // to get `#` in a filename wrong, and this half had no test on it at all.
+    url: downloadUrlFor(value, filename),
     filename: basename(filename),
   };
 }
