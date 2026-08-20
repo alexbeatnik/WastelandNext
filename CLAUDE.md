@@ -216,6 +216,13 @@ downloaded and unpacked, and anything on the path could rewrite it — with loop
 sit on. Two registries publishing the same id is a fork or a mirror rather than an error, so the newest wins; what
 makes that safe is that it is not silent, and the source label travels with the entry to the row.
 
+**Adding to `SHIPPED_REGISTRIES` is a different act from a user adding one, and not every entry is ours.** The user's
+own registries are a widening of *their* trust; the shipped list is this build saying a plugin is worth offering, which
+is not the same claim as having written it — one of the indexes is another account's repository, and the order is the
+one the plugin sections are drawn in rather than the order they were added. What makes either safe is that nothing
+downstream cares which it was: the checksum is still mandatory, `assertSafeArchive` still reads the archive before it
+is unpacked, and code still runs only once somebody switches it on.
+
 **One registry failing must not empty the list, and *all* of them failing must not hide which were asked.** `fetchIndex`
 reports per source and never throws: it returns `error` only when nothing answered, because throwing lost exactly the
 thing worth showing in that state. Removing the broken registry is how the user gets the list back, and they cannot
@@ -531,8 +538,8 @@ styled and permanently unpressable is the exact bug the whole feature was built 
 **Chats persist the raw reply, fences and all.** The model needs to see its own actions on the next turn.
 `stripBlocks` is a *view*, applied at render time only. Never write stripped text back to storage.
 
-**Roles are stored structurally.** The original stored a flat `> prompt\nreply` transcript because C had no JSON; here a
-reply that itself begins with `> ` cannot be mistaken for a new turn. There is a test for that specific case.
+**Roles are stored structurally, never as a flat `> prompt\nreply` transcript.** A reply that itself begins with `> `
+would otherwise be indistinguishable from the start of a new turn. There is a test for that specific case.
 
 **Messages that go over the wire as the same role are joined before sending.** Mistral's chat template — and it is not alone — refuses anything but strict alternation after the system message, and it refuses by *raising inside the Jinja*: the request comes back 500 with a template traceback and nothing saying the conversation's shape is the problem. A real session hit it with two `tool` results in a row, because one reply emitted two action blocks and each result is appended separately. Every retry then appended another user turn to a list that could no longer be sent, so the chat was permanently dead — eleven messages ending `user, user, user`. `shapeForTemplate` runs on the way out and not in storage, which is what lets a conversation already wedged by this be sent again rather than lost. It also drops a leading assistant turn, since `fitToWindow` drops oldest-first and can uncover one, and it is idempotent so it can be applied again after that trim.
 

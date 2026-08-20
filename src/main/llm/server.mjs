@@ -1,11 +1,11 @@
 /**
  * The llama-server child process.
  *
- * Inference runs out-of-process for the same reason OS-Manul does it: a GGUF
- * load is seconds long and a crash inside a native inference library would take
- * the whole window with it. What we get back is an OpenAI-compatible HTTP
- * endpoint, so the client in `client.mjs` talks to a spawned server and to a
- * remote one through exactly the same code path.
+ * Inference runs out-of-process because a GGUF load is seconds long and a crash
+ * inside a native inference library would take the whole window with it. What we
+ * get back is an OpenAI-compatible HTTP endpoint, so the client in `client.mjs`
+ * talks to a spawned server and to a remote one through exactly the same code
+ * path.
  */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';

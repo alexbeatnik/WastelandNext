@@ -2,11 +2,10 @@
 
 **A local LLM terminal you can teach new tricks.** Amber-on-black CRT interface, Electron, no cloud required.
 
-Wasteland Next is the [Wasteland Terminal](https://github.com/alexbeatnik/wasteland) interface rebuilt on Electron, with
-the agent pipeline from [OS-Manul](https://github.com/alexbeatnik/OS-MANUL) underneath it. The look is the original's;
-the security architecture is not — there is no seccomp lockdown, no encrypted chat store, no sandboxed executor. What
-replaces them is a plugin system: everything the model may *do* arrives as a plugin, is listed on a row you can read,
-and is switched on by you.
+There is no sandbox here, no encrypted chat store and no locked-down executor. What stands in for them is the plugin
+system: everything the model may *do* arrives as a plugin, is listed on a row you can read, and is switched on by you —
+and a capability that is switched off is absent from the system prompt rather than described to the model and then
+refused.
 
 That includes driving a browser, which used to be built in and is now
 [a plugin of its own](https://github.com/alexbeatnik/wasteland-plugin-manul-browser) carrying the
@@ -29,10 +28,19 @@ installed. Two ship inside the app because they reach this machine's own files a
 them to come from; everything else, browser control included, is installed from a registry. See [Plugins](#plugins)
 below.
 
-Replies are rendered as markdown — headings, lists, links, emphasis, inline code and code blocks. The original forbade
-it because Nuklear drew glyphs rather than documents, so `**bold**` reached the user as four asterisks; this view can
-draw it, so the model is allowed to use it. The text is parsed into plain data and built into DOM nodes, never assigned
-as HTML, so a reply that happens to contain markup is displayed rather than executed.
+Replies are rendered as markdown — headings, lists, links, emphasis, inline code and code blocks. The system prompt
+permits it because this view can draw it: a rule forbidding what the interface renders perfectly well buys nothing and
+costs a model real time deliberating over whether a fenced action block counts as formatting. The text is parsed into
+plain data and built into DOM nodes, never assigned as HTML, so a reply that happens to contain markup is displayed
+rather than executed.
+
+**A reply can end in buttons.** A numbered list is not a menu: "1. Open it 2. Show other versions — which would you
+like?" is a control nobody can press, and it was the only thing a model could produce. A reply may instead end in a
+fenced `choices` block stating the options as data; the app reads it, draws a button each, and pressing one sends that
+text down exactly the path typed words take. The fence itself is never shown. Only the newest offer is live — a turn
+with follow-ups can put two on screen, and the older one is answering a question about a world several steps back — but
+a spent row is greyed rather than removed, because the fence is stripped out of the prose and deleting the buttons would
+leave the message that answered them replying to nothing visible.
 
 **Thinking** is off by default and toggled beside the composer. Off, the model is asked to skip reasoning in the two
 ways that work — a hard budget and the chat template's own flag — and whatever still arrives is hidden. It is shown
@@ -72,10 +80,12 @@ credential directories — `.ssh`, `.aws`, `.gnupg` and friends — are refused 
 
 ## Plugins
 
-Everything the model may *do* is a plugin. The four capabilities above ship with the app and cannot be removed, only
-switched off; **GET PLUGINS** lists what the registries offer — with icons, descriptions, and an UPDATE button when a
-newer version is published — and installs into the data directory on a click. The app ships knowing one repository per
-plugin, listed in [`registry.mjs`](src/main/plugins/registry.mjs), and a user may add more.
+Everything the model may *do* is a plugin. Two of them — the file reader and the shell — ship inside the app and cannot
+be removed, only switched off; **GET PLUGINS** lists what the registries offer — with icons, descriptions, and an UPDATE
+button when a newer version is published — and installs into the data directory on a click. The app ships knowing one
+repository per plugin, listed in [`registry.mjs`](src/main/plugins/registry.mjs), and a user may add more. Listing one
+there is this build saying a plugin is worth offering, not that the code was written here — a couple of them are other
+people's repositories.
 
 A plugin contributes its action handlers **and** the slice of the system prompt that documents them, in one act. That
 is the point of the indirection: a switched-off capability is absent from the prompt rather than described and then
@@ -93,6 +103,23 @@ its row. Installing is not switching on — a directory that appeared in `plugin
 `wasteland-plugin://` scheme, because `style-src 'self'` on a `file://` page rejects both an inline `<style>` built
 from IPC text and a stylesheet in another directory. Scripts stay `'self'` alone — no plugin runs code in the chat
 window, which is why one that wants to play audio asks the app for the `audio` service instead of shipping a player.
+
+**Languages** are chosen in INTERFACE too, and are the same kind of thing a theme is: a manifest, a dictionary, no code
+to approve. The app captures its own markup at boot and swaps the strings it recognises, and it skips any node holding
+something neither it captured nor last wrote — the mic button gains the name of whichever plugin is listening, and
+putting the original English back over that would be an erasure rather than a translation. Anything written while the
+app runs goes through the same dictionary instead. The
+[Ukrainian](https://github.com/alexbeatnik/wasteland-plugin-ukrainian) pack is the worked example.
+
+**A plugin can put a game in the chat window.** The `scene` service is the bargain the audio bar strikes, played out at
+a larger size: a plugin cannot run code in this window, so it holds the game and says what the panel *contains* — a
+hero strip with meters, a row of moves, an inventory, a journal, a chooser of cards, a map with markers and roads — and
+every node on screen is built here from a document with a fixed set of keys. The app assigns the hotkeys by position,
+so no two moves can claim the same digit, and a digit typed into the composer stays a digit. A move is sent by the
+window down exactly the path typed text takes, which is also what stops a game looping: nothing in the service can
+start a turn, so a move happens because somebody pressed a key. The panel belongs to the conversation the game is
+played in, and is drawn nowhere else. [Space Trader](https://github.com/alexbeatnik/wasteland-plugin-space-trader) and
+[Fantasy RPG](https://github.com/awakeserg/wasteland-plugin-fantasy-rpg) both drive it.
 
 **Audio** is the smallest part of a music player that cannot be a plugin: an `<audio>` element, the transport bar under
 the transcript, and a scheme that serves one file with Range support so seeking works. It has no queue, no shuffle and
@@ -115,6 +142,15 @@ typed; a reminder coming due is not. The `notify` service puts a card in the tra
 system notification, because neither is enough alone — the first is invisible to somebody in another window, the second
 is gone the moment it is dismissed. Notices raised before the window was listening are kept and shown on the way in,
 which is how a reminder that came due while the app was closed still reaches you.
+
+**A setting can be drawn twice.** Every control on a plugin's row is declared in its manifest — a folder to pick, an
+endpoint to type, a list to choose from — so the row can be drawn before a line of the plugin's code has run, and a
+value it never offered is refused. A row in PLUGINS is where a plugin is *decided* about, beside its description and
+the switch that turns it off, and a poor place to actually *use* one: a music folder and a model size get changed far
+more often than the plugin gets reconsidered, and reaching either meant opening the section and reading a dozen rows.
+A manifest may therefore ask for a section of its own in the left panel, drawn from the same declarations, with nothing
+for the plugin's code to do — and it goes away with the plugin, because a control that cannot work is worse than one
+that is absent.
 
 **A plugin keeps its own state.** Settings are the questions its manifest asked you and each one is a control on its
 row; a list of reminders is neither of those, so a plugin also gets one JSON document of its own under `plugin-state/`,
@@ -219,9 +255,8 @@ button that could only fail. Downloading a new portable exe is the whole update.
 
 Nothing is signed, so SmartScreen warns on first run and after each update.
 
-The packaged app is the app and its plugins' host, nothing else: capabilities are installed from a registry at
-runtime, so a release does not have to carry them. It still needs `llama-server` (or a remote endpoint) for inference.
-The build is unsigned — Windows SmartScreen will warn on first run.
+The packaged app is the app and its plugins' host, nothing else: capabilities are installed from a registry at runtime,
+so a release does not have to carry them. It still needs `llama-server` (or a remote endpoint) for inference.
 
 ## First run
 
@@ -365,13 +400,20 @@ src/
 │   ├── config.mjs          persisted settings
 │   ├── chats.mjs           one JSON file per chat
 │   ├── paths.mjs           data root, injected at boot so the rest stays testable
+│   ├── updater.mjs         the release feed, and shutting everything down before it installs
+│   ├── audio.mjs           audio output, driven by whichever plugin wants it
+│   ├── mic.mjs             the microphone, driven by whichever plugin can transcribe
+│   ├── notify.mjs          the one message with no question in front of it
+│   ├── scene.mjs           the game panel: what a plugin says it holds, drawn by the app
 │   ├── llm/
 │   │   ├── server.mjs      llama-server child process
 │   │   ├── client.mjs      OpenAI-compatible streaming, endpoint-agnostic
 │   │   ├── tools.mjs       fetching llama-server when there is none
 │   │   ├── gguf.mjs        model header parsing + context sizing
 │   │   ├── gpu.mjs         VRAM detection, layer fitting, context trade
+│   │   ├── offload.mjs     reading where the weights actually went, in bytes not layers
 │   │   ├── failure.mjs     turning a crash log into a sentence
+│   │   ├── zip.mjs         reading an archive's directory before anything is unpacked
 │   │   └── port.mjs        refusing to start onto an occupied port
 │   ├── models/
 │   │   ├── manager.mjs     vault scan, HuggingFace resolve, resumable download
@@ -382,8 +424,8 @@ src/
 │   │   ├── host.mjs        the registry: discovery, activation, contributions
 │   │   ├── manifest.mjs    validating what a plugin claims about itself
 │   │   ├── registry.mjs    the published index: fetch, verify, install, remove
+│   │   ├── state.mjs       one JSON document per plugin, outside its installed tree
 │   │   └── protocol.mjs    serving a plugin's files and one audio file
-│   ├── audio.mjs           audio output, driven by whichever plugin wants it
 │   └── agent/
 │       ├── agent.mjs       the turn pipeline, compaction, window budgeting
 │       ├── attach.mjs      files and folders the user put in front of the model
@@ -400,30 +442,39 @@ src/
     ├── render.mjs          text shaping both processes need
     ├── markdown.mjs        markdown → data the renderer builds nodes from
     ├── media.mjs           MIME types, Range parsing, clock formatting
+    ├── categories.mjs      the plugin sections, and the order they are drawn in
+    ├── updates.mjs         what an update is doing, in words both processes agree on
     └── schemes.mjs         how a wasteland-plugin:// or wasteland-media:// URL is spelled
 ```
 
 ## Testing
 
 ```bash
-npm test       # 495 unit tests, no Electron, no network
+npm test       # 552 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
 ```
 
-`npm test` covers the pure logic: action extraction and its JSON repair, `<think>` splitting and stripping, markdown
-parsing, chat storage and id validation, path vetting, HuggingFace URL rewriting and quantisation choice, prompt
-assembly, plugin manifest validation and host activation, registry entries and version comparison, Range parsing and
-custom-scheme URLs, GGUF header parsing and the context/GPU arithmetic, the compaction threshold and the window
-backstop, folder collection and its budget, download speed and resume, and crash-log summarising.
+`npm test` covers the pure logic: action extraction and its JSON repair, the `choices` fence, `<think>` splitting and
+stripping, markdown parsing, chat storage and id validation, path vetting, HuggingFace URL building and quantisation
+choice, prompt assembly, plugin manifest validation and host activation, the scene document and what a game may offer,
+registry entries and version comparison, Range parsing and custom-scheme URLs, GGUF header parsing and the context/GPU
+arithmetic, the compaction threshold and the window backstop, folder collection and its budget, download speed and
+resume, notices, dictation, and crash-log summarising.
 
-`npm run smoke` boots the real window offscreen — 225 checks — and covers what unit tests cannot: a renderer that throws
+`npm run smoke` boots the real window offscreen — 285 checks — and covers what unit tests cannot: a renderer that throws
 on boot, a preload that failed to expose its bridge, an IPC channel renamed on one side only, a layout that breaks at
 one screen shape, or a control that stops resetting what it should. It clicks NEW CHAT, presses Enter, attaches a
 folder and detaches one of two, switches a plugin off and checks the main process agrees, allows a plugin that brings
-code and watches it start, installs a theme and asserts the window actually repaints, plays a real audio file through
-the media scheme, presses one of the options an action offered and checks the plugin answered, deletes a conversation
-from the picker without opening it, opens the About box and checks every link in it would leave the window, resizes through seven screen shapes, and checks that a reply containing
-`<img onerror=…>` is drawn as text rather than run.
+code and watches it start, installs a theme and asserts the window actually repaints, translates the interface and puts
+the English back, plays a real audio file through the media scheme, presses a button a reply offered and checks the
+words went out as an ordinary message, plays a turn of a game — hotkeys, the sheet, the map, a chooser — and checks a
+digit typed into the composer stays a digit, deletes a conversation from the picker without opening it, opens the About
+box and checks every link in it would leave the window, resizes through seven screen shapes, and checks that a reply
+containing `<img onerror=…>` is drawn as text rather than run.
+
+A check the running screen cannot answer is reported as `skip` with the reason, never quietly relaxed until it fits. A
+hosted runner's display is 1024×768: every layout shape goes unasked there, and the map is checked against the rule
+that is actually sizing it rather than against an ordinary dialog it cannot outgrow on a screen that short.
 
 Where a fix is for something a user reported, the test reproduces *their* case rather than a tidy abstraction of it:
 the numbers in the GPU tests are a 25 GB model on a 12 GB card, the context tests use 4594 of 4608, and the crash-log
@@ -441,39 +492,24 @@ version, not this app's, because `app.getVersion()` falls back to it when it can
 precisely what running the smoke script does. The version is read from `package.json` directly now, and the check
 compares against that same manifest rather than against a pattern.
 
-## How it differs from the original
-
-| | Wasteland | Wasteland Next |
-|---|---|---|
-| Language | C11 + Nuklear + SDL2 | Electron |
-| Inference | llama.cpp linked in | `llama-server` subprocess, OpenAI-compatible |
-| Network | seccomp kills any new socket after load | open — model downloads and whatever a plugin needs |
-| Chat store | XChaCha20-Poly1305 | plain JSON |
-| Agent | sandboxed filesystem tools | read-only file, gated shell, and whatever is installed |
-| Context | fixed window, no compaction | budgeted against the reply, compacted, with a hard backstop |
-| Layout | fixed panels | aspect-ratio responsive |
-| Replies | plain text — Nuklear drew glyphs, not documents | markdown, parsed to data and built as DOM nodes |
-| Context / offload | fixed `N_CTX`, `-ngl` as set | sized from the model header and the card |
-
 ## Known gaps
 
-- Browser control is a separate download, and its archive carries a compiled engine — so it is published per platform,
-  and the index offers the Windows build. An index entry has no field for the platform it runs on.
-- `web_lookup` reads DuckDuckGo result text. It has no AI-overview extraction and no CAPTCHA handling.
+- An index entry has no field for the platform it runs on. That matters for a plugin whose archive carries a compiled
+  binary — browser control is published per platform, and the index offers the Windows build.
 - VRAM is detected through `nvidia-smi` only. On an AMD or Intel card the offload is left exactly as configured, because
   a wrong number would be worse than none — Windows reports 4 GB for anything larger.
 - Only Windows is packaged so far. macOS and Linux targets are a config change away but have not been built or tested.
-- Builds are unsigned; there is no auto-update feed.
+- Builds are unsigned, so SmartScreen warns on first run and after every update. The update feed itself works: a release
+  carrying `latest.yml` is picked up by every installed copy, and the portable exe says plainly that it cannot self-update
+  rather than offering a button that could only fail.
 - Compaction is triggered by an estimated token count, not a real one — the endpoint only reports actual usage after
   the fact. The estimate counts Latin and Cyrillic separately (about 3.6 and 1.6 characters to the token), because one
   ratio for both undercounted a Ukrainian conversation by roughly half.
 - An attached folder is read once, at the moment it is sent. Nothing watches it afterwards, so a file edited later is
   the version the model first saw until you attach it again.
 - There is no agent mode. The model reads what you attach and answers in the chat; it cannot edit or write anything.
-- There is no automatic ad skipping. It was built and withdrawn: the engine can find an element by CSS selector and it
-  can click one by its visible label, but it cannot click *the element the selector found*. On a page where an ad
-  overlays the player, the label resolved to the ad instead of the skip button and opened the advertiser in a new tab,
-  repeatedly. Doing this properly needs a click-by-selector primitive in the engine.
+- Whatever a plugin does is that plugin's own gap now, not this repository's. Browser control's DuckDuckGo lookup and
+  its withdrawn ad skipper both moved out with the engine when it stopped being built in.
 
 ## License
 
