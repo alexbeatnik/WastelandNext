@@ -376,11 +376,14 @@ test('a plugin answering with nothing is answered with nothing', async () => {
 test('a game cannot start a turn on its own', () => {
   // `act` hands the words back rather than sending them, and nothing else here
   // returns a `submit` at all. A move is sent because a person pressed a key.
+  // The two `claim` methods say which conversation the panel belongs to and
+  // send nothing; the list is here so that a method which *could* send has to
+  // be added to it on purpose.
   const scene = new Scene();
   const surface = Object.getOwnPropertyNames(Object.getPrototypeOf(scene));
   assert.deepEqual(
     surface.filter((name) => name !== 'constructor' && !name.startsWith('#')).sort(),
-    ['act', 'claimTurn', 'clear', 'hasPresenter', 'present', 'releasePlugin', 'setTurn', 'show', 'status'],
+    ['act', 'claimFor', 'claimTurn', 'clear', 'hasPresenter', 'present', 'releasePlugin', 'setTurn', 'show', 'status'],
   );
 });
 

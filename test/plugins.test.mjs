@@ -131,6 +131,85 @@ test('a panel heading is cut to something a narrow column can hold', () => {
   assert.equal(parseManifest({ ...GOOD, settings, panel: 'TWO\nWORDS' }).manifest.panel, 'TWO WORDS');
 });
 
+/* ============================ buttons in the panel ============================ */
+
+/**
+ * A control that does something, drawn where the settings are.
+ *
+ * Every other setting type is a question whose answer the app stores. A game
+ * needs NEW GAME and LOAD GAME beside its language — things that happen when
+ * they are pressed — and the plugin's row and its panel section are built from
+ * the settings list, so there was nowhere else to put them.
+ */
+test('a button is a setting that stores nothing', () => {
+  const settings = [{ key: 'newGame', type: 'button', label: 'NEW GAME', hint: 'a fresh commander' }];
+  const parsed = parseManifest({ ...GOOD, settings, panel: 'GAME' });
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.manifest.settings[0].type, 'button');
+  assert.equal(parsed.manifest.settings[0].hint, 'a fresh commander');
+  // A button counts as something to put in a panel section: it is a control.
+  assert.equal(parsed.manifest.panel, 'GAME');
+});
+
+test('a hint is cut to a tooltip, and absent by default', () => {
+  const long = parseManifest({ ...GOOD, settings: [{ key: 'k', type: 'button', label: 'GO', hint: 'x'.repeat(400) }] });
+  assert.equal(long.manifest.settings[0].hint.length, 200);
+  const none = parseManifest({ ...GOOD, settings: [{ key: 'k', type: 'text', label: 'K' }] });
+  assert.equal(none.manifest.settings[0].hint, '');
+});
+
+test('nothing can be stored against a button', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-button-'));
+  install(root, 'game', {
+    manifest: { settings: [{ key: 'newGame', type: 'button', label: 'NEW GAME' }], panel: 'GAME' },
+    source: 'export function activate() {}',
+  });
+  const host = await installedHost(root, { game: { enabled: true, approved: true } });
+
+  // A value written against a button would come back out of store.get() as
+  // though somebody had chosen it, and the plugin has no code for that.
+  await assert.rejects(() => host.setSetting('game', 'newGame', 'yes'), /button/);
+});
+
+test('a button press reaches the plugin, and answers as a move does', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-press-'));
+  install(root, 'game', {
+    manifest: { settings: [{ key: 'load', type: 'button', label: 'LOAD GAME' }], panel: 'GAME' },
+    source: `export function activate(ctx) { ctx.onButton((key) => ({ status: "pressed " + key, sheet: true })); }`,
+  });
+  const host = await installedHost(root, { game: { enabled: true, approved: true } });
+
+  const answer = await host.pressButton('game', 'load');
+  assert.equal(answer.status, 'pressed load');
+  assert.equal(answer.sheet, true);
+});
+
+test('a button nobody declared, and a button nobody answers', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-press-bad-'));
+  install(root, 'game', {
+    manifest: { settings: [{ key: 'load', type: 'button', label: 'LOAD' }, { key: 'lang', type: 'text', label: 'Language' }] },
+    source: 'export function activate() {}',
+  });
+  const host = await installedHost(root, { game: { enabled: true, approved: true } });
+
+  await assert.rejects(() => host.pressButton('game', 'nope'), /no button/);
+  // A text field is not a button, however it is pressed.
+  await assert.rejects(() => host.pressButton('game', 'lang'), /no button/);
+  // Declared and unanswered is the failure worth a sentence: a control drawn on
+  // somebody's panel that silently does nothing looks like a broken app.
+  await assert.rejects(() => host.pressButton('game', 'load'), /answers nothing/);
+});
+
+test('a switched-off plugin has no working buttons', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-press-off-'));
+  install(root, 'game', {
+    manifest: { settings: [{ key: 'load', type: 'button', label: 'LOAD' }] },
+    source: 'export function activate(ctx) { ctx.onButton(() => ({})); }',
+  });
+  const host = await installedHost(root, { game: { enabled: false, approved: true } });
+  await assert.rejects(() => host.pressButton('game', 'load'), /switched off/);
+});
+
 test('a section with nothing to put in it is refused, not drawn empty', () => {
   // The same argument an empty category heading loses: a section promises
   // controls, and one that opens onto nothing is worse than none. Refused

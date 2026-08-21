@@ -380,6 +380,9 @@ user, read live through `ctx.store`.
 | `folder` | `[ CHOOSE… ]`, a native directory dialog | absolute path string |
 | `toggle` | A checkbox | boolean |
 | `select` | A dropdown | one of the `options` values |
+| `button` | `[ LABEL ]`, pressed | **none** — see below |
+
+Any of them may carry a `hint`, drawn as the control's tooltip.
 
 A `select` names its options in the manifest so the control can be drawn before any of your code has run — and the app
 **refuses to store a value you never offered**, so you can read one back without checking it.
@@ -387,6 +390,43 @@ A `select` names its options in the manifest so the control can be drawn before 
 `ctx.store.get(key)` reads live rather than at activation, so a value the user changed a moment ago is the one you see.
 `ctx.onSettingsChanged(key, value)` exists for the settings that invalidate work already done — a music folder is the
 case in point, since nothing else would make the library rescan.
+
+### A button is a setting that stores nothing
+
+```json
+{ "key": "newGame", "type": "button", "label": "NEW GAME", "hint": "a fresh commander, and a ship" }
+```
+
+Every other type is a question whose answer the app keeps. A button is a thing that *happens*, and it
+is declared among the settings because of where it has to be drawn: your row and your panel section
+are built from this list, and a game that wants NEW GAME and LOAD GAME beside its language has
+nowhere else to put them.
+
+```js
+ctx.onButton(async (key) => {
+  if (key === 'newGame') { scene.show(chooserFor(backgrounds)); return { cards: true }; }
+  if (key === 'load') { scene.show(menu(await save())); return { sheet: true }; }
+  return { status: 'nothing to do' };
+});
+```
+
+One handler for all of your buttons, and the last one registered wins — the same rule the scene
+presenter follows. It answers with **exactly what a scene move answers with**: `{status, submit,
+sheet, board, cards, entry}`, shaped and cut by the same code, so the window has one way to act on a
+press rather than two. That is the whole reason the type exists; a control that could only change a
+stored value would be a setting, and settings already had four types for that.
+
+- **`store.get` never sees one.** A button holds nothing, and the app refuses to write a value
+  against its key — so it cannot come back out as though somebody had chosen it.
+- **A press with no handler is an error, not silence.** A control drawn on somebody's panel that
+  quietly does nothing is indistinguishable from a broken app, so the press answers with a sentence
+  naming your plugin.
+- **A press can claim the panel.** `act` may only be answered inside a turn, and this is pressed
+  outside one — which is the point, since LOAD GAME exists for the moment when nothing is running.
+  Paint a scene while you handle the press and the panel is claimed for the conversation the window
+  has open. Paint nothing and nothing is claimed: a button that does something invisible cannot put a
+  game panel over a chat that was never playing one.
+- **It is drawn while your plugin is running**, like everything else in the section.
 
 ### A section of your own
 
@@ -896,6 +936,7 @@ Declare the **lowest** version that has everything you use. Declaring a higher o
 | 8 | `board` — a picture with pressable places, and files served from `ctx.dataDir()` |
 | 10 | `cards` — a chooser of equal cards, each with a picture, a name and a paragraph |
 | 9 | `panel` — your settings as a section of the left panel. The `browser` and `lookupBrowser` services are **removed** |
+| 12 | `button` settings and `ctx.onButton` — a control that does something, drawn beside your settings; `hint` on any setting |
 
 **Not every addition moves the number.** `category` arrived after 5 and did not: a build that has never heard of the
 field ignores it and loads the plugin exactly as before, so declaring 6 for it would lock your plugin out of every

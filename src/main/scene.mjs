@@ -451,6 +451,31 @@ export class Scene extends EventEmitter {
   }
 
   /**
+   * The same claim, for a press that happens outside a turn.
+   *
+   * `claimTurn` takes the conversation off whichever turn is running, which is
+   * the whole of the evidence it has. A `button` setting in the left panel is
+   * pressed with no turn running at all — that is the point of it, since LOAD
+   * GAME exists precisely for the moment when nothing is being played — so the
+   * conversation has to come from the window, which is the only thing that
+   * knows which one is open.
+   *
+   * The guards are the ones `claimTurn` states, and they carry the rule: only
+   * for the plugin actually driving the panel, and only when there is something
+   * drawn. A press that painted nothing claims nothing, so a game that answers
+   * a button by doing something invisible cannot put a panel over a
+   * conversation the user opened to ask about the weather.
+   */
+  claimFor(pluginId, chatId) {
+    const chat = String(chatId ?? '');
+    if (!this.#scene || !chat) return;
+    if (this.#presenter?.pluginId !== String(pluginId ?? '')) return;
+    if (this.#chatId === chat) return;
+    this.#chatId = chat;
+    this.#announce();
+  }
+
+  /**
    * Is a game driving this session?
    *
    * Asked by the prompt, and deliberately broader than "is the panel up". The
@@ -611,47 +636,59 @@ export class Scene extends EventEmitter {
 
     // Cut to a line and a length here, so a plugin is handed a name and never
     // a paragraph however the field is driven.
-    const answer = (await presenter.act(id, text(value, MAX_ENTRY))) ?? {};
-    return {
-      /** A line for the status bar: what happened, if nothing else says. */
-      status: text(answer.status, MAX_STATUS),
-      /**
-       * The words to send as if the player had typed them, or ''.
-       *
-       * Handed back to the caller rather than sent from here, and the reason is
-       * structural: a turn belongs to a conversation, and the main process does
-       * not have a current one — the renderer does. Routing a move through the
-       * window that knows which chat is open also means it goes down the same
-       * path as typed text, so the busy check, the transcript entry and the
-       * hand-back on failure are the ones that already work, rather than a
-       * second implementation of each.
-       *
-       * It is also the only thing standing between a game and a loop. A move is
-       * sent because a person pressed a key; nothing here can start a turn on
-       * its own.
-       */
-      submit: text(answer.submit, MAX_SUBMIT),
-      /**
-       * Ask for the sheet to be opened.
-       *
-       * The dialog is the app's, so a plugin has no other way to say "look in
-       * the bag" — and an inventory button that only wrote a line in the status
-       * bar would be a control that describes the thing it should have shown.
-       */
-      sheet: answer.sheet === true,
-      /**
-       * Ask for the board to be opened, as `sheet` asks for the lists.
-       *
-       * Two flags rather than one `open: 'sheet'|'board'` because `sheet`
-       * already shipped, and a plugin written against it must keep working.
-       */
-      board: answer.board === true,
-      /** Ask for the chooser, as `sheet` and `board` ask for theirs. */
-      cards: answer.cards === true,
-      /** Ask for the field, which is how a game gets a name typed into it. */
-      entry: answer.entry === true,
-    };
+    return normaliseAnswer(await presenter.act(id, text(value, MAX_ENTRY)));
   }
+}
+
+/**
+ * What a plugin is allowed to answer a press with.
+ *
+ * A module function rather than a method, because `act` is no longer the only
+ * thing that produces one: a `button` setting in the left panel is pressed
+ * outside the panel entirely and answers in the same words, so that the window
+ * has one way to act on an answer rather than two.
+ */
+export function normaliseAnswer(raw) {
+  const answer = raw ?? {};
+  return {
+    /** A line for the status bar: what happened, if nothing else says. */
+    status: text(answer.status, MAX_STATUS),
+    /**
+     * The words to send as if the player had typed them, or ''.
+     *
+     * Handed back to the caller rather than sent from here, and the reason is
+     * structural: a turn belongs to a conversation, and the main process does
+     * not have a current one — the renderer does. Routing a move through the
+     * window that knows which chat is open also means it goes down the same
+     * path as typed text, so the busy check, the transcript entry and the
+     * hand-back on failure are the ones that already work, rather than a
+     * second implementation of each.
+     *
+     * It is also the only thing standing between a game and a loop. A move is
+     * sent because a person pressed a key; nothing here can start a turn on
+     * its own.
+     */
+    submit: text(answer.submit, MAX_SUBMIT),
+    /**
+     * Ask for the sheet to be opened.
+     *
+     * The dialog is the app's, so a plugin has no other way to say "look in
+     * the bag" — and an inventory button that only wrote a line in the status
+     * bar would be a control that describes the thing it should have shown.
+     */
+    sheet: answer.sheet === true,
+    /**
+     * Ask for the board to be opened, as `sheet` asks for the lists.
+     *
+     * Two flags rather than one `open: 'sheet'|'board'` because `sheet`
+     * already shipped, and a plugin written against it must keep working.
+     */
+    board: answer.board === true,
+    /** Ask for the chooser, as `sheet` and `board` ask for theirs. */
+    cards: answer.cards === true,
+    /** Ask for the field, which is how a game gets a name typed into it. */
+    entry: answer.entry === true,
+  };
 }
 
 export const scene = new Scene();

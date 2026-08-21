@@ -57,6 +57,8 @@ export class PluginHost extends EventEmitter {
   #locales = [];
   /** `id → [fn]`, called when the user edits one of a plugin's settings. */
   #settingsHooks = new Map();
+  /** `id → fn`, called when the user presses one of its `button` settings. */
+  #buttonHooks = new Map();
   /**
    * `id → version-mtime` of the code actually imported, for the life of the
    * process. Kept outside `#entries` because rediscovery rebuilds those, and
@@ -280,6 +282,7 @@ export class PluginHost extends EventEmitter {
     this.#themes = [];
     this.#locales = [];
     this.#settingsHooks.clear();
+    this.#buttonHooks.clear();
 
     for (const entry of [...this.#entries.values()].sort(byRank)) {
       if (entry.broken) continue;
@@ -324,7 +327,7 @@ export class PluginHost extends EventEmitter {
     try {
       if (!entry.module) entry.module = await this.#import(entry);
 
-      const contributions = { actions: [], fragments: [], contexts: [], turnHooks: [], settingsHooks: [] };
+      const contributions = { actions: [], fragments: [], contexts: [], turnHooks: [], settingsHooks: [], button: null };
       const activate = entry.module?.activate ?? entry.module?.default?.activate;
       if (typeof activate !== 'function') throw new Error('exports no activate() function');
 
@@ -360,6 +363,7 @@ export class PluginHost extends EventEmitter {
       this.#contexts.push(...contributions.contexts.map((fn) => ({ id: manifest.id, fn })));
       this.#turnHooks.push(...contributions.turnHooks.map((fn) => ({ id: manifest.id, fn })));
       if (contributions.settingsHooks.length) this.#settingsHooks.set(manifest.id, contributions.settingsHooks);
+      if (contributions.button) this.#buttonHooks.set(manifest.id, contributions.button);
 
       entry.active = true;
       entry.contributions = contributions;
@@ -494,6 +498,25 @@ export class PluginHost extends EventEmitter {
       /** Called after the user edits one of those settings. */
       onSettingsChanged(fn) {
         if (typeof fn === 'function') contributions.settingsHooks.push(fn);
+      },
+
+      /**
+       * Called when the user presses one of the plugin's `button` settings.
+       *
+       * One handler and not a list, unlike the settings hooks: a press is a
+       * thing being done and it has an answer, and two handlers answering one
+       * press would be two plugins' worth of contradictory instructions about
+       * what the window should do next. The last one registered wins, which is
+       * the same rule the scene presenter follows.
+       *
+       * `fn(key)` may answer with the same object a scene move answers with —
+       * `{status, submit, sheet, board, cards, entry}` — so a button in the left
+       * panel can open the game's own dialogs. That is the whole reason this
+       * exists: a control that could only change a stored value would be a
+       * setting, and settings already had a type for that.
+       */
+      onButton(fn) {
+        if (typeof fn === 'function') contributions.button = fn;
       },
 
       /**
@@ -711,6 +734,10 @@ export class PluginHost extends EventEmitter {
     if (!entry) throw new Error(`no plugin called "${id}"`);
     const declared = entry.manifest.settings.find((setting) => setting.key === key);
     if (!declared) throw new Error(`"${id}" has no setting called "${key}"`);
+    // A button holds nothing. Storing against one would put a value in
+    // `config.json` under a key the plugin can only ever read back as noise,
+    // and `store.get` would hand it out as though somebody had chosen it.
+    if (declared.type === 'button') throw new Error(`"${key}" is a button, not a setting to store`);
 
     const next = declared.type === 'toggle' ? Boolean(value) : String(value ?? '');
     // A picker can only hold one of the things it offered. Anything else is a
@@ -734,6 +761,31 @@ export class PluginHost extends EventEmitter {
 
     this.emit('changed', this.list());
     return this.list();
+  }
+
+  /**
+   * A `button` setting, pressed.
+   *
+   * Answers with whatever the plugin's `onButton` handler answered, unchecked
+   * and unshaped: this is the plugin host, and what a scene answer is allowed
+   * to contain is the scene service's rule rather than one restated here. The
+   * caller in `ipc.mjs` runs it through the scene's own normaliser before any
+   * of it reaches a window.
+   *
+   * Refused rather than ignored when the plugin declares the button and
+   * registers no handler: a control drawn on somebody's panel that silently
+   * does nothing is the failure this returns a sentence about instead.
+   */
+  async pressButton(id, key) {
+    const entry = this.#entries.get(id);
+    if (!entry) throw new Error(`no plugin called "${id}"`);
+    const declared = entry.manifest.settings.find((setting) => setting.key === key);
+    if (!declared || declared.type !== 'button') throw new Error(`"${id}" has no button called "${key}"`);
+    if (!this.#stateOf(id).enabled) throw new Error(`"${id}" is switched off`);
+
+    const press = this.#buttonHooks.get(id);
+    if (!press) throw new Error(`"${id}" draws a button called "${key}" and answers nothing when it is pressed`);
+    return (await press(key)) ?? {};
   }
 
   /**

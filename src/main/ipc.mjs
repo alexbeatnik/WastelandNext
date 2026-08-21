@@ -23,7 +23,7 @@ import * as registry from './plugins/registry.mjs';
 import { audio } from './audio.mjs';
 import { mic } from './mic.mjs';
 import { notify } from './notify.mjs';
-import { scene } from './scene.mjs';
+import { normaliseAnswer, scene } from './scene.mjs';
 import { Agent } from './agent/agent.mjs';
 import { Updater } from './updater.mjs';
 
@@ -440,6 +440,27 @@ export function registerIpc(windowGetter) {
   });
   handle('plugins:setEnabled', (id, enabled) => plugins.setEnabled(id, enabled));
   handle('plugins:setSetting', (id, key, value) => plugins.setSetting(id, key, value));
+
+  /**
+   * A `button` setting, pressed on the plugin's row or in its panel section.
+   *
+   * Two things happen and the order is the point. The plugin runs first and may
+   * paint a scene while it does — that is what NEW GAME and LOAD GAME are for —
+   * and only then is the panel claimed for the conversation the window has
+   * open. Claiming afterwards means a press that painted nothing claims
+   * nothing, which is the rule that keeps a game panel off a chat that was
+   * never playing one.
+   *
+   * The chat comes from the renderer because the main process has no current
+   * conversation; it is the same reason `submit` is handed back rather than
+   * sent from here. Normalised through the scene's own shaping so a button
+   * answers a window in exactly the words a move does.
+   */
+  handle('plugins:pressButton', async (id, key, chatId) => {
+    const answer = normaliseAnswer(await plugins.pressButton(id, key));
+    scene.claimFor(id, chatId);
+    return answer;
+  });
 
   /**
    * A click on one of the options an action put in the transcript.

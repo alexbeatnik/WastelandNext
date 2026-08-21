@@ -987,6 +987,26 @@ function settingControls(plugin, where = 'row') {
       return node;
     };
 
+    if (setting.type === 'button') {
+      // No value, no label beside it, no storage: the row *is* the control.
+      // Drawn in the app's own bracketed style so it reads as a thing that
+      // happens rather than as a field somebody forgot to fill in.
+      const press = el('button', 'ghost', `[ ${setting.label} ]`);
+      if (setting.hint) press.title = setting.hint;
+      press.addEventListener('click', async () => {
+        press.disabled = true;
+        try {
+          await pressPluginButton(plugin.id, setting.key);
+        } finally {
+          press.disabled = false;
+        }
+      });
+      row.textContent = '';
+      row.append(mark(press));
+      box.append(row);
+      continue;
+    }
+
     if (setting.type === 'toggle') {
       const input = document.createElement('input');
       input.type = 'checkbox';
@@ -2477,28 +2497,59 @@ function setSheet(open) {
  * journal — costs nothing and involves no model at all, which is most of what
  * made those commands slow and unreliable when they had to be typed at one.
  */
+/**
+ * What a press asked the window to do.
+ *
+ * Shared by the two things that can produce an answer: a move on the game's own
+ * row, and a `button` setting pressed in the left panel. One implementation
+ * because they are one contract — a game that answers LOAD GAME with
+ * `{sheet: true}` means the same thing by it as a game answering an inventory
+ * button, and two copies of this would eventually disagree about which.
+ */
+async function applyAnswer(answer) {
+  if (answer.status) status(answer.status);
+  // Asked for before anything is sent: a game that opens the bag and then
+  // takes a turn should show the bag first, not after the reply lands.
+  if (answer.sheet) setSheet(true);
+  if (answer.board) setBoard(true);
+  if (answer.cards) setCards(true);
+  if (answer.entry) setEntry(true);
+  // Sent from here, not from the main process, so a pressed button is an
+  // ordinary message in the conversation this window has open.
+  if (answer.submit) {
+    // A move made from a dialog closes it. Pressing a place on the map and
+    // then watching the reply arrive behind the still-open map is the map
+    // refusing to get out of the way of the thing it was used to do.
+    setBoard(false);
+    setCards(false);
+    setEntry(false);
+    await submitPrompt(answer.submit);
+  }
+}
+
 async function pressAction(actionId, value = '') {
   if (state.streaming) return status('A turn is running — wait for it to finish.');
   try {
-    const answer = await api.scene.act(actionId, value);
-    if (answer.status) status(answer.status);
-    // Asked for before anything is sent: a game that opens the bag and then
-    // takes a turn should show the bag first, not after the reply lands.
-    if (answer.sheet) setSheet(true);
-    if (answer.board) setBoard(true);
-    if (answer.cards) setCards(true);
-    if (answer.entry) setEntry(true);
-    // Sent from here, not from the main process, so a pressed button is an
-    // ordinary message in the conversation this window has open.
-    if (answer.submit) {
-      // A move made from a dialog closes it. Pressing a place on the map and
-      // then watching the reply arrive behind the still-open map is the map
-      // refusing to get out of the way of the thing it was used to do.
-      setBoard(false);
-      setCards(false);
-      setEntry(false);
-      await submitPrompt(answer.submit);
-    }
+    await applyAnswer(await api.scene.act(actionId, value));
+  } catch (err) {
+    status(err.message);
+    activity(err.message, 'bad');
+  }
+}
+
+/**
+ * A `button` setting, pressed.
+ *
+ * The conversation goes with it because the main process does not have one, and
+ * this press is the case that needs it most: LOAD GAME is pressed when nothing
+ * is on screen, so the panel it paints has nowhere to belong unless the window
+ * says where. Repainting the list afterwards is what a button that changed
+ * something — started a run, wrote a slot — needs to show it.
+ */
+async function pressPluginButton(pluginId, key) {
+  if (state.streaming) return status('A turn is running — wait for it to finish.');
+  try {
+    await applyAnswer(await api.plugins.pressButton(pluginId, key, state.chatId));
   } catch (err) {
     status(err.message);
     activity(err.message, 'bad');

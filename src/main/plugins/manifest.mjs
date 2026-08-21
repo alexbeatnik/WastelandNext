@@ -18,7 +18,7 @@ import { normaliseCategory } from '../../shared/categories.mjs';
  * function. Bumped only when the shape of `activate(ctx)` changes in a way a
  * plugin can notice.
  */
-export const PLUGIN_API_VERSION = 11;
+export const PLUGIN_API_VERSION = 12;
 
 /**
  * Services a plugin may ask the host for.
@@ -30,7 +30,18 @@ export const PLUGIN_API_VERSION = 11;
 export const KNOWN_SERVICES = new Set(['audio', 'notify', 'mic', 'scene']);
 
 /** Setting kinds the plugin row knows how to draw. */
-export const SETTING_TYPES = new Set(['folder', 'text', 'toggle', 'select']);
+/**
+ * `button` is the odd one and deliberately so: it stores nothing.
+ *
+ * Every other type is a question whose answer the app keeps, which is what a
+ * setting is. A button is a thing that happens when it is pressed, and it is
+ * declared here rather than anywhere else because of where it has to be drawn:
+ * a plugin's row and its panel section are built from this list, and a game
+ * that wants NEW GAME beside its language has nowhere else to put it.
+ * `setSetting` refuses one, so nothing can write a value against a key that
+ * holds none.
+ */
+export const SETTING_TYPES = new Set(['folder', 'text', 'toggle', 'select', 'button']);
 
 /**
  * An id becomes a directory name and a key in `config.plugins`, so it is
@@ -180,6 +191,15 @@ export function parseManifest(raw, { builtin = false } = {}) {
       type,
       label: String(entry.label ?? key).trim() || key,
       placeholder: String(entry.placeholder ?? ''),
+      /**
+       * A line of explanation, drawn as the control's tooltip.
+       *
+       * Added for `button`, where it is closest to necessary — a label reading
+       * SAVE says what happens but not what it happens to — and allowed on the
+       * rest because a folder picker has the same problem and there was no
+       * reason to make the field type-specific.
+       */
+      hint: String(entry.hint ?? '').trim().slice(0, 200),
       options,
     });
   }
