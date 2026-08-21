@@ -602,6 +602,22 @@ underneath it draws the reply into a conversation it does not belong to, and the
 back to the one the user just left. The id itself comes from `turn:start`, not from the resolved `agent.send()` promise
 — the same fact, but announced when it becomes true rather than minutes later.
 
+**That refusal is a renderer guard, so `snapshot.busy` is not optional.** The field was in the snapshot from the start
+and nothing read it, which made the sentence above true only until somebody reloaded: `state.streaming` boots `false`,
+so a window that came back mid-turn showed SEND where STOP belonged, live moves on the scene, and *both* delete guards
+open — the one case the guard exists for. What clears it again is `turn:end`, not `submitPrompt`'s `finally`: that
+`finally` hangs off a promise the old window owned, and after a reload nobody is holding it. This is the invariant two
+paragraphs up — the renderer holds no pipeline state — met from the other side: not holding it is only safe if the fact
+is actually *asked for* on the way in.
+
+**`chats.append` will not create a chat for an id it was given.** Only an empty id means "there is no chat yet"; an id
+that no longer resolves is a conversation deleted out from under a running turn, and `read(id) ?? create(...)` answered
+that by making a new one — so the chat the user had just thrown away came back in the picker as `New Chat`, holding the
+reply and none of the words it was answering. It returns `null` instead, and the turn stops on it rather than writing
+somewhere nobody asked for. `reply:start` still owes its `reply:end` on that path, and pays it before returning. In
+`send()` the same refusal happens ahead of `turn:start`, which is what lets the renderer hand the words back to the
+composer instead of losing them.
+
 **`loadChat` carries a sequence number.** `chats.read` is a round trip and two picks can be in flight at once; the
 older one finishing second draws the previous transcript over the conversation the picker says is open. Every await
 checks it is still the current load and drops out if it is not.
@@ -790,6 +806,16 @@ saw `idle`, both probed, and both went on to spawn a server. The second loses th
 failure over the top of a load that was working. `load()` is a thin synchronous wrapper that stores the in-flight
 promise before anything can yield; asking twice for the *same* model returns that same promise, because a double click
 is not a mistake.
+
+**`unload()` is the request; `#stop()` is the teardown, and a load may only use the second.** The pre-spawn half of a
+load is several awaits long — the binary fetch, the `--version` probe, the port check, the header read — and holds no
+process at all. UNLOAD pressed anywhere in there killed nothing, reported `idle`, and was then outlived by its own
+load, which spawned a server on top of the answer it had just given: the user asked for no model and got one. So
+`unload()` sets `#loadCancelled` before its first await and `#load` checks it at each boundary before the spawn. The
+split is what makes that possible — `#load` tears down before it starts, and going through the public door would cancel
+the very load doing it. Past the spawn there *is* a process, and the ordinary kill path takes over: `#waitForReady`
+throws on a vanished `#proc`, and the `close` handler asks whether the process it is reporting on is still `#proc`
+rather than trusting a flag.
 
 **Nothing in the main process may use `spawnSync` on a binary a user chose.** `#ensureBinary` probed PATH that way and
 would freeze the window for as long as the process took to answer — and the wrong `llama-server` on PATH (a GUI

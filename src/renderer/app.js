@@ -3252,6 +3252,11 @@ function handleEvent(payload) {
       // never leave a blinking cursor behind.
       state.streamEl?.remove();
       state.streamEl = null;
+      // And the busy state with it. `submitPrompt`'s `finally` is the ordinary
+      // way out, but it hangs off a promise this window owns — a reload during
+      // a turn leaves nobody holding it, so the only thing that can put the
+      // composer back is the event the main process emits either way.
+      setStreaming(false);
       break;
 
     case 'action:start': {
@@ -3700,6 +3705,15 @@ async function boot() {
     refreshLocales(),
     refreshRegistries(),
   ]);
+
+  // A turn outlives this window: it belongs to the main process, which is the
+  // whole reason the renderer holds no pipeline state. `busy` has been in the
+  // snapshot from the start and was never read, so a window reloaded mid-turn
+  // came back believing nothing was running — SEND where STOP belonged, the
+  // scene's moves live, and both delete guards open, which is exactly how a
+  // conversation got deleted out from under the reply being written into it.
+  // `turn:end` is what clears it again, on every path.
+  setStreaming(snapshot.busy === true);
 
   // After `refreshPlugins`, because a notice is signed with the name on the
   // plugin's own row and that list is where the name comes from. These are the

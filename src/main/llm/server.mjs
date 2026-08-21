@@ -187,6 +187,11 @@ export class LlamaServer extends EventEmitter {
   /** The in-flight `load()`, and what it is loading. See `load()`. */
   #loading = null;
   #loadingModel = '';
+  /**
+   * Set by `unload()`, cleared by `load()`. See `unload()` for why the teardown
+   * itself is `#stop()` and not this.
+   */
+  #loadCancelled = false;
 
   get state() {
     return this.#state;
@@ -253,6 +258,10 @@ export class LlamaServer extends EventEmitter {
       if (this.#loadingModel === modelFile) return this.#loading;
       return Promise.reject(new Error('a model is already loading — please wait'));
     }
+    // Cleared here rather than inside `#load`, for the same reason `#loading` is
+    // set here: both must be true before the first await, or a cancel arriving
+    // in that window lands on a load that has not started claiming anything yet.
+    this.#loadCancelled = false;
     const started = this.#load(modelFile).finally(() => {
       if (this.#loading === started) {
         this.#loading = null;
@@ -269,7 +278,10 @@ export class LlamaServer extends EventEmitter {
     if (!existsSync(path)) throw new Error(`model not found: ${path}`);
     if (this.#state === 'ready' && this.#model === modelFile) return this.status;
 
-    await this.unload();
+    // `#stop()`, not `unload()`: a load clearing the way for itself is not a
+    // request to have no model, and going through the public door would cancel
+    // the very load doing it.
+    await this.#stop();
 
     const settings = config.load();
     const bin = await this.#ensureBinary(settings);
@@ -284,6 +296,7 @@ export class LlamaServer extends EventEmitter {
       this.#setState('error', probe.detail);
       throw new Error(probe.detail);
     }
+    if (this.#loadCancelled) throw new Error('cancelled');
     const host = settings.llamaHost || '127.0.0.1';
     const port = Number(settings.llamaPort) || 8080;
     // Before anything is spawned: a server already on this port would answer
@@ -330,6 +343,14 @@ export class LlamaServer extends EventEmitter {
       // user. The field must be read, though: an OpenAI client that looks only
       // at `content` shows an empty reply for a model that thinks first.
     ];
+
+    // The last moment at which nothing has been started. Past here an unload is
+    // an ordinary kill, which `#waitForReady` and the `close` handler already
+    // account for; before it there is no process to kill, so an UNLOAD pressed
+    // during the fetch, the probe, the port check or the header read used to
+    // stop nothing, report `idle`, and then watch this load spawn a server on
+    // top of the answer it had just given.
+    if (this.#loadCancelled) throw new Error('cancelled');
 
     this.#model = modelFile;
     this.#baseUrl = `http://${host}:${port}`;
@@ -569,11 +590,25 @@ export class LlamaServer extends EventEmitter {
       }
       await new Promise((r) => setTimeout(r, POLL_MS));
     }
-    await this.unload();
+    await this.#stop();
     throw new Error('llama-server did not become ready in time');
   }
 
+  /**
+   * Have no model running.
+   *
+   * The request and the teardown are separate because a load tears down before
+   * it starts, and that must not read as a request to stop: `unload()` is what
+   * a person pressing UNLOAD means, `#stop()` is what both of them do. The flag
+   * is set before the first await, so a load cannot slip past between the press
+   * and the kill.
+   */
   async unload() {
+    this.#loadCancelled = true;
+    await this.#stop();
+  }
+
+  async #stop() {
     const proc = this.#proc;
     this.#model = '';
     this.#baseUrl = '';

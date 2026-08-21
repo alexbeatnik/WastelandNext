@@ -116,9 +116,20 @@ export function create(title) {
   });
 }
 
-/** Append one message, creating the chat if this is the first thing said. */
+/**
+ * Append one message, creating the chat if this is the first thing said.
+ *
+ * Only an *empty* id means "there is no chat yet". An id that was given and no
+ * longer resolves is a conversation deleted out from under a running turn, and
+ * answering that by creating a fresh one resurrects what the user just threw
+ * away — reappearing in the picker as "New Chat", holding nothing but the reply
+ * and none of the words it was answering. `null` says so, so the turn can stop
+ * instead of writing somewhere nobody asked for.
+ */
 export function append(id, message) {
-  const chat = read(id) ?? create(message.role === 'user' ? titleFromPrompt(message.content) : '');
+  const existing = read(id);
+  if (!existing && id) return null;
+  const chat = existing ?? create(message.role === 'user' ? titleFromPrompt(message.content) : '');
   chat.messages.push({ ...message, ts: new Date().toISOString() });
   chat.updated = new Date().toISOString();
   return writeChat(chat);

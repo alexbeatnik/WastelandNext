@@ -127,3 +127,26 @@ test('generated ids are accepted by the same rule', () => {
   assert.equal(chats.isSafeId(chat.id), true, `${chat.id} should be allowed`);
   assert.ok(chats.read(chat.id));
 });
+
+// Reported as a chat "resurrecting": a turn was running, the conversation was
+// deleted from the picker, and when the reply landed it reappeared as a fresh
+// "New Chat" holding the reply and none of the words it was answering.
+test('appending to a chat that was deleted mid-turn writes nowhere', () => {
+  const chat = chats.create('Deleted while the reply was being written');
+  chats.append(chat.id, { role: 'user', content: 'a question' });
+  chats.remove(chat.id);
+  const before = chats.list().length;
+
+  assert.equal(chats.append(chat.id, { role: 'assistant', content: 'the reply' }), null);
+  assert.equal(chats.append(chat.id, { role: 'tool', content: '[TOOL] ok' }), null);
+
+  // The refusal is the point: not a new row, and not a revived old one either.
+  assert.equal(chats.list().length, before);
+  assert.equal(chats.read(chat.id), null);
+});
+
+test('an empty id still means "there is no chat yet", not "it is gone"', () => {
+  const chat = chats.append('', { role: 'assistant', content: 'unprompted' });
+  assert.ok(chat?.id);
+  assert.equal(chat.messages.length, 1);
+});

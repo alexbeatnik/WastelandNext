@@ -328,14 +328,25 @@ export class Agent extends EventEmitter {
       // first, which is why this costs nothing to ask on all of them.
       const attached = this.attachments.take(chat.id, Math.floor(promptBudget(this.#window()) / 2));
       if (attached) {
-        chat = chats.append(chat.id, { role: 'tool', content: attached });
+        const withFiles = chats.append(chat.id, { role: 'tool', content: attached });
+        // Refused before the event, not after: `attach:consumed` is what records
+        // that this folder has now been seen by this conversation, and spending
+        // it against a chat that is not there loses the attachment for a turn
+        // that never happened.
+        if (!withFiles) throw new Error('conversation was deleted');
+        chat = withFiles;
         // Carries the list, because the chips do not go away any more: what
         // changed is that they now belong to this conversation, and the row has
         // to say so.
         this.#say('attach:consumed', { items: this.attachments.list() });
       }
 
-      chat = chats.append(chat.id, { role: 'user', content: prompt });
+      // A chat that has gone missing is a precondition failure like any other,
+      // and this is still ahead of `turn:start` — which is what lets the
+      // renderer hand the words back to the composer rather than lose them.
+      const opened = chats.append(chat.id, { role: 'user', content: prompt });
+      if (!opened) throw new Error('conversation was deleted');
+      chat = opened;
       // Captured before the turn runs: afterwards the chat holds a reply too,
       // and the model only gets to name a conversation once. Counted in *user*
       // messages rather than all of them, because an attachment goes in first
@@ -411,8 +422,16 @@ export class Agent extends EventEmitter {
       throw err;
     }
 
-    chats.append(chatId, { role: 'assistant', content: text });
+    // The conversation can be deleted while its turn is still running. There is
+    // nowhere to put these words now, and `append` says so rather than making
+    // somewhere — so the turn stops here. `reply:start` is still owed a
+    // `reply:end` on this path as on every other, and it is paid first.
+    const saved = chats.append(chatId, { role: 'assistant', content: text });
     this.#say('reply:end', { text, rendered: stripBlocks(text), aborted });
+    if (!saved) {
+      this.#say('log', { text: 'conversation was deleted — nothing was written' });
+      return;
+    }
 
     if (aborted) return;
 
@@ -428,7 +447,12 @@ export class Agent extends EventEmitter {
       if (this.#abort?.signal.aborted) return;
       const result = await this.#dispatch(action);
       if (result?.feedback) {
-        chats.append(chatId, { role: 'tool', content: result.feedback });
+        // Same rule as the reply above: a chat deleted mid-turn is not a reason
+        // to write the result into a new one.
+        if (!chats.append(chatId, { role: 'tool', content: result.feedback })) {
+          this.#say('log', { text: 'conversation was deleted — nothing was written' });
+          return;
+        }
         fedBack = true;
       }
     }
