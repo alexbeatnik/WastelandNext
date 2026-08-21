@@ -618,6 +618,14 @@ somewhere nobody asked for. `reply:start` still owes its `reply:end` on that pat
 `send()` the same refusal happens ahead of `turn:start`, which is what lets the renderer hand the words back to the
 composer instead of losing them.
 
+**And `send()` has to ask the same question of the id it was handed, or none of that can fire.** It opened the
+conversation with `read(chatId) ?? create(...)`, so a deleted id was answered by *making* a chat — one level above the
+refusal, and before it, which left every guard below being handed an id that had just been created. Two tests passing
+either side of missing wiring, the same shape as `game-prompt.test.mjs`, and `deleted-chat.test.mjs` is the third test
+for the same reason. An empty id still means a new conversation, because that is how every first message arrives;
+`#runTurn` re-reads the chat after `#maybeCompact` awaits and says the same sentence, since a null reaching
+`#buildMessages` is a TypeError about a property rather than a word about what happened.
+
 **`loadChat` carries a sequence number.** `chats.read` is a round trip and two picks can be in flight at once; the
 older one finishing second draws the previous transcript over the conversation the picker says is open. Every await
 checks it is still the current load and drops out if it is not.

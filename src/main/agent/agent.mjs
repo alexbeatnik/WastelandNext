@@ -314,7 +314,19 @@ export class Agent extends EventEmitter {
     this.#plugins.beginTurn();
 
     try {
-      let chat = chats.read(chatId) ?? chats.create(chats.titleFromPrompt(prompt));
+      // An empty `chatId` is a new conversation; a non-empty one that no longer
+      // resolves is a chat deleted since the composer last saw the id, and
+      // creating one for it is the same resurrection `chats.append` refuses —
+      // the same rule, one level up, where the id still arrives from outside.
+      // Without this the refusals below could never fire: every one of them is
+      // handed an id this line had just made.
+      //
+      // Refused ahead of `turn:start`, so nothing is persisted and the renderer
+      // hands the words back to the composer instead of losing them to a
+      // conversation nobody can open.
+      const existing = chats.read(chatId);
+      if (!existing && chatId) throw new Error('that conversation no longer exists');
+      let chat = existing ?? chats.create(chats.titleFromPrompt(prompt));
 
       // Attachments go in ahead of the message they came with, as an ordinary
       // transcript entry: they are then compacted, budgeted and dropped by
@@ -333,7 +345,7 @@ export class Agent extends EventEmitter {
         // that this folder has now been seen by this conversation, and spending
         // it against a chat that is not there loses the attachment for a turn
         // that never happened.
-        if (!withFiles) throw new Error('conversation was deleted');
+        if (!withFiles) throw new Error('that conversation no longer exists');
         chat = withFiles;
         // Carries the list, because the chips do not go away any more: what
         // changed is that they now belong to this conversation, and the row has
@@ -341,11 +353,11 @@ export class Agent extends EventEmitter {
         this.#say('attach:consumed', { items: this.attachments.list() });
       }
 
-      // A chat that has gone missing is a precondition failure like any other,
-      // and this is still ahead of `turn:start` — which is what lets the
-      // renderer hand the words back to the composer rather than lose them.
+      // Nothing can have deleted the chat between the check above and here —
+      // there is no await in the stretch — so this is the guard that keeps that
+      // true if one is ever added, not one that fires today.
       const opened = chats.append(chat.id, { role: 'user', content: prompt });
-      if (!opened) throw new Error('conversation was deleted');
+      if (!opened) throw new Error('that conversation no longer exists');
       chat = opened;
       // Captured before the turn runs: afterwards the chat holds a reply too,
       // and the model only gets to name a conversation once. Counted in *user*
@@ -383,7 +395,11 @@ export class Agent extends EventEmitter {
     // message from the user.
     await this.#maybeCompact(chatId, { context });
 
+    // Read back after `#maybeCompact`, which awaits — so the conversation can
+    // have gone in the meantime. `#buildMessages` would meet a null and throw a
+    // TypeError about a property; this says the thing that actually happened.
     const chat = chats.read(chatId);
+    if (!chat) throw new Error('that conversation no longer exists');
     const built = this.#buildMessages(chat, context, chatId);
 
     // Compaction is the graceful shrink and normally the only one that runs.
