@@ -159,6 +159,23 @@ has run, and so what a plugin may be set to stays readable without reading it. `
 not offered: a row displaying a state the plugin has no code for is worse than a refused click, and the plugin reading
 it back would be entitled to assume otherwise.
 
+**A `button` is a setting that stores nothing, and it is declared among the settings because of where it is drawn.**
+Every other type is a question whose answer the app keeps; this one is a thing that happens. It lives in the same list
+because the row and the panel section are built from that list and there is nowhere else to put NEW GAME beside a
+language. What it answers is *exactly* what a scene move answers — `{status, submit, sheet, board, cards, entry}`,
+shaped and cut by the same code — so the window has one way to act on a press rather than two. `store.get` never sees
+one: the app refuses to write a value against a button's key, or it could come back out as though somebody had chosen
+it. A declared button whose plugin registered no handler is refused with a sentence naming the plugin rather than
+ignored, for the reason the whole dispatcher exists — a control that silently does nothing is indistinguishable from a
+broken app.
+
+**A press happens outside a turn, so it claims the panel with `claimFor`, not `claimTurn`.** That is the difference
+that makes the type useful: `act` may only be answered inside a turn, and LOAD GAME exists for the moment when nothing
+is running. `claimFor(pluginId, chatId)` takes the conversation from the window — which is the only thing that knows
+which chat is open — and carries the same guards `claimTurn` states: only for the plugin driving the panel, only when a
+scene is actually drawn, and only announcing on a change. Paint nothing while handling a press and nothing is claimed;
+a button that does something invisible must not put a game panel over a chat that was never playing one.
+
 **A plugin's settings can be drawn twice, and `panel` is the whole of what it takes.** A row in PLUGINS is where a
 plugin is *decided* about — beside its description, its version and the switch that turns it off — and a poor place to
 *use* a setting: reported of a music folder and a browser choice, both changed almost daily, that reaching either meant
@@ -923,7 +940,7 @@ these means updating `SHAPES` in `scripts/smoke.mjs`.
 
 ## Testing
 
-Three levels, and each exists because the one below it cannot see the failure:
+Two levels, and the second exists because the first cannot see the failure:
 
 `npm test` — pure logic, no Electron, no network. Fast enough to run on every change.
 
@@ -935,6 +952,13 @@ When a fix is for something a user reported, the test should reproduce *their* c
 numbers in `gpu.test.mjs` are a 25 GB model on a 12 GB card because that is what failed; the log excerpt in
 `failure.test.mjs` is verbatim from the crash it explains.
 
-**Probes that spawn a model or a browser must clean up on the way out.** One killed by a `timeout` left an orphaned
-llama-server holding port 8080, and the app then reported a model as loaded while talking to it — a wrong answer that
-looked exactly like a right one. Trap the signals, or use a different port.
+There was a third — `npm run adskip:live`, a real Chrome against a locally served page — and it left with the engine
+when browser control stopped being built in. A plugin's own tests live in a plugin's own repository now, which is the
+same statement `BUILTIN_PLUGINS` makes: the question to ask of anything proposed here is whether this repository is
+still coherent with it uninstalled.
+
+**Probes that spawn a model must clean up on the way out.** One killed by a `timeout` left an orphaned llama-server
+holding port 8080, and the app then reported a model as loaded while talking to it — a wrong answer that looked exactly
+like a right one. Trap the signals, or use a different port. `load-guard.test.mjs` reaches a load's pre-spawn window by
+pointing `llamaServerPath` at `process.execPath`: `node --version` answers the probe, and the load is cancelled before
+the port check, so nothing is ever spawned to clean up.

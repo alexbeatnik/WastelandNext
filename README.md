@@ -118,7 +118,9 @@ every node on screen is built here from a document with a fixed set of keys. The
 so no two moves can claim the same digit, and a digit typed into the composer stays a digit. A move is sent by the
 window down exactly the path typed text takes, which is also what stops a game looping: nothing in the service can
 start a turn, so a move happens because somebody pressed a key. The panel belongs to the conversation the game is
-played in, and is drawn nowhere else. [Space Trader](https://github.com/alexbeatnik/wasteland-plugin-space-trader) and
+played in, and is drawn nowhere else. A run does not have to be started by typing at it, either: a manifest can declare
+a button, and a press is the one thing that reaches a plugin from *outside* a turn — which is exactly the moment NEW
+GAME and LOAD GAME exist for. [Space Trader](https://github.com/alexbeatnik/wasteland-plugin-space-trader) and
 [Fantasy RPG](https://github.com/awakeserg/wasteland-plugin-fantasy-rpg) both drive it.
 
 **Audio** is the smallest part of a music player that cannot be a plugin: an `<audio>` element, the transport bar under
@@ -144,8 +146,10 @@ is gone the moment it is dismissed. Notices raised before the window was listeni
 which is how a reminder that came due while the app was closed still reaches you.
 
 **A setting can be drawn twice.** Every control on a plugin's row is declared in its manifest — a folder to pick, an
-endpoint to type, a list to choose from — so the row can be drawn before a line of the plugin's code has run, and a
-value it never offered is refused. A row in PLUGINS is where a plugin is *decided* about, beside its description and
+endpoint to type, a list to choose from, a button to press — so the row can be drawn before a line of the plugin's code
+has run, and a value it never offered is refused. A button is the odd one out and is declared there anyway, because the
+row and the panel section are built from that list and NEW GAME has nowhere else to go; it stores nothing, and it
+answers with exactly what a move on the action row answers with, so the window has one way to act on a press. A row in PLUGINS is where a plugin is *decided* about, beside its description and
 the switch that turns it off, and a poor place to actually *use* one: a music folder and a model size get changed far
 more often than the plugin gets reconsidered, and reaching either meant opening the section and reading a dozen rows.
 A manifest may therefore ask for a section of its own in the left panel, drawn from the same declarations, with nothing
@@ -226,8 +230,8 @@ Runs electron-builder. Two artifacts land in `dist/`:
 
 | File | What it is |
 |---|---|
-| `WastelandNext-<version>-portable.exe` | ~75 MB, single self-contained file, runs with no install |
-| `WastelandNext-<version>-setup.exe` | ~76 MB installer, per-user, installation directory selectable |
+| `WastelandNext-<version>-portable.exe` | ~74 MB, single self-contained file, runs with no install |
+| `WastelandNext-<version>-setup.exe` | ~74 MB installer, per-user, installation directory selectable |
 
 `dist/win-unpacked/` holds the same app as a plain directory, which is the quickest thing to debug against.
 
@@ -450,7 +454,7 @@ src/
 ## Testing
 
 ```bash
-npm test       # 552 unit tests, no Electron, no network
+npm test       # 565 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
 ```
 
@@ -460,6 +464,13 @@ choice, prompt assembly, plugin manifest validation and host activation, the sce
 registry entries and version comparison, Range parsing and custom-scheme URLs, GGUF header parsing and the context/GPU
 arithmetic, the compaction threshold and the window backstop, folder collection and its budget, download speed and
 resume, notices, dictation, and crash-log summarising.
+
+Three of them are there because two passing tests can sit either side of missing wiring. `game-prompt.test.mjs` builds
+a real agent over a real scene and reads the prompt's size before and after a game registers, because a rule the prompt
+keeps and a fact the service reports are both true while nothing asks. `deleted-chat.test.mjs` is the same shape one
+layer down: storage refusing to append to a conversation that was deleted proves nothing if the turn above it opens
+that conversation by creating a new one. `load-guard.test.mjs` covers the two halves of one load — a second click
+inside the window before `starting` is set, and an UNLOAD pressed while there is still no process to stop.
 
 `npm run smoke` boots the real window offscreen — 285 checks — and covers what unit tests cannot: a renderer that throws
 on boot, a preload that failed to expose its bridge, an IPC channel renamed on one side only, a layout that breaks at
