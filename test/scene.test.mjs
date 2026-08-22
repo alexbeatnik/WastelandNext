@@ -10,7 +10,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { HOTKEYS, Scene, normaliseScene } from '../src/main/scene.mjs';
+import { HOTKEYS, Scene, normaliseAnswer, normaliseScene } from '../src/main/scene.mjs';
 
 test('a scene keeps what it can draw and drops what it cannot', () => {
   const scene = normaliseScene({
@@ -517,4 +517,100 @@ test('a claim tells the window, or the panel appears only on the next repaint', 
   seen.length = 0;
   scene.claimTurn('fantasy-rpg');
   assert.deepEqual(seen, []);
+});
+
+test('a button pressed outside a turn claims the conversation the window has open', () => {
+  // The case `claimTurn` cannot answer: a `button` setting in the left panel is
+  // pressed with nothing running, which is the whole point of LOAD GAME. There
+  // is no turn to take the conversation off, so it comes from the window —
+  // which is the only thing that knows which chat is on screen.
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+  scene.show({ title: 'Village of Mara — day 4' });
+  assert.equal(scene.status().chatId, '', 'painted outside a turn, so it belongs to nobody yet');
+
+  scene.claimFor('fantasy-rpg', 'chat-a');
+  assert.equal(scene.status().chatId, 'chat-a');
+});
+
+test('a press that painted nothing claims nothing', () => {
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+
+  // A game that answers a button by doing something invisible must not put a
+  // panel over a conversation the user opened to ask about the weather.
+  scene.claimFor('fantasy-rpg', 'chat-a');
+  assert.equal(scene.status().chatId, '');
+
+  scene.show({ title: 'Village of Mara — day 4' });
+  scene.claimFor('fantasy-rpg', '');
+  assert.equal(scene.status().chatId, '', 'no conversation is not a conversation called nothing');
+
+  scene.claimFor('space-trader', 'chat-a');
+  assert.equal(scene.status().chatId, '', 'only the plugin driving the panel may claim it');
+});
+
+test('claiming for a press announces once, and only on a change', () => {
+  const scene = new Scene();
+  const seen = [];
+  scene.on('state', (status) => seen.push(status.chatId));
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+  scene.show({ title: 'Village of Mara — day 4' });
+
+  seen.length = 0;
+  scene.claimFor('fantasy-rpg', 'chat-a');
+  assert.deepEqual(seen, ['chat-a'], 'or the panel appears only on the next repaint');
+
+  seen.length = 0;
+  scene.claimFor('fantasy-rpg', 'chat-a');
+  assert.deepEqual(seen, [], 'a press that changed nothing repaints nothing');
+});
+
+test('a panel button answers in exactly the words a move answers in', async () => {
+  // The two presses are shaped and cut by the same function on purpose, so the
+  // window has one way to act on an answer rather than two. A key added to one
+  // path and not the other is what this catches.
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({ status: 'you look around', submit: 'I look around' }) });
+  scene.show({ title: 'Village of Mara — day 4', actions: [{ id: 'look', label: 'Look around' }] });
+
+  const move = await scene.act('look');
+  assert.deepEqual(Object.keys(move).sort(), ['board', 'cards', 'entry', 'sheet', 'status', 'submit']);
+  assert.deepEqual(Object.keys(normaliseAnswer({})).sort(), Object.keys(move).sort());
+});
+
+test('what a press may answer with is cut to what the window can use', () => {
+  const answer = normaliseAnswer({
+    status: '  a line\nsplit over two  ',
+    submit: 'x'.repeat(500),
+    sheet: 'yes',
+    board: 1,
+    cards: true,
+    openTheDoor: 'and everything behind it',
+  });
+
+  assert.equal(answer.status, 'a line split over two', 'the status bar is one line, however it was written');
+  assert.equal(answer.submit.length, 400);
+  // A flag is a flag: a truthy value is not `true`, or a plugin returning
+  // `sheet: 'later'` would throw the dialog open over whatever is on screen.
+  assert.equal(answer.sheet, false);
+  assert.equal(answer.board, false);
+  assert.equal(answer.cards, true);
+  assert.equal(answer.entry, false);
+  assert.equal('openTheDoor' in answer, false, 'the window acts on a fixed set of keys, and no others');
+
+  assert.equal(normaliseAnswer({ status: 'y'.repeat(300) }).status.length, 200);
+});
+
+test('a press answered with nothing at all is still an answer', () => {
+  // A plugin that did its work silently returns undefined, and the window has
+  // to be able to act on that without checking for it first.
+  assert.deepEqual(normaliseAnswer(undefined), {
+    status: '',
+    submit: '',
+    sheet: false,
+    board: false,
+    cards: false,
+    entry: false,
+  });
 });

@@ -486,7 +486,7 @@ src/
 ## Testing
 
 ```bash
-npm test       # 571 unit tests, no Electron, no network
+npm test       # 611 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
 ```
 

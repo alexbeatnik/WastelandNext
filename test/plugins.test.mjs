@@ -928,99 +928,12 @@ test('a setting the manifest never declared is refused', async () => {
   await assert.rejects(() => host.setSetting('plain', 'anything', 'x'), /no setting called/);
 });
 
-/* ============================ the audio service ============================ */
-
-const { AudioOut } = await import('../src/main/audio.mjs');
-
-test('the bar shows nothing until a plugin loads something', () => {
-  const out = new AudioOut();
-  assert.equal(out.status().source, null);
-  assert.deepEqual(out.status().buttons, []);
-});
-
-test('a loaded track is described in the plugin′s own words', () => {
-  const out = new AudioOut();
-  const status = out.load({ path: 'C:\\Music\\a.mp3', label: 'Pink Moon', sublabel: '3 of 47' });
-  assert.equal(status.source.label, 'Pink Moon');
-  assert.equal(status.source.sublabel, '3 of 47');
-  assert.match(status.source.src, /^wasteland-media:\/\/track\//);
-  assert.equal(status.playing, true);
-});
-
-test('a track with no label falls back to its file name', () => {
-  const out = new AudioOut();
-  assert.equal(out.load({ path: '/music/Pink Moon.flac' }).source.label, 'Pink Moon');
-});
-
-test('only the loaded file may be read, and only while it is loaded', () => {
-  // The scheme reaches anywhere on disk, so the queue is not the allowlist —
-  // the one thing put in front of the user is.
-  const out = new AudioOut();
-  out.load({ path: '/music/a.mp3' });
-  assert.equal(out.allows('/music/a.mp3'), true);
-  assert.equal(out.allows('/music/b.mp3'), false);
-  assert.equal(out.allows('C:\\Users\\me\\.ssh\\id_rsa'), false);
-  out.clear();
-  assert.equal(out.allows('/music/a.mp3'), false);
-});
-
-test('only declared buttons are offered', () => {
-  const out = new AudioOut();
-  out.setTransport({ pluginId: 'p', buttons: ['next', 'rewind'], handle() {} });
-  // `rewind` is not a button the bar has; silently drawing one would be a
-  // control nothing is listening to.
-  assert.deepEqual(out.status().buttons, ['next']);
-});
-
-test('what next means is asked of the plugin, never decided here', async () => {
-  const out = new AudioOut();
-  const asked = [];
-  out.setTransport({ pluginId: 'p', buttons: ['next', 'previous'], handle: (name) => asked.push(name) });
-  out.load({ path: '/music/a.mp3' });
-
-  await out.command('next');
-  await out.command('ended');
-  // play/pause are true of any source and are answered without the plugin.
-  await out.command('pause');
-  assert.deepEqual(asked, ['next', 'ended']);
-  assert.equal(out.status().playing, false);
-});
-
-test('a transport that throws becomes an error on the bar, not a crash', async () => {
-  const out = new AudioOut();
-  out.setTransport({
-    pluginId: 'p',
-    buttons: ['next'],
-    handle: () => {
-      throw new Error('the library moved');
-    },
-  });
-  out.load({ path: '/music/a.mp3' });
-  const status = await out.command('next');
-  assert.match(status.error, /the library moved/);
-  assert.equal(status.playing, false);
-});
-
-test('switching the driving plugin off takes the bar with it', () => {
-  const out = new AudioOut();
-  out.setTransport({ pluginId: 'music', buttons: ['next'], handle() {} });
-  out.load({ path: '/music/a.mp3' });
-
-  // Somebody else's plugin going away must not stop the music.
-  out.releasePlugin('unrelated');
-  assert.ok(out.status().source);
-
-  out.releasePlugin('music');
-  assert.equal(out.status().source, null);
-  assert.deepEqual(out.status().buttons, []);
-});
-
-test('stop still works when no plugin is driving, or a stale bar cannot be dismissed', async () => {
-  const out = new AudioOut();
-  out.load({ path: '/music/a.mp3' });
-  await out.command('stop');
-  assert.equal(out.status().source, null);
-});
+/*
+ * The audio service itself is tested in `audio.test.mjs`: it is a service the
+ * app owns rather than a plugin. The plugin-facing half — a transport
+ * registered by a real plugin, driving a real bar — is below, against the
+ * published player.
+ */
 
 /* ============================ the published plugins ============================ */
 

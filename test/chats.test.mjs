@@ -3,10 +3,10 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setDataRoot } from '../src/main/paths.mjs';
+import { chatsDir, setDataRoot } from '../src/main/paths.mjs';
 
 setDataRoot(mkdtempSync(join(tmpdir(), 'wl-data-')));
 
@@ -149,4 +149,18 @@ test('an empty id still means "there is no chat yet", not "it is gone"', () => {
   const chat = chats.append('', { role: 'assistant', content: 'unprompted' });
   assert.ok(chat?.id);
   assert.equal(chat.messages.length, 1);
+});
+
+test('a half-written chat file does not take the picker down with it', () => {
+  // A process that died mid-write leaves a truncated JSON file. It is one
+  // conversation, and it must cost one conversation: a picker that throws while
+  // being drawn loses every other chat in the app, which is the same failure
+  // `#broken` exists to prevent on the plugin list.
+  const good = chats.append('', { role: 'user', content: 'still here' });
+  writeFileSync(join(chatsDir(), '20250101120000-abcdef.json'), '{"id":"20250101120000-abcdef","messa', 'utf8');
+
+  const listed = chats.list();
+  assert.ok(listed.some((row) => row.id === good.id), 'the readable conversations still list');
+  assert.equal(listed.some((row) => row.id === '20250101120000-abcdef'), false, 'and the unreadable one is skipped');
+  assert.equal(chats.read('20250101120000-abcdef'), null);
 });
