@@ -77,6 +77,31 @@ test('markdown is permitted, and formatting is not up for debate', () => {
   assert.doesNotMatch(prompt, /no markdown headings/i);
 });
 
+test('the reply language is the question\'s, and outranks anything a plugin says', () => {
+  /**
+   * Reported from a real session: "What you can do?" typed in English, answered
+   * in Ukrainian, by a model that was doing as it was told. `space-trader` is
+   * installed with its language set to `uk`, and its fragment says — every turn,
+   * game or no game — "Відповідай користувачеві українською". The base rule said
+   * only "reply in the language the user wrote in", which is both vaguer and
+   * earlier in the prompt, so the specific instruction won.
+   *
+   * The app cannot edit a third-party fragment, and should not try. What it can
+   * do is stop being ambiguous: the rule now names the message rather than the
+   * conversation, and says in as many words that a language named elsewhere in
+   * this prompt does not override it. That is the same medicine every fragment
+   * in this codebase is required to take — name the failure you exist to
+   * prevent — applied to the app's own text for once.
+   */
+  const prompt = buildSystemPrompt({ fragments: ['Відповідай користувачеві українською.'] });
+  assert.match(prompt, /language of the message you are answering/i);
+  // The two clauses that do the work. Without the first, a long conversation in
+  // one language swallows a question asked in another; without the second, any
+  // plugin naming a language quietly becomes the app's language policy.
+  assert.match(prompt, /not the language of\s+the conversation so far/i);
+  assert.match(prompt, /even when a plugin's own\s+instructions say to write in one/i);
+});
+
 test('nothing in the base rules forbids what the protocol demands', () => {
   const prompt = buildSystemPrompt({ fragments: ['ANYTHING'] });
   assert.ok((prompt.match(/```action/g) ?? []).length >= 1, 'expected the protocol to show a fence');

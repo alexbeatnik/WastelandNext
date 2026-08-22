@@ -34,6 +34,12 @@ costs a model real time deliberating over whether a fenced action block counts a
 plain data and built into DOM nodes, never assigned as HTML, so a reply that happens to contain markup is displayed
 rather than executed.
 
+**The reply comes back in the language of the question.** Not the language of the conversation so far — a question
+typed in English is answered in English however many turns before it were not — and not a language some installed
+plugin names. A game plugin set to Ukrainian used to make the whole session Ukrainian, so "what can you do?" got an
+answer nobody had asked for in that language; the base rule now says which of the two wins. Asking for a language still
+works, because that is the user asking.
+
 **A reply can end in buttons.** A numbered list is not a menu: "1. Open it 2. Show other versions — which would you
 like?" is a control nobody can press, and it was the only thing a model could produce. A reply may instead end in a
 fenced `choices` block stating the options as data; the app reads it, draws a button each, and pressing one sends that
@@ -480,16 +486,17 @@ src/
 ## Testing
 
 ```bash
-npm test       # 565 unit tests, no Electron, no network
+npm test       # 571 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
 ```
 
 `npm test` covers the pure logic: action extraction and its JSON repair, the `choices` fence, `<think>` splitting and
 stripping, markdown parsing, chat storage and id validation, path vetting, HuggingFace URL building and quantisation
 choice, prompt assembly, plugin manifest validation and host activation, the scene document and what a game may offer,
-registry entries and version comparison, Range parsing and custom-scheme URLs, GGUF header parsing and the context/GPU
-arithmetic, the compaction threshold and the window backstop, folder collection and its budget, download speed and
-resume, notices, dictation, and crash-log summarising.
+registry entries and version comparison, the shipped index list as a set of publishers, per-plugin auto-update and the
+decisions it must not move, Range parsing and custom-scheme URLs, GGUF header parsing and the context/GPU arithmetic,
+the compaction threshold and the window backstop, folder collection and its budget, download speed and resume, notices,
+dictation, and crash-log summarising.
 
 Three of them are there because two passing tests can sit either side of missing wiring. `game-prompt.test.mjs` builds
 a real agent over a real scene and reads the prompt's size before and after a game registers, because a rule the prompt
@@ -498,7 +505,7 @@ layer down: storage refusing to append to a conversation that was deleted proves
 that conversation by creating a new one. `load-guard.test.mjs` covers the two halves of one load — a second click
 inside the window before `starting` is set, and an UNLOAD pressed while there is still no process to stop.
 
-`npm run smoke` boots the real window offscreen — 285 checks — and covers what unit tests cannot: a renderer that throws
+`npm run smoke` boots the real window offscreen — 312 checks — and covers what unit tests cannot: a renderer that throws
 on boot, a preload that failed to expose its bridge, an IPC channel renamed on one side only, a layout that breaks at
 one screen shape, or a control that stops resetting what it should. It clicks NEW CHAT, presses Enter, attaches a
 folder and detaches one of two, switches a plugin off and checks the main process agrees, allows a plugin that brings
@@ -506,8 +513,10 @@ code and watches it start, installs a theme and asserts the window actually repa
 the English back, plays a real audio file through the media scheme, presses a button a reply offered and checks the
 words went out as an ordinary message, plays a turn of a game — hotkeys, the sheet, the map, a chooser — and checks a
 digit typed into the composer stays a digit, deletes a conversation from the picker without opening it, opens the About
-box and checks every link in it would leave the window, resizes through seven screen shapes, and checks that a reply
-containing `<img onerror=…>` is drawn as text rather than run.
+box and checks every link in it would leave the window, ticks AUTO-UPDATE and reads the answer back from the main
+process, folds the registry list away and measures that a closed section really is only its heading, counts the waiting
+updates on the GET PLUGINS heading and watches the number go away when a plugin is set to fetch its own, resizes
+through seven screen shapes, and checks that a reply containing `<img onerror=…>` is drawn as text rather than run.
 
 A check the running screen cannot answer is reported as `skip` with the reason, never quietly relaxed until it fits. A
 hosted runner's display is 1024×768: every layout shape goes unasked there, and the map is checked against the rule

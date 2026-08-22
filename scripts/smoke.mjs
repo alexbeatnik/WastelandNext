@@ -70,11 +70,48 @@ function finish() {
   app.exit(failures.length === 0 ? 0 : 1);
 }
 
-// A hung renderer must fail the run, not hang the caller forever.
+/**
+ * A hung renderer must fail the run, not hang the caller forever.
+ *
+ * Generous on purpose. This is a deadline for a renderer that has stopped
+ * answering, not a performance budget for the suite: the run takes about
+ * three-quarters of a minute on the machine it was written on, and a hosted
+ * runner is slower. Set close to the real duration it stops being a watchdog
+ * and becomes a coin flip — which is what 45s had quietly become, failing on
+ * the 312th check of 312 while nothing was wrong.
+ *
+ * If this ever needs raising again, look first at what is sleeping. A check
+ * that waits a fixed interval for something it could poll for is where the time
+ * goes; `waitFor` is the way to stop paying it.
+ */
 const watchdog = setTimeout(() => {
-  check('completed within 45s', false, 'timed out');
+  check('completed within 90s', false, 'timed out');
   finish();
-}, 45_000);
+}, 90_000);
+
+/**
+ * Wait until an expression in the renderer is true, instead of sleeping.
+ *
+ * The same reasoning as the layout checks polling `window.innerWidth` rather
+ * than sleeping after a resize: a fixed interval is either longer than it needs
+ * to be on every run, or too short on the one run that mattered. Returns
+ * whether the condition arrived, so a caller can assert on it rather than
+ * discover it three checks later.
+ */
+async function waitFor(window, expression, { timeoutMs = 4000, every = 100 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let ok = false;
+    try {
+      ok = Boolean(await window.webContents.executeJavaScript(`Boolean(${expression})`));
+    } catch {
+      /* mid-navigation or mid-repaint; try again */
+    }
+    if (ok) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, every));
+  }
+}
 
 /**
  * Shapes the layout has to survive.
@@ -851,7 +888,7 @@ async function checkAutoUpdate(window) {
     box.checked = true;
     box.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
-  await new Promise((r) => setTimeout(r, 400));
+  await waitFor(window, `document.querySelector('#plugin-list .plugin-item[data-plugin="smoke-code"] .plugin-auto input').checked`);
 
   // From the main process, not from the box that was just clicked.
   const stored = await window.webContents.executeJavaScript(
@@ -866,7 +903,7 @@ async function checkAutoUpdate(window) {
   check('the row comes back showing it', repainted.installed.checked === true, JSON.stringify(repainted.installed));
 
   await window.webContents.executeJavaScript(`window.wasteland.plugins.setAutoUpdate('smoke-code', false)`);
-  await new Promise((r) => setTimeout(r, 300));
+  await waitFor(window, `!document.querySelector('#plugin-list .plugin-item[data-plugin="smoke-code"] .plugin-auto input').checked`);
 }
 
 /**
@@ -922,7 +959,7 @@ async function checkUpdateBadge(window) {
       `window.wasteland.plugins.addRegistry('http://127.0.0.1:${port}/index.json')`,
     );
     await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
-    await new Promise((r) => setTimeout(r, 1500));
+    await waitFor(window, `document.getElementById('store-badge').textContent === '1'`);
 
     const waiting = await read();
     check(`one update published shows a 1 — "${waiting.text}"`, waiting.text === '1', JSON.stringify(waiting));
@@ -933,12 +970,12 @@ async function checkUpdateBadge(window) {
 
     // Set to look after itself, so it is no longer asking for anything.
     await window.webContents.executeJavaScript(`window.wasteland.plugins.setAutoUpdate('smoke-code', true)`);
-    await new Promise((r) => setTimeout(r, 400));
+    await waitFor(window, `document.getElementById('store-badge').hidden`);
     const handled = await read();
     check(`a plugin that updates itself is not counted — ${handled.display}`, handled.display === 'none', JSON.stringify(handled));
 
     await window.webContents.executeJavaScript(`window.wasteland.plugins.setAutoUpdate('smoke-code', false)`);
-    await new Promise((r) => setTimeout(r, 400));
+    await waitFor(window, `!document.getElementById('store-badge').hidden`);
     const back = await read();
     check(`unticking it puts the number back — "${back.text}"`, back.text === '1', JSON.stringify(back));
 
@@ -946,7 +983,7 @@ async function checkUpdateBadge(window) {
       `window.wasteland.plugins.removeRegistry('http://127.0.0.1:${port}/index.json')`,
     );
     await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
-    await new Promise((r) => setTimeout(r, 1500));
+    await waitFor(window, `document.getElementById('store-badge').hidden`);
     const gone = await read();
     check(`and it clears when nothing publishes one — ${gone.display}`, gone.display === 'none', JSON.stringify(gone));
   } finally {
@@ -994,7 +1031,7 @@ async function checkRestart(window) {
   const list = await window.webContents.executeJavaScript(`window.wasteland.plugins.list()`);
   const stale = list.map((plugin) => (plugin.id === 'smoke-code' ? { ...plugin, stale: true } : plugin));
   window.webContents.send('event', { event: 'plugins:changed', plugins: stale, themes: [], locales: [] });
-  await new Promise((r) => setTimeout(r, 300));
+  await waitFor(window, `getComputedStyle(document.getElementById('btn-restart')).display !== 'none'`);
 
   const showing = await read();
   check(`a plugin newer on disk puts RESTART in the topbar — ${showing.display}`, showing.display !== 'none', showing.display);
@@ -1007,7 +1044,7 @@ async function checkRestart(window) {
   // through a real call, because what repaints from the truth is the `changed`
   // event the host emits on its way out of one.
   await window.webContents.executeJavaScript(`window.wasteland.plugins.setAutoUpdate('smoke-code', false)`);
-  await new Promise((r) => setTimeout(r, 300));
+  await waitFor(window, `getComputedStyle(document.getElementById('btn-restart')).display === 'none'`);
   const restored = await read();
   check(`and it goes away again — ${restored.display}`, restored.display === 'none', restored.display);
 }

@@ -396,7 +396,7 @@ removes such a line only when it parses, so prose that merely starts with a brac
 
 **`vector-effect: non-scaling-stroke` makes `stroke-width` a count of *device pixels*, not viewBox units.** The roads shipped at `0.4` and were drawn four tenths of a pixel wide — a map with no roads on it, from a stylesheet that read perfectly well. The smoke run now reads the computed `strokeWidth` rather than counting the elements, because counting them passed while the bug was on screen. Everything a board draws over artwork needs the same treatment a label does: a dark casing under each road and a dark plate under each name, or a thin line vanishes wherever the picture beneath it happens to match its brightness.
 
-**A backtick inside a template literal ends it.** `smoke.mjs` drives the renderer with `executeJavaScript(\`…\`)`, and a comment inside one of those strings mentioning a CSS property in backticks turned into `SyntaxError: missing ) after argument list` — thrown at *module load*, so Electron never reached `whenReady`, the 45-second watchdog never armed, no report was written and `npm run smoke` simply hung. `node --check scripts/smoke.mjs` answers in a second and is worth reaching for the moment a run stops producing a report at all.
+**A backtick inside a template literal ends it.** `smoke.mjs` drives the renderer with `executeJavaScript(\`…\`)`, and a comment inside one of those strings mentioning a CSS property in backticks turned into `SyntaxError: missing ) after argument list` — thrown at *module load*, so Electron never reached `whenReady`, the watchdog never armed, no report was written and `npm run smoke` simply hung. `node --check scripts/smoke.mjs` answers in a second and is worth reaching for the moment a run stops producing a report at all.
 
 **A board picture comes from the plugin's data directory, not its installed tree.** That tree is deleted and rewritten on every update, so a map the *user* generated would vanish on a version bump. `@data` is a reserved first segment on `wasteland-plugin:` that routes to `pluginDataDir` instead; the confinement check afterwards is unchanged and does the same job for either root. The URL is built in the main process for the reason the audio bar records — the scheme and its encoding belong to the process that takes them apart again.
 
@@ -549,6 +549,14 @@ half, because the page is shared with whatever ran before and a run that left it
 (`PSSecurityException`), which reads as a broken test script rather than a machine setting. `cmd /c npm test` runs, and
 so does `node --test test/*.test.mjs` — the tests themselves are not involved either way.
 
+**But `cmd /c` from Git Bash runs nothing at all, and says so with exit 0.** MSYS rewrites anything that looks like a
+Unix path in an argument, so `/c` arrives at `cmd` as `C:/Program Files/Git/c`; `cmd` finds no command, opens
+interactively against a null stdin, prints its banner and exits **successfully**. That is the worst shape a failure can
+take: `npm run dist` returned 0, wrote no installer, and left the previous build sitting in `dist/` looking like the one
+that had just been made. Use `cmd //c "npm test"`, or `MSYS_NO_PATHCONV=1 cmd /c …`, or skip the shim entirely — `npm
+test` and `npx electron-builder --win` both run straight from Git Bash. Whichever is used, check the artefact rather
+than the exit code: a build is proved by a timestamp in `dist/`, not by a 0.
+
 ## Invariants
 
 **The system prompt must not contradict itself.** It once said "no markdown" one paragraph before requiring a fenced
@@ -560,6 +568,16 @@ action block, and a model spent its whole budget deliberating over that instead 
 returns plain objects; the renderer turns them into elements. A reply containing `<img onerror=…>` is therefore
 displayed rather than run, and the smoke test checks exactly that. Emphasis requires its delimiters to hug the text,
 or `2 * 3 * 4 = 24` comes out italicised.
+
+**The reply's language is the question's, and the app has to say so louder than a plugin does.** "What you can do?"
+typed in English, answered in Ukrainian — by a model doing exactly as it was told, because `space-trader` is installed
+with `language: uk` and its fragment says *Відповідай користувачеві українською* on every turn, game or no game. The
+base rule said only "reply in the language the user wrote in", which is vaguer, earlier in the prompt, and reads as a
+statement about the conversation rather than about the message. So it names the message now, and says in as many words
+that a language named elsewhere in the prompt does not override it. This is the "absent, not forbidden" rule met from a
+third direction: a plugin's fragment is not a place the app can edit, so where the two genuinely collide the app's own
+text has to be the specific one for once. It is the only rule in `BASE` that claims precedence over a fragment, and it
+should stay the only one — the general case is still that a plugin owns what it contributes.
 
 **A disabled capability is absent from the system prompt, not forbidden in it.** A model told about a tool reaches for
 it, and the resulting refusal reads to the user as a bug. `buildSystemPrompt` assembles from parts; `prompts.test.mjs`
@@ -1006,11 +1024,23 @@ these means updating `SHAPES` in `scripts/smoke.mjs`.
 
 Two levels, and the second exists because the first cannot see the failure:
 
+The commands themselves are in `.claude/skills/verify/SKILL.md`, along with the several ways each of them fails while
+appearing to work on this platform — `cmd /c` from Git Bash exiting 0 without running anything, a smoke run that writes
+no report because a backtick closed a template literal, `capturePage` returning a stale frame from a hidden window. It
+is the file to read before reporting that a build succeeded.
+
 `npm test` — pure logic, no Electron, no network. Fast enough to run on every change.
 
 `npm run smoke` — boots the real window offscreen and drives it. This is what catches a renamed IPC channel, a renderer
 that throws on boot, a layout that breaks at one screen shape, or a control that stops resetting what it should. Both of
 these must pass.
+
+**The watchdog is a deadline for a hang, not a budget for the suite.** It was 45s while the run took 45.6s, which is not
+a watchdog but a coin flip — it failed on the 312th check of 312 with nothing wrong, and would have failed every time on
+a slower runner. It is 90s now. The way to keep it honest is not to raise it again but to stop sleeping: `waitFor` polls
+the renderer for the condition a check is actually waiting on, the same reasoning that already made the layout checks
+poll `window.innerWidth` instead of sleeping after a resize. Converting the fixed intervals in the plugin checks took
+five seconds off the run on its own.
 
 When a fix is for something a user reported, the test should reproduce *their* case, not a tidy abstraction of it. The
 numbers in `gpu.test.mjs` are a 25 GB model on a 12 GB card because that is what failed; the log excerpt in
