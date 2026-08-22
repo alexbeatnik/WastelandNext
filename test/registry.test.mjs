@@ -154,6 +154,7 @@ test('the registry defaults to the published one and can be pointed elsewhere', 
 
 const {
   BUNDLED_REGISTRIES,
+  SHIPPED_REGISTRIES,
   addRegistry,
   fetchIndex: fetchAll,
   normaliseRegistryUrl,
@@ -212,6 +213,39 @@ test('a registry is named by owner and repository where it can be', () => {
   assert.equal(registryLabel('https://raw.githubusercontent.com/alexbeatnik/wasteland-plugins/main/index.json'), 'alexbeatnik/wasteland-plugins');
   assert.equal(registryLabel('https://plugins.example.test/index.json'), 'plugins.example.test');
   assert.equal(registryLabel('nonsense'), 'nonsense');
+});
+
+test('every shipped index is a distinct https URL, and the ones with plugins in them are all here', () => {
+  // The list decides what the app offers to download, so a typo in it is a
+  // registry row that permanently reports a failure nobody can remove.
+  for (const url of SHIPPED_REGISTRIES) {
+    assert.equal(normaliseRegistryUrl(url).ok, true, url);
+    assert.match(url, /^https:\/\//, url);
+    assert.match(url, /\/index\.json$/, url);
+  }
+  assert.equal(new Set(SHIPPED_REGISTRIES).size, SHIPPED_REGISTRIES.length, 'a duplicate is a row drawn twice');
+
+  /**
+   * Every plugin repository this build knows about, by owner and name.
+   *
+   * Asserted as a set rather than a count because the failure it caught was a
+   * publisher going missing rather than the list being the wrong length: two of
+   * these are somebody else's repositories, and the second one was added months
+   * after the first with nothing tying the two together. Listing an index is
+   * this build saying the plugin is worth offering, not that the code was
+   * written here — everything downstream is unchanged either way.
+   */
+  assert.deepEqual(new Set(SHIPPED_REGISTRIES.map((url) => registryLabel(url))), new Set([
+    'alexbeatnik/wasteland-plugin-manul-browser',
+    'alexbeatnik/wasteland-plugin-voice-input',
+    'alexbeatnik/wasteland-plugin-audio-player',
+    'alexbeatnik/wasteland-plugin-reminders',
+    'alexbeatnik/wasteland-plugin-space-trader',
+    'alexbeatnik/wasteland-plugin-ukrainian',
+    'alexbeatnik/wasteland-plugin-phosphor-themes',
+    'awakeserg/wasteland-plugin-fantasy-rpg',
+    'awakeserg/wasteland-plugin-valley-theme',
+  ]));
 });
 
 test('the registries the app ships with are always listed and cannot be removed', async () => {

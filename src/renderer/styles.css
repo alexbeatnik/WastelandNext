@@ -137,6 +137,24 @@ body.no-crt .crt {
 .topbar .stat.warn { color: var(--warn); }
 .topbar .stat.ok { color: var(--ok); }
 
+/* Something on disk is newer than what is running. Bright rather than a warning
+   colour: nothing is broken, there is simply one thing left to press. */
+.topbar .restart {
+  display: inline-flex;
+  align-items: center;
+  border-color: var(--amber-bright);
+  color: var(--amber-bright);
+  white-space: nowrap;
+}
+
+/* `hidden` is only the UA rule `[hidden] { display: none }`, and the weakest
+   author-level `display` outranks the whole UA sheet — so a button given a
+   `display` above and toggled by `hidden` needs its own rule or it is on screen
+   from boot with the attribute faithfully set. The drop veil shipped that way. */
+.topbar .restart[hidden] {
+  display: none;
+}
+
 #toggle-panel {
   margin-left: auto;
 }
@@ -284,11 +302,46 @@ body.no-crt .crt {
   content: '▾ ';
 }
 
+/* How many updates are waiting, on the heading of the section that holds them.
+   Bright, because it is the one thing on a closed section asking to be opened. */
+.section > summary .badge {
+  display: inline-block;
+  margin-left: 0.5em;
+  padding: 0 0.35em;
+  border: 1px solid var(--amber-bright);
+  color: var(--amber-bright);
+  font-size: 0.85em;
+  line-height: 1.4;
+}
+
+/* The rule above gives it a `display`, and any author-level `display` outranks
+   the UA rule behind `hidden` — without this the badge is on screen from boot
+   with the attribute faithfully set, which is how the drop veil shipped. */
+.section > summary .badge[hidden] {
+  display: none;
+}
+
 .section-body {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
   padding: 0.5rem;
+}
+
+/* A section inside a section. Quieter than the ones in the rail so the nesting
+   reads as nesting rather than as two lists that happen to touch. */
+.subsection {
+  background: transparent;
+}
+
+.subsection > summary {
+  color: var(--amber-dim);
+  font-size: 0.8em;
+  padding: 0.2rem 0.35rem;
+}
+
+.subsection > .section-body {
+  padding: 0.35rem;
 }
 
 /* ============================ Controls ============================ */
@@ -1391,6 +1444,18 @@ button.card:disabled {
   display: flex;
   gap: 0.3rem;
   margin-top: 0.15rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* Keeping this one current, without being asked. Sits with the buttons because
+   it is a decision about the plugin rather than a setting the plugin reads —
+   `store.get` has never heard of it. */
+.plugin-auto {
+  font-size: 0.76em;
+  letter-spacing: 0.05em;
+  color: var(--amber-dim);
+  margin-left: auto;
 }
 
 .plugin-buttons button {

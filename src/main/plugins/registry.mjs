@@ -80,6 +80,7 @@ export const SHIPPED_REGISTRIES = [
   'https://raw.githubusercontent.com/awakeserg/wasteland-plugin-fantasy-rpg/main/index.json',
   'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-ukrainian/main/index.json',
   'https://raw.githubusercontent.com/alexbeatnik/wasteland-plugin-phosphor-themes/main/index.json',
+  'https://raw.githubusercontent.com/awakeserg/wasteland-plugin-valley-theme/main/index.json',
 ];
 
 /**

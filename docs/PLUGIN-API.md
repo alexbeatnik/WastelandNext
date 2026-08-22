@@ -860,7 +860,18 @@ Put the directory in the app's plugin folder and restart:
 | Linux | `~/.config/Wasteland Next/plugins/<id>/` |
 
 Beside `plugins/` in the same directory you will find `config.json` (where `plugins.<id>` records whether yours is
-enabled and approved), `plugin-state/<id>.json` (your `ctx.state`) and `plugin-data/<id>/` (your `ctx.dataDir()`).
+enabled, approved and set to auto-update), `plugin-state/<id>.json` (your `ctx.state`) and `plugin-data/<id>/` (your
+`ctx.dataDir()`).
+
+If the user has ticked AUTO-UPDATE on your row, the app installs whatever your registry publishes that is newer, a few
+seconds after it starts — the ordinary install path with the click supplied in advance, checksum and all. Nothing about
+the state it finds is changed by that: a plugin that was switched off stays off, and one still waiting for ALLOW AND
+RUN is still waiting. Two things follow for you. Your `ctx.state` document and your `ctx.dataDir()` survive it, because
+both sit outside the installed tree — the tree itself is replaced wholesale, so anything you wrote inside it is gone.
+And the update does not take effect until the app restarts, because Node caches modules by URL for the life of the
+process; the app draws a RESTART button for that, and your plugin goes on running its previous version until it is
+pressed. Write your state migrations so that the *old* code can survive reading a document the new code wrote, or a
+user who does not restart for a week is running last week's code against this week's data.
 Deleting the whole `plugins/<id>` directory and the two entries is a clean uninstall by hand.
 
 The directory name must equal the manifest's `id`. Switch it on in **PLUGINS**; a plugin with code needs

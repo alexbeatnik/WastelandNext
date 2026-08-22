@@ -597,6 +597,82 @@ test('switching an installed plugin on from the list is the consent', async () =
   assert.ok(host.action('ping'));
 });
 
+/* ============================ auto-update ============================ */
+
+test('auto-update is off until it is asked for, and is stored beside approval', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-autoupdate-'));
+  install(root, 'keeper', {
+    manifest: { actions: ['ping'] },
+    source: `export function activate(ctx) { ctx.action({ type: 'ping', run: async () => ({ ok: true }) }); }`,
+  });
+
+  const host = await installedHost(root, { keeper: { enabled: true, approved: true } });
+  // Nobody has ticked it, so nothing may replace this plugin behind the user's
+  // back. An installed plugin defaulting to auto-update would make the approval
+  // on its row a decision about one version and a blank cheque for every later
+  // one.
+  assert.equal(host.list().find((plugin) => plugin.id === 'keeper').autoUpdate, false);
+
+  await host.setAutoUpdate('keeper', true);
+  assert.equal(host.list().find((plugin) => plugin.id === 'keeper').autoUpdate, true);
+  assert.equal(config.get('plugins').keeper.autoUpdate, true);
+  // The two decisions are separate and neither may move the other: switching
+  // updates on must not approve anything, and it must not switch anything on.
+  assert.equal(config.get('plugins').keeper.approved, true);
+  assert.equal(config.get('plugins').keeper.enabled, true);
+
+  await host.setAutoUpdate('keeper', false);
+  assert.equal(config.get('plugins').keeper.autoUpdate, false);
+});
+
+test('auto-update does not approve, and does not survive as approval', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-autoupdate-wary-'));
+  install(root, 'wary', {
+    manifest: { actions: ['ping'] },
+    source: `export function activate(ctx) { ctx.action({ type: 'ping', run: async () => ({ ok: true }) }); }`,
+  });
+
+  const host = await installedHost(root, { wary: { enabled: true, approved: false } });
+  await host.setAutoUpdate('wary', true);
+
+  // Newer bytes on disk are not permission to run them. A plugin waiting for
+  // approval that auto-updates is still waiting for approval.
+  assert.equal(config.get('plugins').wary.approved, false);
+  assert.equal(host.list().find((plugin) => plugin.id === 'wary').active, false);
+  assert.equal(host.action('ping'), null);
+});
+
+test('a built-in is refused rather than given a box that cannot work', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-autoupdate-builtin-'));
+  const host = await installedHost(root);
+
+  const builtin = host.list().find((plugin) => plugin.builtin);
+  assert.ok(builtin, 'the built-ins are what this is about');
+  // There is no registry entry that could replace a built-in — it is part of
+  // the build and arrives with the app's own update — so a ticked box would
+  // promise something that can never happen.
+  assert.equal(builtin.autoUpdate, false);
+  await assert.rejects(() => host.setAutoUpdate(builtin.id, true), /ships with the app/);
+  await assert.rejects(() => host.setAutoUpdate('nothing-called-this', true), /no plugin called/);
+});
+
+test('rediscovery keeps the auto-update choice, like every other decision', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-autoupdate-reload-'));
+  install(root, 'remembered', {
+    manifest: { actions: ['ping'] },
+    source: `export function activate(ctx) { ctx.action({ type: 'ping', run: async () => ({ ok: true }) }); }`,
+  });
+
+  const host = await installedHost(root, { remembered: { enabled: true, approved: true } });
+  await host.setAutoUpdate('remembered', true);
+
+  // `mergeEnablement` spreads the stored record rather than rebuilding it, and
+  // this is the field that would be quietly dropped if it ever stopped doing
+  // so — with the symptom being a box that unticks itself every launch.
+  await host.refresh();
+  assert.equal(host.list().find((plugin) => plugin.id === 'remembered').autoUpdate, true);
+});
+
 test('a plugin that throws on activation is contained and explains itself', async () => {
   const root = mkdtempSync(join(tmpdir(), 'wl-throwing-'));
   install(root, 'thrower', { source: `export function activate() { throw new Error('no'); }` });

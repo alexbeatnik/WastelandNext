@@ -27,6 +27,15 @@
       <span class="brand">WASTELAND<span class="version">NEXT</span></span>
       <span class="stat" id="stat-model">MODEL: NONE</span>
       <span class="stat" id="stat-compute" hidden>RUN: —</span>
+      <!-- Only ever on screen when something on disk is newer than what is
+           running — a plugin installed or auto-updated while the app was open.
+           Here rather than only on the plugin's row because the row is inside a
+           collapsed section in a panel that is closed on a narrow window, and
+           an update that finishes with nothing to press is one nobody
+           finishes. -->
+      <button class="restart" id="btn-restart" title="Close and start again to finish a plugin update" hidden>
+        [ RESTART ]
+      </button>
       <button class="ghost" id="btn-about" title="About Wasteland Next">[ ABOUT ]</button>
       <button class="ghost" id="toggle-panel" title="Toggle the left panel">☰</button>
     </header>
@@ -138,7 +147,13 @@
         <!-- The registry. Nothing here is fetched until the section is opened:
              the app must not talk to the network because it was started. -->
         <details class="section" id="section-store">
-          <summary>GET PLUGINS</summary>
+          <!-- The count of installed plugins with a newer version published and
+               nobody set to fetch it. On the heading rather than inside the
+               section, because the whole difficulty is that the section is
+               closed: an update sitting in a list nobody opens is one nobody
+               applies. Empty and hidden whenever there is nothing waiting — a
+               badge that is always there is a number nobody reads. -->
+          <summary>GET PLUGINS<span class="badge" id="store-badge" hidden></span></summary>
           <div class="section-body">
             <div class="row">
               <button id="btn-store-refresh">[ REFRESH ]</button>
@@ -151,15 +166,22 @@
 
             <!-- Where the list above comes from. Adding one widens what the app
                  will offer to download, so it is a URL typed in and a button
-                 pressed — never something a page or a plugin can arrange. -->
-            <div class="field">
-              <span>REGISTRIES</span>
-              <div id="registry-list" class="registry-list"></div>
-              <div class="row">
-                <input id="registry-url" type="text" placeholder="https://github.com/owner/repo" />
-                <button id="btn-registry-add">[ ADD ]</button>
+                 pressed — never something a page or a plugin can arrange.
+
+                 Folded away by default: this is a list of the app's own indexes
+                 nine times out of ten, and it grows a row with every plugin
+                 that ships. Left open it pushed the thing the section is for —
+                 the plugins themselves — off the bottom of the panel. -->
+            <details class="section subsection" id="section-registries">
+              <summary>REGISTRIES</summary>
+              <div class="section-body">
+                <div id="registry-list" class="registry-list"></div>
+                <div class="row">
+                  <input id="registry-url" type="text" placeholder="https://github.com/owner/repo" />
+                  <button id="btn-registry-add">[ ADD ]</button>
+                </div>
               </div>
-            </div>
+            </details>
           </div>
         </details>
 

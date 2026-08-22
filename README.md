@@ -161,8 +161,10 @@ row; a list of reminders is neither of those, so a plugin also gets one JSON doc
 which the app never reads the inside of. It is written whole and renamed into place, because a half-written file reads
 back as empty — which would be every reminder you had set, gone, with nothing saying so.
 
-**More than one registry, and archives off your own disk.** GET PLUGINS lists the registries it asks; paste a
-repository URL — `https://github.com/owner/repo` is expanded to the index inside it — and press ADD. An index has to be
+**More than one registry, and archives off your own disk.** **REGISTRIES**, folded away at the bottom of GET PLUGINS,
+lists the indexes it asks; paste a repository URL — `https://github.com/owner/repo` is expanded to the index inside it
+— and press ADD. It is folded because it is the app's own list nine times out of ten and grows a row with every plugin
+that ships, and left open it pushed the plugins themselves off the bottom of the panel. An index has to be
 served over https, since it is a list of URLs and checksums deciding what gets downloaded and unpacked; loopback is the
 exception, for anyone serving their own. More than one index ships with the app — something large enough to have its
 own release cycle is reasonably published from its own repository, and asking you to paste a URL to find a plugin the
@@ -178,10 +180,27 @@ distinction the app draws between a path a model names and a path a person picks
 archive is refused if any entry would unpack outside its own directory, the manifest has to be one this build can use,
 and the code does not run until you press ALLOW AND RUN.
 
+**A number on the GET PLUGINS heading is how many updates are waiting.** The section is closed by default and the
+UPDATE buttons are inside it, so an update nobody knew about was an update nobody applied. The count leaves out
+anything already looked after — a plugin set to AUTO-UPDATE fetches its own, and an entry needing a newer plugin API
+draws no button — so pressing everything it points at clears it.
+
+**AUTO-UPDATE keeps one plugin current without being asked.** A box on the plugin's own row, off until you tick it,
+and it is a separate decision from ALLOW AND RUN on purpose: that one says this plugin's code may run, this one says a
+version you have not looked at may replace it. A few seconds after launch the app asks the registries and installs
+anything newer for the plugins that asked for it, reporting on the row it belongs to rather than into a section nobody
+has opened. It can only ever replace something already installed — it installs nothing new, approves nothing and
+switches nothing on, so a plugin waiting for permission is still waiting for it afterwards, and one you switched off
+stays off. Every check the ordinary install path makes still runs, checksum included. Built-ins have no box: they are
+part of the app and arrive with its own update.
+
 **Updating a plugin needs a restart to finish.** Node caches modules by URL for the life of the process, so replacing
-files does not replace what is running; the row says so, and the version shown is what is installed. An earlier attempt
-to defeat the cache by importing the entry point under a unique query made it worse — the query is not inherited by the
-plugin's own imports, so a new entry point linked against cached dependencies and failed outright.
+files does not replace what is running; the row says so, the version shown is what is installed, and **`[ RESTART ]`**
+appears in the top bar for as long as anything is in that state — on the row too, beside the note that explains it. An
+earlier attempt to defeat the cache by importing the entry point under a unique query made it worse — the query is not
+inherited by the plugin's own imports, so a new entry point linked against cached dependencies and failed outright.
+Restarting goes through the ordinary shutdown, so llama-server is stopped before the new instance comes up rather than
+left holding port 8080 against it.
 
 **Writing one is documented in full in [docs/PLUGIN-API.md](docs/PLUGIN-API.md)** — the manifest, every method on
 `ctx`, every service, the rules that are not negotiable, and a checklist. It is written to be followed straight
@@ -193,8 +212,9 @@ and the workflow that publishes it:
 [browser control](https://github.com/alexbeatnik/wasteland-plugin-manul-browser),
 [Space Trader](https://github.com/alexbeatnik/wasteland-plugin-space-trader),
 [Fantasy RPG](https://github.com/awakeserg/wasteland-plugin-fantasy-rpg),
-[Ukrainian](https://github.com/alexbeatnik/wasteland-plugin-ukrainian) and
-[phosphor themes](https://github.com/alexbeatnik/wasteland-plugin-phosphor-themes).
+[Ukrainian](https://github.com/alexbeatnik/wasteland-plugin-ukrainian),
+[phosphor themes](https://github.com/alexbeatnik/wasteland-plugin-phosphor-themes) and
+[Valley](https://github.com/awakeserg/wasteland-plugin-valley-theme).
 
 ## Requirements
 
@@ -261,6 +281,12 @@ Nothing is signed, so SmartScreen warns on first run and after each update.
 
 The packaged app is the app and its plugins' host, nothing else: capabilities are installed from a registry at runtime,
 so a release does not have to carry them. It still needs `llama-server` (or a remote endpoint) for inference.
+
+**One copy runs at a time.** Starting Wasteland Next while it is already running raises the window you have instead of
+opening a second one. That is about video memory rather than tidiness: a second instance loads its own llama-server
+with its own copy of the weights, and a card that holds one model comfortably holds two of them not at all — what you
+would see is the first window's model failing to answer, or the second refusing to load with a VRAM error naming a
+shortage nothing on screen explains.
 
 ## First run
 

@@ -20,12 +20,38 @@ const repoRoot = resolve(here, '..', '..');
 
 setDataRoot(app.getPath('userData'));
 
-// Before `whenReady`, and therefore at module scope: after the app is ready the
-// scheme table is fixed, and a scheme registered late is an ordinary opaque one
-// — no Range support, so a seek in a long track would do nothing.
-registerSchemes();
+/**
+ * One Wasteland Next at a time.
+ *
+ * Not tidiness. A second instance loads its own llama-server with its own copy
+ * of the weights, and a card that held one model comfortably holds two of them
+ * not at all — what the user sees is the *first* window's model failing to
+ * answer, or the second one refusing to load with a VRAM error naming a
+ * shortage nothing on screen explains. The port makes it worse rather than
+ * better: llama.cpp binds 8080, so the second instance either loses the bind
+ * and reports a failure it did not cause, or the second window ends up talking
+ * to the first window's model and reporting it as its own.
+ *
+ * The lock is taken here, in the module body, before anything is registered.
+ * Whoever fails to take it has no window, no handlers and no `before-quit`
+ * listener, so it goes away in the same tick instead of running the teardown
+ * for children it never had. The instance that holds the lock hears about the
+ * attempt and raises the window it already has, which is what the second launch
+ * was asking for — double-clicking the icon means "show me the app", and an
+ * app that appears to do nothing when it is started is the failure this would
+ * otherwise cause.
+ */
+const primary = app.requestSingleInstanceLock();
 
 let window = null;
+
+/** Bring the one window we have to the front, restoring it if it was minimised. */
+function focusWindow() {
+  if (!window || window.isDestroyed()) return;
+  if (window.isMinimized()) window.restore();
+  if (!window.isVisible()) window.show();
+  window.focus();
+}
 
 function createWindow() {
   window = new BrowserWindow({
@@ -85,42 +111,65 @@ function createWindow() {
   return window;
 }
 
-app.whenReady().then(() => {
-  config.load();
-  // The handlers, as opposed to the schemes, can only be installed now.
-  serveAssets();
-  registerIpc(() => window);
-  createWindow();
+if (!primary) {
+  // The instance already running has been told; there is nothing for this one
+  // to do and nothing of ours to tear down. Quitting here, before any listener
+  // is attached, is what keeps it out of the teardown path below — that path
+  // stops llama-server and a plugin's Chrome, and this process has neither.
+  app.quit();
+} else {
+  // Before `whenReady`, and therefore at module scope: after the app is ready
+  // the scheme table is fixed, and a scheme registered late is an ordinary
+  // opaque one — no Range support, so a seek in a long track would do nothing.
+  registerSchemes();
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  // Somebody double-clicked the icon, or opened the app from a shortcut, while
+  // it was already running — usually because the window was minimised or behind
+  // something. Raising what we have is the answer they were asking for.
+  app.on('second-instance', () => focusWindow());
+
+  app.whenReady().then(() => {
+    config.load();
+    // The handlers, as opposed to the schemes, can only be installed now.
+    serveAssets();
+    registerIpc(() => window);
+    createWindow();
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
-});
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
 
-/**
- * Tear the children down before we go.
- *
- * A llama-server holding a multi-gigabyte model, or a Chrome a plugin
- * launched, would otherwise outlive the window that owns it.
- */
-let quitting = false;
-app.on('before-quit', (event) => {
-  if (quitting) return;
-  event.preventDefault();
-  quitting = true;
+  /**
+   * Tear the children down before we go.
+   *
+   * A llama-server holding a multi-gigabyte model, or a Chrome a plugin
+   * launched, would otherwise outlive the window that owns it.
+   *
+   * This is also the path a restart takes: `app.relaunch()` spawns a helper
+   * that waits for this process to disappear and then starts a new one, so
+   * everything below still runs. That order matters — an orphaned llama-server
+   * would still be holding port 8080 when the new instance came up.
+   */
+  let quitting = false;
+  app.on('before-quit', (event) => {
+    if (quitting) return;
+    event.preventDefault();
+    quitting = true;
 
-  // Everything is awaited before `app.exit`, and the whole sequence — not just
-  // the plugin half — is what the timeout races. An earlier version called
-  // `server.unload()` without awaiting it and exited in the same tick, which
-  // left llama-server holding several gigabytes as an orphan.
-  // Concurrent, not sequential: the plugins and the model are independent, and
-  // a Chrome that refuses to close must not eat the budget that would have
-  // stopped llama-server.
-  const teardown = Promise.allSettled([shutdown(), server.unload()]);
+    // Everything is awaited before `app.exit`, and the whole sequence — not
+    // just the plugin half — is what the timeout races. An earlier version
+    // called `server.unload()` without awaiting it and exited in the same tick,
+    // which left llama-server holding several gigabytes as an orphan.
+    // Concurrent, not sequential: the plugins and the model are independent,
+    // and a Chrome that refuses to close must not eat the budget that would
+    // have stopped llama-server.
+    const teardown = Promise.allSettled([shutdown(), server.unload()]);
 
-  Promise.race([teardown, new Promise((r) => setTimeout(r, 8000))]).finally(() => app.exit(0));
-});
+    Promise.race([teardown, new Promise((r) => setTimeout(r, 8000))]).finally(() => app.exit(0));
+  });
+}

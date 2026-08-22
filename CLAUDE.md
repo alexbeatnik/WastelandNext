@@ -120,9 +120,61 @@ only then move it into `plugins/`. A half-unpacked directory would be discovered
 broken plugin the user never installed. An entry with no `sha256` is refused outright: the index is the only thing
 being trusted, and without a digest nothing ties it to the bytes.
 
+**Auto-update is per plugin, off by default, and may only ever replace something already installed.** A ticked box is
+a second decision, separate from approval and stored beside it, and the separation is the whole of what makes it safe:
+approval says *this plugin's code may run*, and auto-update says *code the user has not seen may replace it*. So it
+installs nothing new, approves nothing and switches nothing on — `mergeEnablement` never overrules a record that
+already exists, which is what keeps a plugin waiting for approval still waiting for it after an update, and a
+switched-off one switched off. It is refused for a built-in rather than ignored: those are part of the build and arrive
+with the app's own update, so a box promising anything else is a control that cannot work. Everything downstream is
+unchanged — the checksum is still mandatory, `assertSafeArchive` still reads the archive before it is unpacked — because
+this is the ordinary install path with the click supplied in advance.
+
+**The count of waiting updates goes on the GET PLUGINS heading, and leaves out anything already spoken for.** The
+UPDATE buttons have been on the rows the whole time; what was missing was any reason to go and look, because the
+section is shut, the boot fetch is deliberately silent about failures, and nothing on a closed heading said an update
+existed. So `updatesWaiting()` measures the installed list against what the registries published and `paintUpdateBadge`
+writes the number where it can be read without opening anything. Two exclusions, and both are the same rule — a badge
+is a request for attention, and a number that cannot be cleared by doing everything it asks for is worse than none. A
+plugin set to AUTO-UPDATE is not counted, because it fetches its own new version at the next launch and there is
+nothing to press. An entry that is not `compatible` is not counted either, because `paintPlugins` draws no button for
+one, which is the same fact from the other end. It is painted from *both* `paintPlugins` and `paintStore`: either half
+of the comparison can change without the other, so neither can be the only caller.
+
+**The auto-update run reports on the plugin's own row, not into GET PLUGINS.** Same reasoning as `ctx.progress`: nobody
+has opened that section — the whole point is that this happens without being asked — so a 40 MB download narrated into
+`store-status` is a download that appears to be nothing at all. It runs once, `AUTO_UPDATE_DELAY_MS` after boot, for
+the reason the app's own update check is delayed: a fetch racing the first render is invisible work that makes the
+window slow to open. Nothing waits on it, one registry being down or one archive failing its checksum stops nothing
+else, and the meter is cleared in a `finally` — a failed update leaving a bar on the row reads as one still running.
+
 **Versions are compared numerically, in two places.** `1.10.0` is newer than `1.9.0`, which a string comparison gets
 backwards — and an update button that never appears is indistinguishable from a registry that never publishes. The
 renderer has its own small copy because it decides which rows show UPDATE.
+
+**An update that has landed needs somewhere to be finished, and the row is not enough.** Node caches ES modules by
+resolved URL for the life of the process, so an updated plugin goes on running the code it was first imported with —
+`stale` has said so on the row for a while, and that was only half an answer. The row is inside a collapsed section, in
+a panel a narrow window closes entirely, and an auto-update that landed at boot leaves no trace anywhere the user was
+looking. So RESTART is in the topbar beside the model, drawn only while something is actually stale and naming what it
+is for. It is `display: inline-flex` and toggled by `hidden`, which means it needs its own `[hidden] { display: none }`
+— the rule every element in this app styled with a `display` needs, and the one the drop veil shipped without.
+
+**A restart goes through `before-quit`, not around it.** `app.relaunch()` spawns a helper that waits for this process to
+disappear and only then starts a new one, so the ordinary exit path still runs and llama-server is stopped before the
+new instance comes up — an orphan of it would still be holding port 8080 when the replacement went looking. That also
+means the single-instance lock is released in time; measured, it is about a tenth of a second between the two.
+
+**Only one Wasteland Next runs at a time, and the reason is video memory.** A second instance loads its own
+llama-server with its own copy of the weights, and a card that holds one model comfortably holds two of them not at
+all — what the user sees is the *first* window's model failing to answer, or the second refusing to load with a VRAM
+error naming a shortage nothing on screen explains. The port makes it worse rather than better: llama.cpp binds 8080,
+so the second instance either loses the bind and reports a failure it did not cause, or ends up talking to the first
+window's model and reporting it as its own. The lock is taken in `main.mjs`'s body before anything is registered, so
+the loser has no window, no handlers and no `before-quit` listener and goes away in the same tick instead of running a
+teardown for children it never had. The winner hears `second-instance` and raises the window it already has — a
+double-clicked icon means "show me the app", and an app that appears to do nothing when it is started is the failure
+this would otherwise cause.
 
 **Anything meant to be discovered must be on disk before `registerIpc`.** It is what starts `plugins.load()`. The smoke
 runner writes its test theme first for that reason; the version that wrote it afterwards reported four plugins and a
@@ -235,10 +287,22 @@ makes that safe is that it is not silent, and the source label travels with the 
 
 **Adding to `SHIPPED_REGISTRIES` is a different act from a user adding one, and not every entry is ours.** The user's
 own registries are a widening of *their* trust; the shipped list is this build saying a plugin is worth offering, which
-is not the same claim as having written it — one of the indexes is another account's repository, and the order is the
-one the plugin sections are drawn in rather than the order they were added. What makes either safe is that nothing
+is not the same claim as having written it — two of the indexes are another account's repositories, and the order is
+the one the plugin sections are drawn in rather than the order they were added. A publisher with more than one plugin
+is the case that goes wrong quietly: the second repository is added months after the first, with nothing tying the two
+together, so `registry.test.mjs` asserts the whole list as a *set of owner/repo labels* rather than a count — a missing
+publisher is a plugin that simply never appears in GET PLUGINS, which reads as a registry that never published it. What makes either safe is that nothing
 downstream cares which it was: the checksum is still mandatory, `assertSafeArchive` still reads the archive before it
 is unpacked, and code still runs only once somebody switches it on.
+
+**The registry list folds away, and the plugins do not.** GET PLUGINS is a section for finding a plugin; REGISTRIES is
+where the list came from, which is the app's own indexes nine times out of ten and grows a row with every plugin that
+ships. Left open it pushed the thing the section is for off the bottom of the panel. It is a `<details>` inside a
+`<details>`, which is why the smoke run counts `#panel-left > .section` rather than every `.section` on the page — a
+count of all of them turns "is the rail complete" into a number that moves whenever anything inside a section is
+rearranged. What is asserted about the fold is the section's *height* against its summary's, not the `open` attribute:
+a details element marked closed whose contents are still laid out is the same failure as `hidden` losing to an author
+`display`, and only the height tells them apart.
 
 **One registry failing must not empty the list, and *all* of them failing must not hide which were asked.** `fetchIndex`
 reports per source and never throws: it returns `error` only when nothing answered, because throwing lost exactly the

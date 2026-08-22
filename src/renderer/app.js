@@ -1305,6 +1305,16 @@ function paintPlugins(list = []) {
       update.addEventListener('click', () => installPlugin(published, update));
       buttons.append(update);
     }
+    // The one thing left to do about an update that has already landed. It is
+    // in the topbar as well, because this row is inside a collapsed section in
+    // a panel that a narrow window closes entirely — but the note explaining
+    // why is here, and a note with nothing to press beside it is half an answer.
+    if (plugin.stale) {
+      const restart = el('button', '', '[ RESTART ]');
+      restart.title = 'Close and start again, so the new version is the one that runs';
+      restart.addEventListener('click', () => restart$(restart));
+      buttons.append(restart);
+    }
     if (!plugin.builtin) {
       const remove = el('button', 'ghost danger', '[ REMOVE ]');
       remove.title = 'Delete this plugin from disk';
@@ -1319,6 +1329,37 @@ function paintPlugins(list = []) {
         }
       });
       buttons.append(remove);
+
+      /**
+       * Keep this one at whatever its registry publishes.
+       *
+       * A separate decision from the switch beside the name, and it is drawn
+       * separately for that reason: that one says the plugin may run, this one
+       * says a version nobody has looked at may replace it. Off unless it is
+       * ticked, and never offered for a built-in — those are part of the build
+       * and arrive with the app's own update, so a box promising anything else
+       * would be a control that cannot work.
+       */
+      const auto = el('label', 'check plugin-auto');
+      const autoBox = document.createElement('input');
+      autoBox.type = 'checkbox';
+      autoBox.checked = Boolean(plugin.autoUpdate);
+      autoBox.title = 'Install new versions of this plugin at start-up, without asking';
+      autoBox.addEventListener('change', async () => {
+        autoBox.disabled = true;
+        try {
+          paintPlugins(await api.plugins.setAutoUpdate(plugin.id, autoBox.checked));
+        } catch (err) {
+          // Put it back: the setting did not change, and a box showing a state
+          // the main process never accepted is a lie with nothing to correct it.
+          autoBox.checked = !autoBox.checked;
+          $('plugin-status').textContent = err.message;
+        } finally {
+          autoBox.disabled = false;
+        }
+      });
+      auto.append(autoBox, el('span', '', t('AUTO-UPDATE')));
+      buttons.append(auto);
     }
     if (buttons.childElementCount) row.append(buttons);
     // Redrawn from state rather than left in the DOM: this function replaces
@@ -1336,10 +1377,101 @@ function paintPlugins(list = []) {
   const active = list.filter((plugin) => plugin.active).length;
   $('plugin-status').textContent = list.length ? `${active} of ${list.length} active` : 'No plugins found.';
 
+  // From the same list: a plugin newer on disk than in memory is the only thing
+  // that puts RESTART in the topbar, and this is where that fact arrives.
+  paintRestart(list);
+  // And the count on GET PLUGINS, which is this list measured against what the
+  // registries published. Either half can change without the other, so both
+  // paints ask for it.
+  paintUpdateBadge();
+
   // From the same list and in the same breath: a plugin switched off here has
   // to lose its panel section now, not at the next repaint of something else.
   paintPluginPanels(list);
   restoreFocus(focused);
+}
+
+/**
+ * The one control that finishes a plugin update.
+ *
+ * Node caches ES modules by resolved URL for the life of the process, so an
+ * updated plugin goes on running the code it was first imported with. The row
+ * has said so for a while and that was not enough: the row is inside a
+ * collapsed section, in a panel a narrow window closes entirely, and an update
+ * that auto-installed at boot leaves no trace anywhere the user was looking. So
+ * it is in the topbar, beside the model — absent whenever there is nothing to
+ * finish, which is almost always.
+ *
+ * `hidden` alone would not do it: `.topbar .restart` gives the button a
+ * `display`, and any author-level `display` outranks the UA rule behind the
+ * attribute. The stylesheet carries the matching `[hidden]` rule.
+ */
+function paintRestart(list = []) {
+  const stale = list.filter((plugin) => plugin.stale);
+  const button = $('btn-restart');
+  button.hidden = stale.length === 0;
+  if (stale.length === 0) return;
+
+  // Named, because "restart to finish an update" with no subject is a request
+  // to restart for a reason the user cannot check.
+  const names = stale.map((plugin) => plugin.name).join(', ');
+  button.title = t('Restart to finish updating') + ` ${names}`;
+}
+
+/**
+ * How many installed plugins have an update waiting for somebody to press it.
+ *
+ * Drawn on the GET PLUGINS heading because that is the one place it can be
+ * read without opening anything: the section is closed by default, the boot
+ * fetch already knows what the registries published, and an update sitting
+ * inside a list nobody opens is an update nobody applies. The UPDATE buttons
+ * themselves have been on the rows all along — what was missing was any reason
+ * to go and look.
+ *
+ * A plugin set to AUTO-UPDATE is deliberately not counted. The number is a
+ * request for attention, and that one needs none: it fetches its own new
+ * version a few seconds after the next launch. Counting it would make the badge
+ * a number that does not go down when everything actionable has been done.
+ *
+ * `compatible` is required for the same reason, from the other direction: an
+ * entry needing a plugin API this build does not implement draws no button, and
+ * a count with no control behind it is a number nobody can clear.
+ */
+function updatesWaiting() {
+  return state.plugins.filter((plugin) => {
+    if (plugin.builtin || plugin.autoUpdate) return false;
+    const published = state.store.plugins.find((entry) => entry.id === plugin.id);
+    return Boolean(published) && published.compatible && isNewerVersion(published.version, plugin.version);
+  });
+}
+
+function paintUpdateBadge() {
+  const waiting = updatesWaiting();
+  const badge = $('store-badge');
+  badge.textContent = waiting.length ? String(waiting.length) : '';
+  badge.hidden = waiting.length === 0;
+  if (waiting.length === 0) return;
+
+  // Named, because a bare number on a heading is a quantity of something
+  // unstated. Set through `t()` rather than left in the markup: it is written
+  // after boot, so `applyDictionary` never captured it and would never reach it.
+  badge.title = `${t('Updates waiting')}: ${waiting.map((plugin) => `${plugin.name} → ${
+    state.store.plugins.find((entry) => entry.id === plugin.id)?.version ?? ''
+  }`).join(', ')}`;
+}
+
+/** Close and start again. The main process owns everything that has to stop. */
+async function restart$(button) {
+  if (button) button.disabled = true;
+  status(t('Restarting…'));
+  try {
+    await api.restart();
+  } catch (err) {
+    // The window is still here, so the button has to work again — a restart
+    // that failed silently is one the user presses forever.
+    status(err.message);
+    if (button) button.disabled = false;
+  }
 }
 
 /**
@@ -1729,6 +1861,11 @@ function paintStore() {
   if (state.store.error) $('store-status').textContent = state.store.error;
   else if (state.store.plugins.length) $('store-status').textContent = `${state.store.plugins.length} available`;
   else if (state.store.fetched) $('store-status').textContent = 'The registry lists nothing yet.';
+
+  // The other half of the count. `paintStore` runs when the registries have
+  // answered and `paintPlugins` when what is installed changes; the badge is
+  // the two measured against each other, so neither can be the only caller.
+  paintUpdateBadge();
 }
 
 /**
@@ -3616,6 +3753,8 @@ function wire() {
   bindText('set-system-prompt', 'systemPrompt');
 
   bindCheck('set-crt', 'crtEffects');
+
+  $('btn-restart').addEventListener('click', (event) => restart$(event.currentTarget));
 
   $('btn-store-refresh').addEventListener('click', () => refreshStore());
   $('btn-store-file').addEventListener('click', () => installFromFile$());

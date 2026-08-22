@@ -789,6 +789,10 @@ async function checkPlugins(window) {
   await checkApproval(window);
   await checkChoices(window);
 
+  await checkAutoUpdate(window);
+  await checkRestart(window);
+  await checkUpdateBadge(window);
+
   await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
   await new Promise((r) => setTimeout(r, 1500));
   const asked = await window.webContents.executeJavaScript(`(() => ({
@@ -799,6 +803,213 @@ async function checkPlugins(window) {
   check('and lists nothing rather than something stale', asked.rows === 0, `${asked.rows} row(s)`);
 
   await checkRegistries(window);
+}
+
+/**
+ * Keeping a plugin current, without being asked each time.
+ *
+ * The box is drawn from the list the main process answers with, so the two
+ * halves that can drift are whether it is offered at all — a built-in has no
+ * registry entry that could replace it, and a box promising updates that can
+ * never arrive is worse than none — and whether ticking it actually reaches
+ * config. The second is read back through the API rather than off the DOM: a
+ * row that painted itself optimistically would pass everything else here.
+ */
+async function checkAutoUpdate(window) {
+  say('');
+  say('Plugin auto-update');
+
+  const read = () =>
+    window.webContents.executeJavaScript(`(() => {
+      const box = (id) => {
+        const row = document.querySelector('#plugin-list .plugin-item[data-plugin="' + id + '"]');
+        const control = row?.querySelector('.plugin-auto input[type=checkbox]');
+        return control
+          ? { there: true, checked: control.checked, shown: getComputedStyle(control).display !== 'none' }
+          : { there: false, checked: false, shown: false };
+      };
+      const builtin = [...document.querySelectorAll('#plugin-list .plugin-item')]
+        .find((row) => (row.querySelector('.plugin-meta')?.textContent ?? '').includes('BUILT-IN'));
+      return {
+        installed: box('smoke-code'),
+        theme: box('smoke-theme'),
+        builtin: Boolean(builtin?.querySelector('.plugin-auto')),
+      };
+    })()`);
+
+  const start = await read();
+  check('an installed plugin is offered auto-update', start.installed.there && start.installed.shown, JSON.stringify(start.installed));
+  check('so is a theme pack, which updates the same way', start.theme.there, JSON.stringify(start.theme));
+  // Off unless somebody ticks it: an update is code arriving from outside the
+  // app, and the approval on the row was given for the version that was there.
+  check('and it is off until it is asked for', start.installed.checked === false, JSON.stringify(start.installed));
+  check('a built-in is not offered a box that cannot work', start.builtin === false, String(start.builtin));
+
+  await window.webContents.executeJavaScript(`(() => {
+    const row = document.querySelector('#plugin-list .plugin-item[data-plugin="smoke-code"]');
+    const box = row.querySelector('.plugin-auto input[type=checkbox]');
+    box.checked = true;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await new Promise((r) => setTimeout(r, 400));
+
+  // From the main process, not from the box that was just clicked.
+  const stored = await window.webContents.executeJavaScript(
+    `window.wasteland.plugins.list().then((list) => list.find((p) => p.id === 'smoke-code'))`,
+  );
+  check('ticking it is recorded where the decision lives', stored.autoUpdate === true, JSON.stringify(stored.autoUpdate));
+  // And it changed nothing else: this is a separate decision from approval and
+  // from the switch, and a control that quietly moves either is the bug.
+  check('and it approves nothing and switches nothing on', stored.approved === true && stored.enabled === true, JSON.stringify(stored));
+
+  const repainted = await read();
+  check('the row comes back showing it', repainted.installed.checked === true, JSON.stringify(repainted.installed));
+
+  await window.webContents.executeJavaScript(`window.wasteland.plugins.setAutoUpdate('smoke-code', false)`);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+/**
+ * The count of updates waiting, on the GET PLUGINS heading.
+ *
+ * The UPDATE buttons have been on the rows all along; what was missing was any
+ * reason to go and look, because the section is closed and the boot fetch is
+ * silent. So the number is asserted while the section is *shut* — a badge only
+ * visible once the list is open answers a question nobody had by then.
+ *
+ * The other half is that it goes down again. A plugin set to AUTO-UPDATE needs
+ * no attention, so it must not be counted, or the badge becomes a number that
+ * cannot be cleared by doing everything it is asking for.
+ */
+async function checkUpdateBadge(window) {
+  say('');
+  say('Updates waiting');
+
+  const { server, port } = await startRegistry([
+    {
+      id: 'smoke-code',
+      name: 'Smoke code',
+      version: '2.0.0',
+      description: 'A newer build than the one installed.',
+      apiVersion: 4,
+      kind: 'code',
+      url: 'https://example.test/smoke-code-2.0.0.zip',
+      sha256: 'b'.repeat(64),
+      size: 1024,
+    },
+  ]);
+
+  const read = () =>
+    window.webContents.executeJavaScript(`(() => {
+      const badge = document.getElementById('store-badge');
+      return {
+        there: Boolean(badge),
+        text: badge ? badge.textContent : '',
+        display: badge ? getComputedStyle(badge).display : 'missing',
+        title: badge ? badge.title : '',
+        sectionOpen: document.getElementById('section-store').open,
+      };
+    })()`);
+
+  try {
+    const quiet = await read();
+    check('the badge exists', quiet.there, 'no #store-badge');
+    // Nothing published is newer than what is installed, so there is nothing to
+    // say. A badge that is always there is a number nobody reads.
+    check(`nothing waiting means no number — ${quiet.display}`, quiet.display === 'none', JSON.stringify(quiet));
+
+    await window.webContents.executeJavaScript(
+      `window.wasteland.plugins.addRegistry('http://127.0.0.1:${port}/index.json')`,
+    );
+    await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
+    await new Promise((r) => setTimeout(r, 1500));
+
+    const waiting = await read();
+    check(`one update published shows a 1 — "${waiting.text}"`, waiting.text === '1', JSON.stringify(waiting));
+    // The point of putting it on the heading: it has to be readable without
+    // opening the section, because the section being shut is the problem.
+    check('and it is readable with the section shut', waiting.display !== 'none' && waiting.sectionOpen === false, JSON.stringify(waiting));
+    check(`a bare number says what of — "${waiting.title}"`, /Smoke code/.test(waiting.title), waiting.title);
+
+    // Set to look after itself, so it is no longer asking for anything.
+    await window.webContents.executeJavaScript(`window.wasteland.plugins.setAutoUpdate('smoke-code', true)`);
+    await new Promise((r) => setTimeout(r, 400));
+    const handled = await read();
+    check(`a plugin that updates itself is not counted — ${handled.display}`, handled.display === 'none', JSON.stringify(handled));
+
+    await window.webContents.executeJavaScript(`window.wasteland.plugins.setAutoUpdate('smoke-code', false)`);
+    await new Promise((r) => setTimeout(r, 400));
+    const back = await read();
+    check(`unticking it puts the number back — "${back.text}"`, back.text === '1', JSON.stringify(back));
+
+    await window.webContents.executeJavaScript(
+      `window.wasteland.plugins.removeRegistry('http://127.0.0.1:${port}/index.json')`,
+    );
+    await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
+    await new Promise((r) => setTimeout(r, 1500));
+    const gone = await read();
+    check(`and it clears when nothing publishes one — ${gone.display}`, gone.display === 'none', JSON.stringify(gone));
+  } finally {
+    server.close();
+  }
+}
+
+/**
+ * The one control that finishes a plugin update.
+ *
+ * Node caches modules by URL for the life of the process, so an updated plugin
+ * goes on running the code it was first imported with — and the row saying so
+ * was not enough, because the row lives in a collapsed section inside a panel a
+ * narrow window closes entirely. The button is asserted on its *computed*
+ * display rather than on `hidden`: `.topbar .restart` gives it a `display`, and
+ * any author-level `display` outranks the UA rule behind the attribute, which
+ * is exactly how the drop veil shipped visible.
+ *
+ * Driven over the real event channel, because `stale` is a fact only a process
+ * that has imported a plugin twice can produce.
+ */
+async function checkRestart(window) {
+  say('');
+  say('Restart');
+
+  const read = () =>
+    window.webContents.executeJavaScript(`(() => {
+      const button = document.getElementById('btn-restart');
+      const rowButtons = [...document.querySelectorAll('#plugin-list .plugin-item[data-plugin="smoke-code"] .plugin-buttons button')];
+      return {
+        there: Boolean(button),
+        display: button ? getComputedStyle(button).display : 'missing',
+        title: button ? button.title : '',
+        onRow: rowButtons.some((node) => node.textContent.includes('RESTART')),
+      };
+    })()`);
+
+  const quiet = await read();
+  check('the restart button exists', quiet.there, 'no #btn-restart');
+  // Nothing is stale, so nothing is offered. A permanently visible RESTART is a
+  // control that means nothing by the second time it is read.
+  check(`nothing to finish means nothing on screen — ${quiet.display}`, quiet.display === 'none', quiet.display);
+  check('and no restart button on the row either', quiet.onRow === false, String(quiet.onRow));
+
+  const list = await window.webContents.executeJavaScript(`window.wasteland.plugins.list()`);
+  const stale = list.map((plugin) => (plugin.id === 'smoke-code' ? { ...plugin, stale: true } : plugin));
+  window.webContents.send('event', { event: 'plugins:changed', plugins: stale, themes: [], locales: [] });
+  await new Promise((r) => setTimeout(r, 300));
+
+  const showing = await read();
+  check(`a plugin newer on disk puts RESTART in the topbar — ${showing.display}`, showing.display !== 'none', showing.display);
+  // Named, or "restart to finish an update" is a request the user cannot check.
+  check(`and the button says what it is for — "${showing.title}"`, /Smoke code/.test(showing.title), showing.title);
+  check('the row that explains it carries one too', showing.onRow === true, String(showing.onRow));
+
+  // Put the real list back: a synthetic one left in place would make every
+  // later check read a plugin state the main process does not have. Done
+  // through a real call, because what repaints from the truth is the `changed`
+  // event the host emits on its way out of one.
+  await window.webContents.executeJavaScript(`window.wasteland.plugins.setAutoUpdate('smoke-code', false)`);
+  await new Promise((r) => setTimeout(r, 300));
+  const restored = await read();
+  check(`and it goes away again — ${restored.display}`, restored.display === 'none', restored.display);
 }
 
 /**
@@ -902,6 +1113,54 @@ async function checkRegistries(window) {
       })),
       status: document.getElementById('store-status').textContent,
     }))()`);
+
+  /**
+   * Folded away until it is asked for.
+   *
+   * Nine times out of ten this is a list of the app's own indexes, and it grows
+   * a row with every plugin that ships — left open it pushed the thing the
+   * section is actually for, the plugins, off the bottom of the panel. Asserted
+   * on whether the rows have a box rather than on the attribute: a `<details>`
+   * marked closed whose contents are still drawn is the same class of failure
+   * as `hidden` losing to an author `display`.
+   */
+  const folded = await window.webContents.executeJavaScript(`(() => {
+    const section = document.getElementById('section-registries');
+    return {
+      there: Boolean(section),
+      tag: section ? section.tagName : '',
+      open: section ? section.open : true,
+      summary: section?.querySelector('summary')?.textContent?.trim() ?? '',
+      // Measured, not read off the attribute. A details element marked closed
+      // whose contents are still laid out is the same class of failure as the
+      // hidden attribute losing to an author-level display, and only the height
+      // can tell them apart: a closed one is its summary and nothing else.
+      // (No backticks in here — this whole string is a template literal, and a
+      // backtick inside one ends it. That has taken the entire run down before.)
+      height: section ? section.getBoundingClientRect().height : 0,
+      summaryHeight: section?.querySelector('summary')?.getBoundingClientRect().height ?? 0,
+    };
+  })()`);
+  check('the registries fold away into a section of their own', folded.there && folded.tag === 'DETAILS', JSON.stringify(folded));
+  check(`and it says what is inside it — "${folded.summary}"`, /REGISTRIES/i.test(folded.summary), folded.summary);
+  check('closed to begin with, so the plugins are what the section shows', folded.open === false, String(folded.open));
+  check(
+    `and closed means it takes only its heading — ${Math.round(folded.height)}px`,
+    folded.summaryHeight > 0 && folded.height <= folded.summaryHeight + 2,
+    JSON.stringify({ height: folded.height, summary: folded.summaryHeight }),
+  );
+
+  const opened = await window.webContents.executeJavaScript(`(() => {
+    document.getElementById('section-registries').open = true;
+    const section = document.getElementById('section-registries');
+    const row = document.querySelector('#registry-list .registry-item');
+    return { height: section.getBoundingClientRect().height, row: row ? row.getBoundingClientRect().height : 0 };
+  })()`);
+  check(
+    `opening it brings the rows back — ${Math.round(opened.height)}px`,
+    opened.height > folded.height + 10 && opened.row > 0,
+    JSON.stringify(opened),
+  );
 
   const start = await read();
   check(`the registry being asked is on screen — ${start.rows.length}`, start.rows.length === 1, JSON.stringify(start.rows));
@@ -2510,7 +2769,11 @@ app.whenReady().then(async () => {
       bridge: typeof window.wasteland === 'object',
       results: document.querySelectorAll('#search-results .repo-item').length,
       vault: document.getElementById('vault-list').textContent.trim().length,
-      sections: document.querySelectorAll('.section').length,
+      // Direct children of the rail only. A section can hold sections of its
+      // own now — GET PLUGINS folds its list of registries away into one — and
+      // counting every section on the page turns "is the rail complete" into a
+      // number that moves whenever anything inside a section is rearranged.
+      sections: document.querySelectorAll('#panel-left > .section').length,
       status: document.getElementById('status-line').textContent,
       statusShown: getComputedStyle(document.getElementById('status-line')).display,
       browserChip: Boolean(document.getElementById('stat-browser')),

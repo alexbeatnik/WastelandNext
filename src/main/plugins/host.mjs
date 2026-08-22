@@ -681,6 +681,18 @@ export class PluginHost extends EventEmitter {
         icon: entry.manifest.icon && entry.dir ? pluginAssetUrl(entry.manifest.id, entry.manifest.icon) : '',
         enabled: Boolean(state.enabled),
         approved: Boolean(state.approved),
+        /**
+         * Keep this one at whatever the registry publishes, without being asked.
+         *
+         * Off unless somebody ticked it. An update is code arriving from
+         * outside the app, and the approval on the row below was given for the
+         * version that was there at the time — so this is a second, separate
+         * decision, made once, about one plugin. It is reported even for a
+         * built-in, where it is always false: the row draws the control from
+         * this list, and a field that is sometimes absent is a control that is
+         * sometimes `undefined`.
+         */
+        autoUpdate: Boolean(state.autoUpdate) && !entry.manifest.builtin,
         /** Switching this one on means running code that came from elsewhere. */
         needsApproval: needsApproval(entry.manifest),
         // What the user asked for and what is actually running are different
@@ -718,6 +730,34 @@ export class PluginHost extends EventEmitter {
     config.update({ plugins });
 
     await this.#reactivate();
+    return this.list();
+  }
+
+  /**
+   * Keep this plugin at whatever its registry publishes.
+   *
+   * A separate decision from approval and stored beside it, because it is a
+   * separate question: approval says this plugin's code may run, and this says
+   * code the user has not seen may replace it. Nothing here grants the first —
+   * `mergeEnablement` never overrules a record that already exists, so a plugin
+   * that was never allowed to run does not become allowed by being newer, and
+   * one that was switched off stays switched off.
+   *
+   * Refused for a built-in rather than ignored: a built-in is part of the
+   * build, there is no registry entry that could replace it, and a ticked box
+   * promising updates that can never arrive is worse than no box at all.
+   */
+  async setAutoUpdate(id, on) {
+    const entry = this.#entries.get(id);
+    if (!entry) throw new Error(`no plugin called "${id}"`);
+    if (entry.manifest.builtin) throw new Error(`${entry.manifest.name} ships with the app and updates with it`);
+
+    const plugins = { ...(config.get('plugins') ?? {}) };
+    const state = plugins[id] ?? { enabled: false, approved: false };
+    plugins[id] = { ...state, autoUpdate: Boolean(on) };
+    config.update({ plugins });
+
+    this.emit('changed', this.list());
     return this.list();
   }
 

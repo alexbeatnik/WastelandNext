@@ -19,6 +19,15 @@ async function call(channel, ...args) {
 contextBridge.exposeInMainWorld('wasteland', {
   snapshot: () => call('app:snapshot'),
 
+  /**
+   * Close and start again.
+   *
+   * What finishes a plugin update: Node caches modules by URL for the life of
+   * the process, so an updated plugin keeps running the code it was first
+   * imported with until this happens.
+   */
+  restart: () => call('app:restart'),
+
   config: {
     get: () => call('config:get'),
     set: (patch) => call('config:set', patch),
@@ -64,6 +73,7 @@ contextBridge.exposeInMainWorld('wasteland', {
   plugins: {
     list: () => call('plugins:list'),
     setEnabled: (id, enabled) => call('plugins:setEnabled', id, enabled),
+    setAutoUpdate: (id, on) => call('plugins:setAutoUpdate', id, on),
     setSetting: (id, key, value) => call('plugins:setSetting', id, key, value),
     pressButton: (id, key, chatId) => call('plugins:pressButton', id, key, chatId),
     pickFolder: (id, key) => call('plugins:pickFolder', id, key),
