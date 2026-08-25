@@ -9,7 +9,7 @@ which is the best worked example of a plugin that brings something the app does 
 This document is the whole of it. It is written to be followed straight through by a person or by an agent: the
 [skeleton](#a-plugin-that-works) below is a working plugin, and everything after it is reference.
 
-**Plugin API version 9.** Put the number your plugin actually needs in the manifest — see
+**Plugin API version 12.** Put the number your plugin actually needs in the manifest — see
 [API versions](#api-versions). Declaring a version the user's build does not implement means your plugin is listed
 with "update Wasteland Next" instead of being loaded, which is deliberate and much better than failing halfway through
 `activate` on a function that does not exist yet.
@@ -564,7 +564,8 @@ const scene = ctx.service('scene');
 scene.present({
   pluginId: ctx.id,
   pluginName: 'Fantasy RPG',
-  act: async (actionId) => {
+  // `value` is what was typed into the field, and is '' for every other control.
+  act: async (actionId, value = '') => {
     if (actionId === 'bag') {
       scene.show(sheetFor(state));            // redraws the panel, costs nothing
       return { status: 'Inventory.' };
@@ -576,7 +577,7 @@ scene.present({
 scene.show({
   title: 'Village of Mara — day 4',
   subtitle: 'the common room',
-  meters: [{ label: 'HP', value: 12, max: 20, tone: 'bad' }, { label: 'GOLD', value: 14 }],
+  meters: [{ label: 'HP', value: 12, max: 20, tone: 'bad', accent: 'life' }, { label: 'GOLD', value: 14 }],
   fields: [{ label: 'QUEST', value: 'find the hunters' }],
   tags:   [{ label: 'BLEEDING', tone: 'bad' }],
   groups: [{ label: 'ITEMS', items: [{ label: 'Notched sword', note: 'a weapon' }], empty: 'nothing on you' }],
@@ -588,12 +589,24 @@ scene.clear();                                 // the game is over; the panel go
 
 Every field is optional and every one has a shape. What does not fit is dropped rather than thrown over: a game that
 stops working because one label was a number is worse than a game with one label missing. Labels are collapsed to one
-line, because they are drawn in a flex row. `tone` is `good`, `warn` or `bad` — anything else becomes plain, and it is
-the only field that reaches a class name.
+line, because they are drawn in a flex row. `tone` is `good`, `warn` or `bad` — anything else becomes plain.
 
-A meter with no `max` is drawn as a bare number, not as a bar filled to an imaginary limit. `groups` appear behind the
-**[ SHEET ]** button and in no other place, so a long inventory never competes with the transcript; `empty` is your
-words for an empty one, since only you know whether the sentence is "nothing on you" or "the journal is blank".
+**Lengths are cut rather than refused, and they are cut hard.** A title or subtitle is 80 characters, a label 48, a
+field's value 32, a note 120, a hint 200, an id 64; `status` is 200 and `submit` is 400. The cut is at exactly that
+character, so a phrase that overruns ends mid-word — trim your own text where a reader would trim it, at a space and
+with an ellipsis, rather than letting the panel do it. Widths that fit in English do not always fit in a translation,
+and that is where this bites.
+
+A meter with no `max` is drawn as a bare number, not as a bar filled to an imaginary limit. `accent` says what the bar
+*stands for* — `life`, `mana`, `vigour`, `growth`, `time` — and is a different question from `tone`, which says how it
+is going. Health, mana and stamina sit side by side in one strip and a player finds the one they want by colour long
+before reading its label, so the vocabulary is closed for the reason tones are: it reaches a class name, and a plugin
+naming its own colour would be a plugin writing the stylesheet. The words are roles rather than colours, so a theme
+stays free to decide what "life" looks like; anything else becomes plain.
+
+`groups` appear behind the **[ SHEET ]** button and in no other place, so a long inventory never competes with the
+transcript; `empty` is your words for an empty one, since only you know whether the sentence is "nothing on you" or
+"the journal is blank".
 
 **A list row can be a control.** Give an item an `action` and it is drawn as a button that calls `act` with that id:
 
@@ -660,6 +673,34 @@ than that is a list, and a list is the sheet.
 **`act` answers `{cards: true}` to open it, and the answer is what closes it.** There is no close button and no Escape:
 this is a question, and a question with a way out leaves your game waiting for an answer that never arrives. Redraw the
 scene without `cards` and the dialog goes — which is what answering does anyway.
+
+**A field is the one thing the player types into.** For a hero's name, an amount, anything a row of buttons cannot ask
+for:
+
+```js
+entry: {
+  action: 'name',                              // where the answer goes; without it there is no field
+  label: 'What are they called?',
+  hint: 'twenty-four characters at most',
+  placeholder: 'Jameson',
+  value: 'Jameson',                            // what it starts out holding, so a question can be re-asked
+  submit: 'LAUNCH',                            // the button beside it; 'OK' if you say nothing
+}
+```
+
+The answer arrives as the **second argument to `act`** — `act(actionId, value)` — with `actionId` set to the field's
+own `action`. It is cut to one line and forty characters before you see it, so you are handed a name and never a
+paragraph however the field is driven. Every other control calls `act` with `''`.
+
+Deliberately one line and nothing more. It is not a form: no second field, no validation vocabulary, no types. A game
+that needs a form is asking something that should be simpler.
+
+It exists because a name typed at the composer is a *message*, a message goes to the model first, and a small model
+asked to pass a word through sometimes answers it instead — reported as a bug, and the question is the game's, so the
+field to answer it belongs to the game.
+
+**`act` may answer `{entry: true}`** to open it, as `{cards: true}` opens the chooser. Redraw the scene without `entry`
+and the field goes.
 
 **`act` may answer `{sheet: true}`** to open the sheet. It is the only way you can: the dialog belongs to the app, so an
 inventory button that merely wrote a line in the status bar would be a control describing the thing it should have
@@ -945,8 +986,9 @@ Declare the **lowest** version that has everything you use. Declaring a higher o
 | 6 | The `scene` service — a drawn panel, a pinned row of moves and their hotkeys |
 | 7 | Pressable list rows (`item.action`) and `act` answering `{sheet: true}` |
 | 8 | `board` — a picture with pressable places, and files served from `ctx.dataDir()` |
-| 10 | `cards` — a chooser of equal cards, each with a picture, a name and a paragraph |
 | 9 | `panel` — your settings as a section of the left panel. The `browser` and `lookupBrowser` services are **removed** |
+| 10 | `cards` — a chooser of equal cards, each with a picture, a name and a paragraph |
+| 11 | `entry` — one line for the player to type into, answered as `act`'s second argument; `accent` on a meter |
 | 12 | `button` settings and `ctx.onButton` — a control that does something, drawn beside your settings; `hint` on any setting |
 
 **Not every addition moves the number.** `category` arrived after 5 and did not: a build that has never heard of the

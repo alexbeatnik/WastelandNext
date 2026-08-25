@@ -1007,10 +1007,10 @@ function stubAudio() {
  * Browser control, from the repository it moved to.
  *
  * The capability this app shipped with until it did not, now a plugin like any
- * other — and the case that proves the boundary holds. It declares no service,
- * because there is no browser here to lend it; it brings its own engine; and it
- * asks for a section in the left panel, which is the newest thing the manifest
- * can say. All three are exactly the parts that would break silently.
+ * other — and the case that proves the boundary holds. It asks for nothing the
+ * app used to lend it a browser with; it brings its own engine; and it asks for
+ * a section in the left panel, which is the newest thing the manifest can say.
+ * All three are exactly the parts that would break silently.
  *
  * Skipped when the checkout is absent. Its `bin/` is staged rather than
  * committed, so a fresh clone has the code and not the engine — which is fine
@@ -1021,14 +1021,25 @@ const haveBrowser = existsSync(join(browserCheckout, 'manul-browser', 'plugin.js
 
 test('browser control loads into the real host, without a browser in it', { skip: !haveBrowser }, async () => {
   config.update({ plugins: { 'manul-browser': { enabled: true, approved: true } } });
-  // No services at all, deliberately: if this ever needs one, the app has grown
-  // a browser again and the whole move has come undone.
+  // Handed none of them, deliberately. A service is what the app *lends*, and
+  // this plugin owning its own browser is the whole point of the move: loading
+  // with the tray empty is what proves nothing here is on loan.
   const host = new PluginHost({ userDir: browserCheckout, services: {} });
   await host.load();
 
   const row = host.list().find((plugin) => plugin.id === 'manul-browser');
   assert.equal(row.active, true, row.error);
-  assert.deepEqual(row.services, []);
+  /**
+   * What it asks for, and what it must never ask for again.
+   *
+   * It grew a `scene` since the move — a panel is a panel, and drawing what a
+   * page is doing is not owning a browser. The assertion that matters is the
+   * other one: `browser` and `lookupBrowser` are gone from the app, and a
+   * manifest naming either is a load-time error rather than a plugin quietly
+   * handed something the app no longer has.
+   */
+  for (const name of row.services) assert.ok(KNOWN_SERVICES.has(name), `unknown service "${name}"`);
+  assert.deepEqual(row.services.filter((name) => /browser/i.test(name)), []);
 
   for (const type of ['browser_steps', 'browser_close', 'web_lookup']) {
     assert.ok(host.action(type), `${type} did not register`);
@@ -1601,4 +1612,104 @@ test('voice input drives the button and tells the model nothing', { skip: !haveV
   const models = row.settings.find((setting) => setting.key === 'model');
   assert.equal(models.type, 'select');
   assert.deepEqual(models.options.map((option) => option.value), ['small', 'medium', 'large']);
+});
+
+/* ============================ the space trader plugin ============================ */
+
+/**
+ * A game, against the real host and the real panel.
+ *
+ * The other published plugins here contribute an action and a prompt fragment,
+ * which is most of the API and not the newest part of it. This one uses the
+ * whole of what a plugin may now do to a window: a `button` setting pressed
+ * from the left panel with no turn running, a chooser of cards, a one-line
+ * field answered as `act`'s second argument, meters carrying accents, and a
+ * board. Every one of those is a pairing between a manifest, a plugin's code
+ * and this app's own normaliser — the halves that are each fine alone and only
+ * fail where they meet.
+ *
+ * The scene is the app's own object rather than a stub, so what is asserted is
+ * what a window would actually be handed.
+ */
+const haveTrader = havePlugin('space-trader');
+
+async function traderHost(scene) {
+  config.update({ plugins: { 'space-trader': { enabled: true, approved: true } } });
+  const host = new PluginHost({
+    userDir: checkoutFor('space-trader'),
+    stateDir: mkdtempSync(join(tmpdir(), 'wl-trader-state-')),
+    services: { scene },
+  });
+  await host.load();
+  return host;
+}
+
+test('a game loads into the real host and draws a panel this app can render', { skip: !haveTrader }, async () => {
+  const { Scene } = await import('../src/main/scene.mjs');
+  const scene = new Scene();
+  // A panel is claimed by the conversation a turn runs in, and there is no turn
+  // here — told one directly, so `status()` has something to answer with.
+  scene.setTurn('chat-1');
+  const host = await traderHost(scene);
+
+  const row = host.list().find((plugin) => plugin.id === 'space-trader');
+  assert.equal(row.active, true, row.error);
+  assert.deepEqual(row.services, ['scene']);
+  assert.equal(row.panel, 'SPACE TRADER');
+  assert.ok(host.action('space_trader'));
+  assert.ok(host.action('space_trader_move'));
+
+  /**
+   * NEW GAME, pressed on the left panel with nothing running.
+   *
+   * The moment `button` exists for: there is no row above the composer yet,
+   * because there is no game to put one over.
+   */
+  const pressed = await host.pressButton('space-trader', 'newGame');
+  assert.equal(pressed.cards, true, 'pressing NEW GAME dealt no chooser');
+
+  const asked = scene.status().scene;
+  assert.ok(asked.cards, 'the chooser did not reach the panel');
+  assert.ok(asked.cards.items.length > 1 && asked.cards.items.length <= 8);
+  for (const card of asked.cards.items) assert.ok(card.action, 'a card with nothing to answer');
+
+  // Pressed through `scene.act`, which refuses an id that is not on offer —
+  // so this also proves the ids the plugin sends are the ids it drew.
+  const chosen = await scene.act(asked.cards.items[0].action);
+  assert.equal(chosen.entry, true, 'choosing a background opened no field');
+
+  const asking = scene.status().scene;
+  assert.ok(asking.entry, 'the field did not reach the panel');
+  assert.equal(typeof asking.entry.action, 'string');
+  assert.ok(asking.entry.action.length > 0);
+
+  // The field's answer is `act`'s second argument, and nothing else carries one.
+  const made = await scene.act(asking.entry.action, 'Jameson');
+  assert.ok(made.submit, 'naming the commander sent nothing to the transcript');
+
+  const panel = scene.status().scene;
+  assert.match(panel.title, /Jameson/);
+  assert.ok(panel.title.length <= 80 && panel.subtitle.length <= 80);
+  assert.ok(panel.meters.length > 0, 'a game with no meters');
+  // Accents are a closed vocabulary and the panel is where one arrives from a
+  // plugin; anything unrecognised is dropped rather than passed to a class name.
+  for (const meter of panel.meters) {
+    if (meter.accent) assert.ok(['life', 'mana', 'vigour', 'growth', 'time'].includes(meter.accent));
+  }
+  // The first nine moves get the digits, by position and never by request.
+  assert.ok(panel.actions.length > 0);
+  panel.actions.forEach((action, index) => {
+    assert.equal(action.key, index < 9 ? '123456789'[index] : '', `move ${index} carries "${action.key}"`);
+  });
+  assert.ok(panel.board, 'the star chart did not reach the panel');
+
+  // Looking costs nothing and sends nothing: a move that only redraws is the
+  // whole reason a panel is cheaper than a turn.
+  const looked = await scene.act(panel.actions[0].id);
+  assert.equal(looked.submit, '');
+
+  // A stale id is refused by the app rather than acted on by the plugin.
+  await assert.rejects(() => scene.act('self-destruct'), /no longer on offer/);
+
+  await host.shutdown();
 });
