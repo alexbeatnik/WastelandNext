@@ -47,19 +47,31 @@ export async function streamChat({
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
-  const res = await fetch(`${baseUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers,
-    signal,
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature,
-      max_tokens: maxTokens > 0 ? maxTokens : undefined,
-      stream: true,
-      stream_options: { include_usage: true },
-    }),
-  });
+  let res;
+  try {
+    res = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers,
+      signal,
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature,
+        max_tokens: maxTokens > 0 ? maxTokens : undefined,
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+    });
+  } catch (err) {
+    // A stop can land here as easily as mid-stream, and for llama.cpp it
+    // usually does: no headers are sent until the prompt has been processed
+    // and the first token exists, so the whole of "Thinking…" is spent inside
+    // this call. It is the same normal outcome either way — nothing streamed
+    // yet, so nothing to keep — and only a request that failed for a reason of
+    // its own is an error.
+    if (signal?.aborted) return { text: '', usage: null, aborted: true };
+    throw err;
+  }
 
   if (!res.ok || !res.body) {
     const detail = await res.text().catch(() => '');

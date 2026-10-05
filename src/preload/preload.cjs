@@ -115,7 +115,7 @@ contextBridge.exposeInMainWorld('wasteland', {
      * stands for, and sending it is the renderer's job — that is what keeps a
      * pressed button and a typed message the same thing.
      */
-    act: (actionId, value) => call('scene:act', actionId, value),
+    act: (actionId, value, pluginId) => call('scene:act', actionId, value, pluginId),
   },
 
   updates: {

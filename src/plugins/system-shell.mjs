@@ -6,7 +6,7 @@
  * many plugins end up wanting to ask it — and no plugin can arrange to skip it
  * by not calling anything.
  */
-import { exec } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 
 export const manifest = {
   id: 'system-shell',
@@ -60,6 +60,78 @@ export function shellCommandFor(command, platform = process.platform) {
   return platform === 'win32' ? `chcp 65001>nul & cmd /d /s /c "${command}"` : command;
 }
 
+/**
+ * End a command, and whatever it started.
+ *
+ * `child.kill()` ends the process `exec` spawned, which is the shell — and on
+ * Windows the command is two `cmd`s below that (see `shellCommandFor`), so
+ * killing the top one orphans the thing that was meant to stop. Measured, not
+ * assumed: a `ping` stopped that way was still in the task list afterwards,
+ * with the turn reporting it as ended. `taskkill /T` walks the tree.
+ *
+ * The pipes are destroyed as well, which is what `exec` does for its own
+ * timeout: its callback waits for them to close, and anything still holding
+ * one would keep the turn waiting on a command that has been told to stop.
+ *
+ * A POSIX shell is left to `kill` alone. `exec` offers no way to start one in
+ * its own process group, and `sh -c` hands a simple command its own process
+ * anyway.
+ */
+function killTree(child) {
+  const finish = () => {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    child.kill();
+  };
+  if (process.platform !== 'win32' || !child.pid) return finish();
+
+  const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+  // Either way the shell itself still has to go: `error` is a machine with no
+  // `taskkill` on PATH, and `close` is the tree gone or refusing to be.
+  killer.once('error', finish);
+  killer.once('close', finish);
+}
+
+/**
+ * Run one approved command to its end — its own, Stop's, or the timeout's.
+ *
+ * Answers `{ok, ended, text}`, where `ended` is `'stopped'`, `'timeout'` or
+ * `''` for a command that finished by itself. Stop used to do nothing here:
+ * the signal reached the handler and was never passed on, so the turn sat on
+ * "Running…" for as long as the command cared to take.
+ */
+export function runCommand(command, { signal = null, timeoutMs = TIMEOUT_MS } = {}) {
+  // Before anything is spawned. A listener added to a signal that has already
+  // fired never runs, and the command would then be started for a turn that
+  // had been stopped.
+  if (signal?.aborted) return Promise.resolve({ ok: false, ended: 'stopped', text: '(not run)' });
+
+  return new Promise((resolve) => {
+    let ended = '';
+    let timer = null;
+    const end = (why) => {
+      if (ended) return;
+      ended = why;
+      killTree(child);
+    };
+    const onAbort = () => end('stopped');
+
+    const child = exec(shellCommandFor(command), { maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      const printed = `${stdout ?? ''}${stderr ?? ''}`.trim();
+      const text =
+        ended === 'timeout'
+          ? `${printed}\n(did not finish within ${Math.round(timeoutMs / 1000)}s and was stopped)`.trim()
+          : printed || (err ? err.message : '(no output)');
+      resolve({ ok: !err && !ended, ended, text });
+    });
+
+    timer = setTimeout(() => end('timeout'), timeoutMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 async function run(command, turn) {
   const approved = await turn.confirm({ kind: 'shell', command });
   if (!approved) {
@@ -71,11 +143,14 @@ async function run(command, turn) {
   }
 
   turn.status('Running…');
-  const output = await new Promise((resolve) => {
-    exec(shellCommandFor(command), { timeout: TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
-      resolve({ ok: !err, text: `${stdout ?? ''}${stderr ?? ''}`.trim() || (err ? err.message : '(no output)') });
-    });
-  });
+  const output = await runCommand(command, { signal: turn.signal });
+  if (output.ended === 'stopped') {
+    return {
+      ok: false,
+      summary: 'stopped',
+      feedback: `[SHELL STOPPED] The user stopped \`${command}\` before it finished. Do not retry it.`,
+    };
+  }
 
   return {
     ok: output.ok,

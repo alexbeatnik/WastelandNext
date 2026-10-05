@@ -373,3 +373,44 @@ test('nothing answering at all still says which registries were asked', async ()
     config.update({ pluginRegistries: [] });
   }
 });
+
+test('a registry that answers and then goes quiet is given up on', async () => {
+  // The deadline used to be cancelled the moment headers arrived, so it covered
+  // the connection and nothing after it. A server — or a CDN, or a hotel
+  // network — that sent `200` and then stalled left the body read waiting for
+  // ever: GET PLUGINS said "Asking the registry…" for the rest of the session,
+  // and the auto-update run behind it never finished either.
+  const config = await import('../src/main/config.mjs');
+  config.update({ pluginRegistry: 'https://stalled.test/index.json', pluginRegistries: [] });
+
+  const original = globalThis.fetch;
+  globalThis.fetch = async (_url, options) =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"plugins":['));
+          // And then nothing, until whoever asked gives up.
+          options.signal?.addEventListener('abort', () => controller.error(options.signal.reason), { once: true });
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+
+  let giveUp;
+  try {
+    const index = await Promise.race([
+      fetchAll({ timeoutMs: 100 }),
+      new Promise((resolve) => {
+        giveUp = setTimeout(() => resolve('still waiting'), 3000);
+      }),
+    ]);
+    assert.notEqual(index, 'still waiting', 'a stalled body held the whole fetch open');
+    assert.equal(index.sources[0].ok, false);
+    assert.match(index.sources[0].error, /stopped answering/);
+    assert.match(index.error, /could not reach the plugin registry/);
+  } finally {
+    clearTimeout(giveUp);
+    globalThis.fetch = original;
+    config.update({ pluginRegistry: '' });
+  }
+});

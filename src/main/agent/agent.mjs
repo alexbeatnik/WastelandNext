@@ -368,7 +368,9 @@ export class Agent extends EventEmitter {
 
       await this.#runTurn(chat.id, 0);
 
-      if (isFirstTurn) await this.#retitle(chat.id);
+      // Not after a stop: the signal is still the aborted one, so the request
+      // could only fail, and the title taken from the prompt is already there.
+      if (isFirstTurn && !this.#abort.signal.aborted) await this.#retitle(chat.id);
       return chat.id;
     } finally {
       this.#busy = false;
@@ -394,6 +396,11 @@ export class Agent extends EventEmitter {
     // follow-ups can carry a conversation past the window without a single new
     // message from the user.
     await this.#maybeCompact(chatId, { context });
+
+    // Compaction is a model call of its own and Stop can land inside it. There
+    // is no reply on screen yet, so there is nothing owed — and going on would
+    // put a cursor in the transcript for a request that is already cancelled.
+    if (this.#abort?.signal.aborted) return;
 
     // Read back after `#maybeCompact`, which awaits — so the conversation can
     // have gone in the meantime. `#buildMessages` would meet a null and throw a
@@ -472,6 +479,13 @@ export class Agent extends EventEmitter {
         fedBack = true;
       }
     }
+
+    // The loop asks before each action; this asks after the last one. A stop
+    // pressed while an action ran — or used to answer its approval dialog —
+    // would otherwise send the result into another model call on a signal that
+    // is already aborted. The result itself is kept: it is in the transcript,
+    // and the model reads it with whatever the user says next.
+    if (this.#abort?.signal.aborted) return;
 
     // A result the model has not seen yet is only useful if it gets another
     // turn to react to it. Bounded, or a stubborn model loops forever.
@@ -659,7 +673,12 @@ export class Agent extends EventEmitter {
         ],
         promptBudget(usage.max),
       );
-      const { text } = await this.#complete(ask, { silent: true });
+      const { text, aborted } = await this.#complete(ask, { silent: true });
+      // A stopped request hands back whatever had streamed, because for a
+      // reply the partial text is worth keeping. Here it is the opposite: this
+      // text *replaces* everything it summarises, and half a sentence stored in
+      // place of the conversation is the conversation lost.
+      if (aborted) return false;
       const summary = text.trim();
       if (!summary) return false;
 

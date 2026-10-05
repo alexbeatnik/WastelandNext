@@ -91,7 +91,22 @@ const HEADING = /^(#{1,6})\s+(.*)$/;
 const BULLET = /^\s*[-*+]\s+(.*)$/;
 const NUMBERED = /^\s*\d+[.)]\s+(.*)$/;
 const QUOTE = /^\s*>\s?(.*)$/;
-const FENCE = /^\s*```(\w*)\s*$/;
+/**
+ * Where a code block starts, and where it stops.
+ *
+ * Two patterns, because the two lines are not the same thing. The opener names
+ * a language, and a language is not made of word characters: `c++`, `c#` and
+ * `objective-c` were all refused by `\w*`, so the line fell through as a
+ * paragraph and the bare fence written to *close* the block opened one instead
+ * — everything after it, to the end of the reply, was drawn as code. Whatever
+ * follows the language is ignored, but may not contain a backtick, or a line
+ * of inline code written with three of them would be an opener too.
+ *
+ * The closer is a bare fence and nothing else, at least as long as the one it
+ * closes. That is what lets a reply show a fence inside a longer one.
+ */
+const FENCE_OPEN = /^\s*(`{3,})\s*([^\s`]*)[^`]*$/;
+const FENCE_CLOSE = /^\s*(`{3,})\s*$/;
 
 /**
  * Parse a reply into blocks.
@@ -119,17 +134,18 @@ export function parseMarkdown(text) {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
 
-    const fence = FENCE.exec(line);
+    const fence = FENCE_OPEN.exec(line);
     if (fence) {
       endParagraph();
       endList();
+      const closes = (candidate) => (FENCE_CLOSE.exec(candidate)?.[1].length ?? 0) >= fence[1].length;
       const body = [];
       i += 1;
-      while (i < lines.length && !FENCE.test(lines[i])) {
+      while (i < lines.length && !closes(lines[i])) {
         body.push(lines[i]);
         i += 1;
       }
-      blocks.push({ type: 'code', lang: fence[1] ?? '', text: body.join('\n') });
+      blocks.push({ type: 'code', lang: fence[2] ?? '', text: body.join('\n') });
       continue;
     }
 

@@ -75,7 +75,14 @@ async function resolveRelease() {
 
   // Fallback: build the pinned URL by hand. Its asset name follows the same
   // scheme every release uses.
-  const suffix = process.platform === 'win32' ? 'bin-win-vulkan-x64' : process.platform === 'darwin' ? 'bin-macos-arm64' : 'bin-ubuntu-vulkan-x64';
+  // The architecture is asked on macOS for the reason `assetPatterns` asks it:
+  // an Intel Mac handed the arm64 build downloads cleanly and cannot run it.
+  const suffix =
+    process.platform === 'win32'
+      ? 'bin-win-vulkan-x64'
+      : process.platform === 'darwin'
+        ? `bin-macos-${process.arch === 'arm64' ? 'arm64' : 'x64'}`
+        : 'bin-ubuntu-vulkan-x64';
   const name = `llama-${PINNED_TAG}-${suffix}.zip`;
   return { tag: PINNED_TAG, name, url: `https://github.com/${REPO}/releases/download/${PINNED_TAG}/${name}` };
 }
@@ -144,7 +151,10 @@ export function extractZip(zipPath, targetDir) {
   for (const [command, args] of extractors(zipPath, targetDir)) {
     const result = spawnSync(command, args, { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });
     if (result.status === 0) return command;
-    failures.push(`${command}: ${result.error?.code ?? String(result.stderr ?? '').trim().split('\n')[0] ?? `exit ${result.status}`}`);
+    // `||`, not `??`: an extractor that fails without a word leaves an empty
+    // first line, which is not nullish — and the reason then read `tar: `.
+    const said = String(result.stderr ?? '').trim().split('\n')[0].trim();
+    failures.push(`${command}: ${result.error?.code ?? (said || `exit ${result.status}`)}`);
   }
   throw new Error(
     `could not unpack the archive (${failures.join('; ')})${

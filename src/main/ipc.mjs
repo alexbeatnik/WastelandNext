@@ -659,14 +659,13 @@ export function registerIpc(windowGetter) {
     // A built-in has no directory to delete, and offering it would be a button
     // that cannot work.
     if (entry?.builtin) throw new Error(`${entry.name} ships with the app and cannot be removed`);
-    await registry.uninstall(id);
-    // Its document and its data directory go with it. Leaving them behind would
-    // mean reinstalling brought back reminders the user removed along with the
-    // plugin — and would leave a gigabyte of speech model with nothing on screen
-    // to explain what it belongs to.
-    plugins.forgetData(id);
-    await plugins.refresh();
-    return plugins.list();
+    // The host orders it: the plugin is stopped while it still has files to be
+    // stopped with, then deleted, then forgotten. Its document and its data
+    // directory go with it — leaving them behind would mean reinstalling
+    // brought back reminders the user removed along with the plugin, and would
+    // leave a gigabyte of speech model with nothing on screen to explain what
+    // it belongs to.
+    return plugins.uninstall(id, () => registry.uninstall(id));
   });
 
   /* ---------- audio ---------- */
@@ -697,7 +696,10 @@ export function registerIpc(windowGetter) {
    * than a second one that would have to re-learn the busy check, the transcript
    * entry and what to do when a send fails.
    */
-  handle('scene:act', (actionId, value) => scene.act(actionId, value));
+  // The plugin comes with the press because there can be more than one panel,
+  // and which of them is on screen is a fact about the open conversation —
+  // which only the window has.
+  handle('scene:act', (actionId, value, pluginId) => scene.act(actionId, value, pluginId));
 
   /* ---------- dictation ---------- */
 

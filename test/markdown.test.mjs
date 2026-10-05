@@ -99,6 +99,42 @@ test('an unclosed fence still yields a code block', () => {
   assert.equal(blocks[0].text, 'stuck open');
 });
 
+test('a fence is a fence whatever the language is called', () => {
+  // The opener only admitted a language made of word characters, so "```c++"
+  // was not one — it fell through as a paragraph, and the bare fence meant to
+  // close the block *opened* one instead. Everything after it, to the end of
+  // the reply, was then drawn as code.
+  for (const lang of ['c++', 'c#', 'objective-c', 'shell-session', '.env']) {
+    const blocks = parseMarkdown('before\n\n```' + lang + '\nint x = **1**;\n```\n\nafter **this**');
+    assert.deepEqual(kinds(blocks), ['paragraph', 'code', 'paragraph'], lang);
+    assert.equal(blocks[1].lang, lang);
+    assert.equal(blocks[1].text, 'int x = **1**;');
+    assert.deepEqual(blocks[2].inline.map((span) => span.type), ['text', 'bold'], 'the prose after it is prose again');
+  }
+});
+
+test('whatever follows the language on the opening line is not the language', () => {
+  const blocks = parseMarkdown('```js title="app.js"\nlet a;\n```\nafter');
+  assert.deepEqual(kinds(blocks), ['code', 'paragraph']);
+  assert.equal(blocks[0].lang, 'js');
+  assert.equal(blocks[0].text, 'let a;');
+});
+
+test('three backticks around words on one line are not a fence', () => {
+  // An opener cannot contain a backtick after the fence itself, or a line of
+  // inline code written with three of them would swallow the rest of the reply.
+  const blocks = parseMarkdown('```not a block``` and more\n\nafter');
+  assert.deepEqual(kinds(blocks), ['paragraph', 'paragraph']);
+});
+
+test('only a bare fence closes a block', () => {
+  // A line inside the code that merely starts with a fence — a markdown
+  // example, say — is part of the code.
+  const blocks = parseMarkdown('````md\n```js\nlet a;\n```\n````\nafter');
+  assert.deepEqual(kinds(blocks), ['code', 'paragraph']);
+  assert.equal(blocks[0].text, '```js\nlet a;\n```');
+});
+
 test('bullets collect into one list', () => {
   const blocks = parseMarkdown('- one\n- two\n* three');
   assert.deepEqual(kinds(blocks), ['list']);

@@ -157,3 +157,44 @@ test('thinking with no answer still yields something to render', async () => {
     restore();
   }
 });
+
+test('a stop that lands before the first byte is a stop, not a failure', async () => {
+  // llama.cpp sends no headers until the prompt has been processed and the
+  // first token exists, so "Thinking…" is spent inside `fetch` itself — and
+  // that is exactly when Stop gets pressed. The request rejects there rather
+  // than mid-stream, which used to escape as "This operation was aborted",
+  // drawn in the transcript as a failed reply.
+  const original = globalThis.fetch;
+  globalThis.fetch = (_url, init) =>
+    new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+    });
+  try {
+    const controller = new AbortController();
+    const pending = streamChat({ baseUrl: 'http://x', messages: [], signal: controller.signal });
+    controller.abort();
+    const result = await pending;
+    assert.equal(result.aborted, true);
+    assert.equal(result.text, '');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a request that fails for its own reasons is still a failure', async () => {
+  // The other half: only a stop is forgiven. A dead endpoint with no stop
+  // pressed must go on being reported as one.
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('connect ECONNREFUSED');
+  };
+  try {
+    const controller = new AbortController();
+    await assert.rejects(
+      () => streamChat({ baseUrl: 'http://x', messages: [], signal: controller.signal }),
+      /ECONNREFUSED/,
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});

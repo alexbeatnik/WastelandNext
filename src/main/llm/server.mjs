@@ -440,7 +440,13 @@ export class LlamaServer extends EventEmitter {
     relay(this.#proc.stderr);
 
     await this.#waitForReady();
-    this.#contextSize = (await contextSize(this.#baseUrl)) ?? 0;
+    const reported = (await contextSize(this.#baseUrl)) ?? 0;
+    // One more await, so one more place UNLOAD can land. `#stop` has by then
+    // reported `idle` and emptied `#model` and `#baseUrl`; carrying on would
+    // announce `ready` for a server that is gone, with nothing behind the
+    // badge, and the next message would be sent to an empty address.
+    if (this.#proc !== child) throw new Error(this.#detail || 'llama-server stopped before it was ready');
+    this.#contextSize = reported;
     this.#setState('ready', modelFile);
     return this.status;
   }

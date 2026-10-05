@@ -56,6 +56,28 @@ whose other half never arrived.
 `system_shell` is how an action stops meaning what the prompt says it means. The second claimant is refused with a
 reason on its row.
 
+**The entries are the only record of what is running, so they are torn down before they are replaced.** `refresh()`
+runs after every install, update and removal, and it used to rebuild the entry list from disk first — fresh objects,
+all `active: false` — and only then call `#reactivate`, whose teardown loop therefore found nothing to stop. Every
+running plugin had `activate` called a second time with no `deactivate` between, nothing it held through a service was
+released, and a plugin that had just been uninstalled was never stopped at all: it is not among the new entries, so
+neither rediscovery nor `shutdown()` on the way out could reach it again — a reminder ticker firing for a plugin that
+is gone, a browser outliving the app. `#teardown` runs against the old entries now, and `plugins.test.mjs` counts the
+calls.
+
+**Rebuilds are serialised, because activation awaits.** A rebuild clears the flat maps and then fills them across
+awaits — an import, a plugin's own async `activate`. Two interleaving there each emptied what the other was halfway
+through filling, and the second then found its own plugin's action already claimed: "already provided by slow",
+reported against `slow`. A toggle during the boot load, or during the rediscovery an auto-update ends with, is enough.
+`load`, `refresh`, `setEnabled` and `uninstall` all go through `#serial`.
+
+**A plugin is stopped before it is deleted, and the host owns that order.** `deactivate` is where a plugin saves,
+closes and lets go. Run after the directory and the document were removed it does all of that to files that are gone —
+or writes its document back a moment after the uninstall deleted it. So `host.uninstall(id, remove)` is one operation:
+stop that one, call `remove`, forget its data, rediscover in a `finally`. The `finally` is for Windows refusing to
+delete a directory with an open handle in it: the plugin is still installed then, and has to come back as the running
+plugin it was.
+
 **A switched-off plugin's action types are still known.** `owner()` reads them from the manifest without loading
 anything, so the dispatcher answers "Browser control is switched off" instead of "unknown action type". The difference
 is not cosmetic: told the second, a model retries with different spelling; told the first, it tells the user.
@@ -106,6 +128,11 @@ of the user", and `clear()` revokes it.
 **The renderer never builds a media URL.** `status().source.src` is built in the main process, because the scheme and
 its encoding belong to the handler that takes them apart again — a second encoder is a second thing to get wrong about
 a filename containing `#`, which ends a path and starts a fragment.
+
+**An `AbortError` from `play()` is not a failure.** It is the element saying the request was overtaken — by the next
+track's `load()`, or by a pause — which is what pressing NEXT twice in a second does. Reported through `audio.failed`
+it set `playing` to false and stopped the track that had just been asked for, under an error about the one it
+replaced. Only the other rejections are reported.
 
 **`.player[hidden]` is not optional.** The bar is `display: flex`, and any author-level `display` outranks the UA rule
 behind `hidden` — the drop veil shipped visible for exactly this reason. The smoke check reads `getComputedStyle`.
@@ -304,6 +331,13 @@ rearranged. What is asserted about the fold is the section's *height* against it
 a details element marked closed whose contents are still laid out is the same failure as `hidden` losing to an author
 `display`, and only the height tells them apart.
 
+**A registry's deadline has to outlive its headers.** The timer was cleared the moment `fetch` resolved, which is when
+the *connection* worked; the body is read afterwards, and a server that answered `200` and then went quiet left that
+read waiting for ever — GET PLUGINS on "Asking the registry…" for the rest of the session, and the auto-update run
+behind it never finishing either. `quietAfter` is cleared in a `finally` instead. For an index it is one deadline for
+the whole exchange; for an archive it is re-armed by every chunk, so it measures silence rather than duration and a
+slow link is still allowed its megabytes.
+
 **One registry failing must not empty the list, and *all* of them failing must not hide which were asked.** `fetchIndex`
 reports per source and never throws: it returns `error` only when nothing answered, because throwing lost exactly the
 thing worth showing in that state. Removing the broken registry is how the user gets the list back, and they cannot
@@ -338,6 +372,33 @@ different from anything, so the weaker check passed on the bug.
 **`submitPrompt` gives the composer its text back only when the composer is where it came from.** A move made by pressing a button has nowhere to return to, and dropping the game's own phrasing into the box the player types in is worse than losing it.
 
 **A game is played in a conversation, and the panel belongs there with it.** The first version tied the scene to nothing, so the strip and the row of moves were drawn over every chat in the app: opening a new conversation gave an empty transcript under a character sheet and a list of moves, offering a game that was not being played. `show()` stamps the scene with the conversation the turn is running in, `ipc.mjs` supplies that off `turn:start` because it is the only place that sees both, and the renderer draws nothing unless the open chat is that one. Both ids must be non-empty rather than merely equal — `state.chatId` is `''` on a new conversation, and "no chat" must not match "no game".
+
+**Each plugin has a panel of its own, and "the newcomer wins" is gone.** One document and one presenter was true
+while one plugin drew here. Browser control draws the page and a game draws its world, both declare `scene`, both
+register at activation — and the presenter was simply whichever asked to be later in the prompt. Reported as a Space
+Trader panel appearing in a playlist conversation during a search for a fridge, and it took three steps: the browser
+painted its page in the turn, which claimed the conversation and was drawn under the *game's* name; a card on that
+page was pressed and handed to the game, which answered "that move is no longer on the row"; and the game, repainting
+itself to say so, kept "whichever conversation claimed it last" — a conversation it had never been played in. The
+service holds `pluginId → panel` and `pluginId → presenter` now. A claim belongs to a panel, a press is checked
+against the panel it was on and answered by that panel's plugin, and `releasePlugin` takes one plugin's panel and
+nobody else's.
+
+**`forPlugin` is how a call comes to carry an identity, and the host asks every service for it.** `show(scene)` has
+no argument to say whose scene it is, and a plugin trusted to say so could say somebody else's — so `ctx.service()`
+hands over `service.forPlugin?.(id) ?? service`, by name, the way it calls `releasePlugin` without knowing what any
+service is for. Through it `present` ignores whatever `pluginId` it was passed, for the reason a notice may not sign
+itself. The bare service still takes id-less calls and files them under whoever registered last; that is for the
+tests and the smoke run, which drive one game with no host in between, and nothing a plugin can reach.
+
+**The window picks the panel, because only the window knows which conversation is open.** `status()` sends every
+panel, oldest first, each with the conversation that claimed it; `panelFor` in the renderer takes the newest one
+belonging to the open chat, and `state.scene` stays the single panel everything else reads. `paintScene()` with no
+argument re-picks from what was last sent — a switch of conversation changes the answer without the main process
+having anything new to say. The press carries the panel's plugin back for the same reason. When two panels are in
+one conversation — the browser driven from inside a game's chat — it is whoever spoke last, and `claimTurn` brings a
+game that acted without repainting back to the front. The smoke check for all of this fails with the game's title on
+screen if `panelFor` stops asking about the conversation, which is the report exactly.
 
 **A game that *acts* in a turn claims the panel, even when it does not repaint.** `show()` claiming the scene covers
 every game that redraws when it acts, and leaves a hole behind it: a scene painted *outside* a turn — from a timer, at
@@ -649,6 +710,24 @@ otherwise loop forever.
 cursor-blinking element on screen; without the matching end a dead endpoint leaves a blinking cursor in the transcript
 forever. `turn:end` is handled in the renderer as a second backstop.
 
+**Stop is an outcome, not an error, and it can land in four places.** Mid-stream was the only one handled. *Before the
+first byte:* llama.cpp sends no headers until the prompt is processed and a token exists, so the whole of "Thinking…"
+is spent inside `fetch` — which is exactly when Stop gets pressed, and the rejection escaped as "✗ This operation was
+aborted" in the transcript. `streamChat` returns `aborted: true` for it. *After the last action:* the loop asked before
+each action and never after the final one, so a stop used to answer an approval dialog fed its result into another
+model call on a signal already aborted. *During compaction:* a stopped request hands back what had streamed, which is
+right for a reply and the opposite of right for a summary — that text *replaces* everything it summarises, and half a
+sentence was stored in place of the conversation. `#maybeCompact` discards it, and the turn ends there. *Before the
+title:* a stopped first turn does not go on to ask for one. `turn.test.mjs` holds all four.
+
+**Stop has to reach the command, and the command is not the process `exec` spawned.** The shell plugin was handed the
+turn's signal and never passed it on, so Stop left the turn on "Running…" for the two minutes the timeout allows. And
+`child.kill()` is not the fix on its own: on Windows the command is two `cmd`s below the shell (`shellCommandFor`), so
+killing the top one orphans the thing that was meant to stop — measured, a `ping` stopped that way was still in the
+task list with the turn reporting it ended. The timeout had the same hole. `killTree` uses `taskkill /T /F`, then
+destroys the pipes, since `exec`'s callback waits on them. `shell.test.mjs` watches a heartbeat file go still rather
+than trusting that the promise resolved.
+
 **Preconditions are checked before anything is persisted.** `send()` refuses with no usable endpoint *before* creating
 the chat, so a failed send leaves no orphan user turn in the history — which is also what lets the renderer hand the
 text back to the composer. The renderer keys that decision on whether `turn:start` arrived: after it, the message is
@@ -914,6 +993,11 @@ failure over the top of a load that was working. `load()` is a thin synchronous 
 promise before anything can yield; asking twice for the *same* model returns that same promise, because a double click
 is not a mistake.
 
+**`ready` is announced only for the process that was waited on.** There is one more await after `/health` answers —
+the `/props` read for the context size — and UNLOAD, or a crash, can land in it. `#stop` has by then reported `idle`
+and emptied `#model` and `#baseUrl`; carrying on announced `ready` over the top of it, for a server that was gone. The
+load checks `#proc` is still the child it spawned before saying so.
+
 **`unload()` is the request; `#stop()` is the teardown, and a load may only use the second.** The pre-spawn half of a
 load is several awaits long — the binary fetch, the `--version` probe, the port check, the header read — and holds no
 process at all. UNLOAD pressed anywhere in there killed nothing, reported `idle`, and was then outlived by its own
@@ -1006,6 +1090,12 @@ escape-aware, so a `}` inside the DSL does not truncate it), then a repair pass 
 model closes the DSL string with an apostrophe and forgets the outer `"}`. The repair runs only after a clean parse has
 already failed — payloads that were invalid for a real reason must not be quietly "fixed" into something else.
 
+A code fence opens on a language and closes bare, and those are two patterns. The opener used to admit only `\w*`, so
+` ```c++ `, ` ```c# ` and ` ```objective-c ` were not openers: the line fell through as a paragraph, and the bare fence
+written to *close* the block opened one instead — everything after it, to the end of the reply, drawn as code. The
+opener takes any run without whitespace or a backtick (and ignores an info string after it); the closer is a bare fence
+at least as long as the one it closes, which is also what lets a reply show a fence inside a longer one.
+
 `<think>` is only recognised at the start of a line. Models discuss `<think>` in prose often enough that a naive match
 turns a normal answer into a dimmed reasoning block.
 
@@ -1019,6 +1109,15 @@ before the attributes is required rather than optional, so `<thinking>` stays a 
 widths and want opposite layouts. Three regimes: `max-aspect-ratio: 4/3` (dense two-column), `min-aspect-ratio: 16/10`
 and `min-width: 1500px` (three columns with the activity log), `max-width: 900px` (overlay drawer). Changing any of
 these means updating `SHAPES` in `scripts/smoke.mjs`.
+
+**`overflow: hidden` on a flex item switches off the thing that stops it shrinking.** The rail is a flex column that
+scrolls, and what keeps a section as tall as its content is its automatic minimum size — which any `overflow` other
+than `visible` sets to zero. Rounding the sections' corners added `overflow: hidden` to clip them, and from then on the
+sections gave up their own height before the rail ever scrolled: headings cut in half, the vault list sliced through
+its last row, on any window too short to show everything at once — which is every window that is not maximised.
+`.section` carries `flex-shrink: 0` beside the clip. The layout check measures `scrollHeight` against `clientHeight`
+for every `#panel-left > .section` at each shape; it failed at all seven before the fix, because nothing about a
+squashed section shows up as horizontal overflow or a short transcript, which is all it used to ask.
 
 ## Testing
 

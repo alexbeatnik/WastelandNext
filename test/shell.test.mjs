@@ -9,10 +9,10 @@
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { exec } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { shellCommandFor } from '../src/plugins/system-shell.mjs';
+import { runCommand, shellCommandFor } from '../src/plugins/system-shell.mjs';
 
 /** Run a command as `exec` would, with no wrapping at all. */
 function raw(dir, command) {
@@ -92,4 +92,110 @@ test('the shell syntax the model writes still means what it says', onWindows, as
   assert.equal((await runIn(dir, 'echo "hi there"')).out, '"hi there"');
   assert.match((await runIn(dir, 'echo a & echo b')).out, /^a\s*\r?\nb$/);
   assert.equal((await runIn(dir, 'dir /b | findstr txt')).out, 'привіт-файл.txt');
+});
+
+/* ============================ stopping one ============================ */
+
+/**
+ * A command that never finishes, and a file that says whether it is alive.
+ *
+ * Written to disk rather than passed as `node -e "…"`: the point is what
+ * happens to the process, and a second layer of quoting through two `cmd`s
+ * would be testing something else.
+ */
+function heartbeat() {
+  const dir = mkdtempSync(join(tmpdir(), 'wl-shell-stop-'));
+  const script = join(dir, 'beat.cjs');
+  const pulse = join(dir, 'pulse.txt');
+  writeFileSync(
+    script,
+    // The write is allowed to fail: the test reads this file while it is being
+    // written, and a sharing violation must cost one beat, not the process —
+    // a heartbeat that died of its own accord would look like a command that
+    // finished by itself.
+    "const fs = require('fs'); let n = 0; setInterval(() => { try { fs.writeFileSync(process.argv[2], String(n += 1)); } catch {} }, 50);",
+
+  );
+  const read = () => {
+    try {
+      return readFileSync(pulse, 'utf8');
+    } catch {
+      return '';
+    }
+  };
+  return { command: `"${process.execPath}" "${script}" "${pulse}"`, read };
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Poll until the heartbeat has written at least once, so there is something to stop. */
+async function beating(read) {
+  // Read once per look, and judged on that reading. Asking the file a second
+  // time to assert on it lands, now and then, in the instant between the
+  // heartbeat truncating it and writing the next number — and reports a command
+  // that is plainly running as one that never started.
+  let seen = '';
+  for (let i = 0; i < 100 && !seen; i += 1) {
+    seen = read();
+    if (!seen) await wait(50);
+  }
+  assert.ok(seen, 'the command never started');
+}
+
+/** Has the heartbeat stopped changing? */
+async function still(read) {
+  await wait(400);
+  const before = read();
+  await wait(400);
+  return read() === before;
+}
+
+test('Stop ends the command, and everything the command started', async () => {
+  // Stop did nothing to a running command: the turn sat on "Running…" for the
+  // two minutes the timeout allows. And ending only the shell is not ending the
+  // command — on Windows it is two `cmd`s deep, and killing the outer one left
+  // the thing the user asked to stop running with nothing on screen to say so.
+  const { command, read } = heartbeat();
+  const controller = new AbortController();
+
+  const started = Date.now();
+  const pending = runCommand(command, { signal: controller.signal });
+  await beating(read);
+  controller.abort();
+  const result = await pending;
+
+  assert.equal(result.ended, 'stopped', result.text);
+  assert.equal(result.ok, false);
+  assert.ok(Date.now() - started < 20_000, 'the turn was held until the command gave up on its own');
+  assert.equal(await still(read), true, 'the command outlived the Stop that ended its turn');
+});
+
+test('a command that outstays the timeout is ended the same way', async () => {
+  const { command, read } = heartbeat();
+  const result = await runCommand(command, { timeoutMs: 1500 });
+
+  assert.equal(result.ended, 'timeout', result.text);
+  assert.equal(result.ok, false);
+  assert.match(result.text, /did not finish/);
+  assert.equal(await still(read), true, 'the timeout ended the wait, not the command');
+});
+
+test('a command that finishes by itself is reported as it always was', async () => {
+  const done = await runCommand(`"${process.execPath}" -e "console.log('fine')"`);
+  assert.deepEqual(done, { ok: true, ended: '', text: 'fine' });
+
+  const failed = await runCommand(`"${process.execPath}" -e "process.exit(3)"`);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.ended, '');
+});
+
+test('a turn already stopped does not start the command at all', async () => {
+  const { command, read } = heartbeat();
+  const controller = new AbortController();
+  controller.abort();
+
+  const result = await runCommand(command, { signal: controller.signal });
+  assert.equal(result.ended, 'stopped');
+  await wait(300);
+  assert.equal(read(), '', 'a command was started for a turn that had been stopped');
 });

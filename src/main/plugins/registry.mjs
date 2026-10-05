@@ -334,14 +334,29 @@ export function parseEntry(raw, source = null) {
   };
 }
 
-async function fetchWithTimeout(url, options = {}) {
+/**
+ * A signal that fires when a request has been quiet for too long.
+ *
+ * It has to outlive the headers. The first version was cancelled as soon as
+ * `fetch` resolved, which is when the *connection* worked — the body is read
+ * afterwards, and a server that answered `200` and then stalled left that read
+ * waiting for ever. `again()` re-arms it, for a download where the question is
+ * whether bytes are still arriving rather than whether it is finished yet;
+ * `clear()` is owed on every path, or the timer aborts a request long over.
+ */
+function quietAfter(ms) {
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), FETCH_TIMEOUT_MS);
-  try {
-    return await fetch(url, { ...options, signal: abort.signal });
-  } finally {
-    clearTimeout(timer);
-  }
+  let timer = setTimeout(() => abort.abort(), ms);
+  return {
+    signal: abort.signal,
+    again() {
+      clearTimeout(timer);
+      timer = setTimeout(() => abort.abort(), ms);
+    },
+    clear() {
+      clearTimeout(timer);
+    },
+  };
 }
 
 /**
@@ -369,28 +384,39 @@ export function cacheBusted(url) {
 }
 
 /** One index, fetched and parsed. Throws with a sentence worth showing. */
-async function fetchOne(source) {
-  let response;
+async function fetchOne(source, timeoutMs = FETCH_TIMEOUT_MS) {
+  // One deadline for the whole exchange. An index is a few kilobytes, so there
+  // is no slow-but-alive case to make room for.
+  const quiet = quietAfter(timeoutMs);
   try {
-    response = await fetchWithTimeout(cacheBusted(source.url), {
-      headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
-    });
-  } catch (err) {
-    throw new Error(`could not be reached — ${err.name === 'AbortError' ? 'it did not answer' : err.message}`);
-  }
-  if (!response.ok) throw new Error(`answered ${response.status}`);
+    let response;
+    try {
+      response = await fetch(cacheBusted(source.url), {
+        headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+        signal: quiet.signal,
+      });
+    } catch (err) {
+      throw new Error(`could not be reached — ${quiet.signal.aborted ? 'it did not answer' : err.message}`);
+    }
+    if (!response.ok) throw new Error(`answered ${response.status}`);
 
-  let body;
-  try {
-    body = await response.json();
-  } catch {
-    throw new Error('did not return an index');
-  }
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      // Two different failures arrive here, and only one of them is about what
+      // the server sent: headers followed by silence is a registry that could
+      // not be reached, not one that published something unreadable.
+      throw new Error(quiet.signal.aborted ? 'could not be reached — it stopped answering' : 'did not return an index');
+    }
 
-  return {
-    updated: String(body?.updated ?? ''),
-    plugins: (Array.isArray(body?.plugins) ? body.plugins : []).map((raw) => parseEntry(raw, source)).filter(Boolean),
-  };
+    return {
+      updated: String(body?.updated ?? ''),
+      plugins: (Array.isArray(body?.plugins) ? body.plugins : []).map((raw) => parseEntry(raw, source)).filter(Boolean),
+    };
+  } finally {
+    quiet.clear();
+  }
 }
 
 /**
@@ -407,12 +433,12 @@ async function fetchOne(source) {
  * throwing lost the very thing worth showing: *which* registries were asked and
  * what each of them said. That is exactly the state where the user needs it.
  */
-export async function fetchIndex() {
+export async function fetchIndex({ timeoutMs = FETCH_TIMEOUT_MS } = {}) {
   const sources = registries();
   const results = await Promise.all(
     sources.map(async (source) => {
       try {
-        const { updated, plugins } = await fetchOne(source);
+        const { updated, plugins } = await fetchOne(source, timeoutMs);
         return { ...source, ok: true, error: '', updated, count: plugins.length, plugins };
       } catch (err) {
         return { ...source, ok: false, error: err.message, updated: '', count: 0, plugins: [] };
@@ -453,29 +479,45 @@ export async function fetchIndex() {
 
 /** Download to `target`, refusing anything oversized or unreadable. */
 async function download(url, target, onProgress) {
-  const response = await fetchWithTimeout(url);
-  if (!response.ok) throw new Error(`download failed with ${response.status}`);
+  // Re-armed by every chunk, so it measures silence rather than duration: a
+  // slow link is allowed its megabytes, and a dead one is not allowed to leave
+  // the install button reading `[ … ]` until the app is closed.
+  const quiet = quietAfter(FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { signal: quiet.signal });
+    if (!response.ok) throw new Error(`download failed with ${response.status}`);
 
-  const total = Number(response.headers.get('content-length')) || 0;
-  if (total > MAX_ARCHIVE_BYTES) throw new Error('that archive is far larger than a plugin should be');
-  if (!response.body) throw new Error('the download was empty');
+    const total = Number(response.headers.get('content-length')) || 0;
+    if (total > MAX_ARCHIVE_BYTES) throw new Error('that archive is far larger than a plugin should be');
+    if (!response.body) throw new Error('the download was empty');
 
-  let received = 0;
-  const hash = createHash('sha256');
-  const counter = new TransformStream({
-    transform(chunk, controller) {
-      received += chunk.byteLength;
-      // Checked while streaming as well as from the header: a server may simply
-      // not have declared a length.
-      if (received > MAX_ARCHIVE_BYTES) throw new Error('that archive is far larger than a plugin should be');
-      hash.update(chunk);
-      onProgress?.({ received, total });
-      controller.enqueue(chunk);
-    },
-  });
+    let received = 0;
+    const hash = createHash('sha256');
+    const counter = new TransformStream({
+      transform(chunk, controller) {
+        quiet.again();
+        received += chunk.byteLength;
+        // Checked while streaming as well as from the header: a server may simply
+        // not have declared a length.
+        if (received > MAX_ARCHIVE_BYTES) throw new Error('that archive is far larger than a plugin should be');
+        hash.update(chunk);
+        onProgress?.({ received, total });
+        controller.enqueue(chunk);
+      },
+    });
 
-  await pipeline(Readable.fromWeb(response.body.pipeThrough(counter)), createWriteStream(target));
-  return { digest: hash.digest('hex'), bytes: received };
+    await pipeline(Readable.fromWeb(response.body.pipeThrough(counter)), createWriteStream(target), {
+      signal: quiet.signal,
+    });
+    return { digest: hash.digest('hex'), bytes: received };
+  } catch (err) {
+    // The abort is ours, so its own message ("This operation was aborted")
+    // describes the mechanism and not what happened.
+    if (quiet.signal.aborted) throw new Error('the download stopped arriving');
+    throw err;
+  } finally {
+    quiet.clear();
+  }
 }
 
 /**

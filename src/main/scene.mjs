@@ -376,10 +376,43 @@ export function normaliseScene(raw) {
 }
 
 export class Scene extends EventEmitter {
-  /** The document on screen, or null when no game is running. */
-  #scene = null;
-  /** `{pluginId, pluginName, act}` — whoever is driving. */
-  #presenter = null;
+  /**
+   * `pluginId → {pluginId, pluginName, act}` — everyone who can answer a press.
+   *
+   * A map, where there used to be one field and "the newcomer wins". That rule
+   * was written for one game, and it stopped being true the day a second
+   * plugin asked for this service: browser control draws the page here, a game
+   * draws its world here, and both register at activation. The winner was
+   * whichever asked to be later in the prompt — nothing to do with which of
+   * them had drawn what was on screen.
+   */
+  #presenters = new Map();
+  /**
+   * `pluginId → {scene, chatId, at}` — what each of them has drawn, and where.
+   *
+   * One panel per plugin for the same reason. With a single document, the
+   * browser's page was drawn under the game's name and its cards were answered
+   * by the game; the game, repainting itself to answer a card it never offered,
+   * then inherited the conversation the browser had just claimed. Reported as
+   * a Space Trader panel appearing in a playlist conversation, during a search
+   * for a fridge.
+   *
+   * `chatId` is the conversation this panel was last painted in. A game is
+   * played in a conversation, and the panel belongs there with it; without
+   * that the strip was drawn over every chat in the app. `at` is a counter, not
+   * a time: when two panels claim one conversation — the browser driven from
+   * inside a game's chat — the window draws whichever spoke last.
+   */
+  #panels = new Map();
+  /**
+   * Whoever registered last, for a caller that does not say who it is.
+   *
+   * Plugins never are that caller: the host hands each of them `forPlugin`,
+   * which says it for them. This is for the service used bare — the tests, and
+   * the smoke run, which drive one game and have no host in between.
+   */
+  #latest = '';
+  #clock = 0;
   /**
    * The conversation a turn is running in, while one is.
    *
@@ -388,40 +421,100 @@ export class Scene extends EventEmitter {
    * should not learn: it draws a panel.
    */
   #turnChat = '';
-  /**
-   * The conversation this scene was last painted in.
-   *
-   * A game is played in a conversation, and the panel belongs there with it.
-   * Without this the strip was drawn over every chat in the app — including a
-   * brand new one with an empty transcript, where a character sheet and a row
-   * of moves are an offer to play a game that is not there.
-   */
-  #chatId = '';
 
-  status() {
+  #tick() {
+    this.#clock += 1;
+    return this.#clock;
+  }
+
+  /**
+   * The service as one plugin sees it.
+   *
+   * The host asks for this by name on every service and hands the answer to
+   * the plugin instead of the service itself, which is the whole of how a call
+   * comes to carry an identity: `show(scene)` has no argument to say whose
+   * scene it is, and a plugin trusted to say so could say somebody else's. So
+   * `present` here ignores whatever `pluginId` it was passed, for the reason a
+   * notice is not allowed to sign itself — the name on a panel is the name on
+   * the plugin's own row.
+   *
+   * It can neither send nor claim. A conversation is claimed by having acted in
+   * a turn, which the agent reports, never by a plugin saying it should be.
+   */
+  forPlugin(pluginId) {
+    const id = String(pluginId ?? '');
     return {
-      active: Boolean(this.#scene),
-      pluginId: this.#presenter?.pluginId ?? '',
-      pluginName: this.#presenter?.pluginName ?? '',
+      present: ({ pluginName = '', act } = {}) => this.present({ pluginId: id, pluginName, act }),
+      show: (scene) => this.show(scene, id),
+      clear: () => this.clear(id),
+      status: () => this.status(),
+    };
+  }
+
+  /** One panel, as the window draws it. */
+  #describe(pluginId, panel) {
+    const presenter = this.#presenters.get(pluginId);
+    return {
+      pluginId,
+      pluginName: presenter?.pluginName ?? '',
       /** Empty means "no conversation has claimed this", which draws nothing. */
-      chatId: this.#chatId,
-      scene: this.#scene
-        ? {
-            ...this.#scene,
-            /**
-             * Buttons are dropped when nobody is left to answer them.
-             *
-             * The same rule the audio bar follows: a transport that went away
-             * takes its buttons with it, because a control that is drawn and
-             * cannot work is worse than one that is absent. A scene switched off
-             * mid-game still shows what the hero looked like — that is a
-             * readable, honest end state — but it stops offering moves.
-             */
-            actions: this.#presenter ? this.#scene.actions : [],
-            board: this.#board(),
-            cards: this.#cards(),
-          }
-        : null,
+      chatId: panel.chatId,
+      scene: {
+        ...panel.scene,
+        /**
+         * Buttons are dropped when nobody is left to answer them.
+         *
+         * The same rule the audio bar follows: a transport that went away
+         * takes its buttons with it, because a control that is drawn and
+         * cannot work is worse than one that is absent. A scene switched off
+         * mid-game still shows what the hero looked like — that is a
+         * readable, honest end state — but it stops offering moves.
+         */
+        actions: presenter ? panel.scene.actions : [],
+        board: this.#board(pluginId, panel.scene),
+        cards: this.#cards(pluginId, panel.scene),
+      },
+    };
+  }
+
+  /** The panel that spoke last, among those claimed by `chatId` — or among all. */
+  #newest(chatId = null) {
+    let found = '';
+    let at = -1;
+    for (const [pluginId, panel] of this.#panels) {
+      if (chatId !== null && panel.chatId !== chatId) continue;
+      if (panel.at > at) {
+        found = pluginId;
+        at = panel.at;
+      }
+    }
+    return at === -1 ? null : found;
+  }
+
+  /**
+   * Everything on offer to the window.
+   *
+   * `panels` is the whole answer: every panel there is, oldest first, each
+   * with the conversation that claimed it. The window draws the newest one
+   * belonging to the conversation it has open, which only it can know.
+   *
+   * The fields beside it describe the panel that spoke last. They are what
+   * this answered with when there was one panel, and they are still the right
+   * answer to "what did the game I am testing just draw".
+   */
+  status() {
+    const panels = [...this.#panels.entries()]
+      .sort(([, a], [, b]) => a.at - b.at)
+      .map(([pluginId, panel]) => this.#describe(pluginId, panel));
+    const front = panels.at(-1) ?? null;
+    const latest = this.#presenters.get(this.#latest);
+    return {
+      active: Boolean(front),
+      pluginId: front?.pluginId ?? latest?.pluginId ?? '',
+      pluginName: front?.pluginName ?? latest?.pluginName ?? '',
+      chatId: front?.chatId ?? '',
+      scene: front?.scene ?? null,
+      panels,
     };
   }
 
@@ -437,17 +530,13 @@ export class Scene extends EventEmitter {
    * Deliberately not "claim it for whichever conversation runs next". That is
    * the harm the rule above exists to prevent — a hero on screen for somebody
    * who opened the app to ask about the weather — so this is accepted only for
-   * the plugin actually driving the panel, only inside a turn, and only when
-   * there is something drawn. A plugin that draws nothing until it is played
-   * still shows nothing, and no amount of claiming can invent a scene the app
-   * was never given.
+   * the plugin whose panel it is, only inside a turn, and only when there is
+   * something drawn. A plugin that draws nothing until it is played still shows
+   * nothing, and no amount of claiming can invent a scene the app was never
+   * given.
    */
   claimTurn(pluginId) {
-    if (!this.#scene || !this.#turnChat) return;
-    if (this.#presenter?.pluginId !== String(pluginId ?? '')) return;
-    if (this.#chatId === this.#turnChat) return;
-    this.#chatId = this.#turnChat;
-    this.#announce();
+    this.#claim(pluginId, this.#turnChat);
   }
 
   /**
@@ -461,17 +550,28 @@ export class Scene extends EventEmitter {
    * knows which one is open.
    *
    * The guards are the ones `claimTurn` states, and they carry the rule: only
-   * for the plugin actually driving the panel, and only when there is something
-   * drawn. A press that painted nothing claims nothing, so a game that answers
-   * a button by doing something invisible cannot put a panel over a
-   * conversation the user opened to ask about the weather.
+   * for the plugin whose panel it is, and only when there is something drawn.
+   * A press that painted nothing claims nothing, so a game that answers a
+   * button by doing something invisible cannot put a panel over a conversation
+   * the user opened to ask about the weather.
    */
   claimFor(pluginId, chatId) {
+    this.#claim(pluginId, chatId);
+  }
+
+  #claim(pluginId, chatId) {
+    const id = String(pluginId ?? '');
     const chat = String(chatId ?? '');
-    if (!this.#scene || !chat) return;
-    if (this.#presenter?.pluginId !== String(pluginId ?? '')) return;
-    if (this.#chatId === chat) return;
-    this.#chatId = chat;
+    const panel = this.#panels.get(id);
+    if (!panel || !chat) return;
+    if (!this.#presenters.has(id)) return;
+    // Already there, and already the one on screen there: nothing to say, or
+    // every action in a long game would repaint the panel for no reason. A
+    // panel that is there but *behind* another is brought forward — the game
+    // acted in this conversation, so the game is what is being played in it.
+    if (panel.chatId === chat && this.#newest(chat) === id) return;
+    panel.chatId = chat;
+    panel.at = this.#tick();
     this.#announce();
   }
 
@@ -494,7 +594,7 @@ export class Scene extends EventEmitter {
    * plugin off is one click on the row that turned it on.
    */
   hasPresenter() {
-    return Boolean(this.#presenter);
+    return this.#presenters.size > 0;
   }
 
   /**
@@ -503,24 +603,26 @@ export class Scene extends EventEmitter {
    * Built here and never in the renderer, for the reason the audio bar records:
    * the scheme and its encoding belong to the process that takes them apart
    * again, and a second encoder is a second thing to get wrong about a filename.
-   * The file lives in the plugin's data directory, which updates do not wipe —
-   * a map the user generated must not vanish on a version bump.
+   * The file lives in the data directory of the plugin whose panel this is,
+   * which updates do not wipe — a map the user generated must not vanish on a
+   * version bump.
    */
-  #board() {
-    const board = this.#scene?.board;
+  #board(pluginId, scene) {
+    const board = scene?.board;
     if (!board) return null;
-    const id = this.#presenter?.pluginId ?? '';
-    return { ...board, src: board.image && id ? pluginDataUrl(id, board.image) : '' };
+    return { ...board, src: board.image && pluginId ? pluginDataUrl(pluginId, board.image) : '' };
   }
 
   /** The chooser, with each card's picture turned into something loadable. */
-  #cards() {
-    const cards = this.#scene?.cards;
+  #cards(pluginId, scene) {
+    const cards = scene?.cards;
     if (!cards) return null;
-    const id = this.#presenter?.pluginId ?? '';
     return {
       ...cards,
-      items: cards.items.map((item) => ({ ...item, src: item.image && id ? pluginDataUrl(id, item.image) : '' })),
+      items: cards.items.map((item) => ({
+        ...item,
+        src: item.image && pluginId ? pluginDataUrl(pluginId, item.image) : '',
+      })),
     };
   }
 
@@ -529,16 +631,25 @@ export class Scene extends EventEmitter {
   }
 
   /**
-   * A plugin taking charge of the panel.
+   * A plugin saying it will answer for a panel.
    *
-   * One at a time, and the newcomer wins, for the reason `setTransport` gives:
-   * showing a scene is a claim to be the thing being played, and leaving the
-   * previous game's buttons on screen would offer moves in a world that is no
-   * longer on screen.
+   * Each plugin answers for its own. Registering does not take anything away
+   * from whoever registered before — that was "the newcomer wins", and it put
+   * one plugin's moves in front of another plugin's handler.
    */
   present({ pluginId, pluginName = '', act }) {
     if (typeof act !== 'function') throw new Error('a game needs an act() function');
-    this.#presenter = { pluginId: String(pluginId ?? ''), pluginName: String(pluginName ?? ''), act };
+    const id = String(pluginId ?? '');
+    this.#presenters.set(id, { pluginId: id, pluginName: String(pluginName ?? ''), act });
+    this.#latest = id;
+
+    // A scene shown bare, before anyone had registered, is this one's: there
+    // was nobody else it could have meant.
+    const unowned = this.#panels.get('');
+    if (id && unowned && !this.#panels.has(id)) {
+      this.#panels.delete('');
+      this.#panels.set(id, unowned);
+    }
     this.#announce();
   }
 
@@ -553,84 +664,96 @@ export class Scene extends EventEmitter {
   }
 
   /**
-   * Put a scene on screen, replacing whatever was there.
+   * Put a scene on a plugin's panel, replacing whatever it had there.
    *
    * A scene painted during a turn belongs to that turn's conversation. One
    * painted outside a turn — at activation, off a timer — keeps whichever
-   * conversation claimed it last, and claims none if there has not been one:
-   * nothing outside a turn knows which chat a game is being played in, and
-   * guessing "the one that happens to be open" would put a hero on screen for
-   * somebody who opened the app to ask about something else.
+   * conversation claimed *this panel* last, and claims none if there has not
+   * been one: nothing outside a turn knows which chat a game is being played
+   * in, and guessing "the one that happens to be open" would put a hero on
+   * screen for somebody who opened the app to ask about something else.
+   *
+   * This panel, and not the service: a claim made by one plugin's page must
+   * not be inherited by another plugin's game.
    *
    * The cost is that a run reopened after a restart shows no panel until the
    * first move, which is a smaller wrong answer than a panel over every
    * conversation in the app.
    */
-  show(scene) {
+  show(scene, pluginId = this.#latest) {
     const next = normaliseScene(scene);
     if (!next) return this.status();
-    this.#scene = next;
-    if (this.#turnChat) this.#chatId = this.#turnChat;
+    const id = String(pluginId ?? '');
+    const panel = this.#panels.get(id) ?? { scene: null, chatId: '', at: 0 };
+    panel.scene = next;
+    if (this.#turnChat) panel.chatId = this.#turnChat;
+    panel.at = this.#tick();
+    this.#panels.set(id, panel);
     this.#announce();
     return this.status();
   }
 
-  /** No game running, panel gone. */
-  clear() {
-    this.#scene = null;
-    this.#chatId = '';
+  /** That plugin has nothing running, and its panel is gone. */
+  clear(pluginId = this.#latest) {
+    this.#panels.delete(String(pluginId ?? ''));
     this.#announce();
     return this.status();
   }
 
   /**
-   * Called by the host when the plugin driving this is switched off.
+   * Called by the host when a plugin that used this is switched off.
    *
    * Every service may implement it; the host does not know what any particular
-   * one is holding.
+   * one is holding. Its panel goes with it and nobody else's does.
    */
   releasePlugin(pluginId) {
-    if (this.#presenter?.pluginId !== pluginId) return;
-    this.#presenter = null;
-    this.clear();
+    const id = String(pluginId ?? '');
+    if (!this.#presenters.has(id) && !this.#panels.has(id)) return;
+    this.#presenters.delete(id);
+    this.#panels.delete(id);
+    if (this.#latest === id) this.#latest = [...this.#presenters.keys()].at(-1) ?? '';
+    this.#announce();
+  }
+
+  /** Every id currently pressable on one panel: the moves, and any row that is one. */
+  #offered(pluginId) {
+    const scene = this.#panels.get(pluginId)?.scene;
+    const ids = new Set((scene?.actions ?? []).map((action) => action.id));
+    for (const group of scene?.groups ?? []) {
+      for (const item of group.items) if (item.action) ids.add(item.action);
+    }
+    for (const point of scene?.board?.points ?? []) if (point.action) ids.add(point.action);
+    for (const card of scene?.cards?.items ?? []) if (card.action) ids.add(card.action);
+    if (scene?.entry?.action) ids.add(scene.entry.action);
+    return ids;
   }
 
   /**
    * The player pressed one of the buttons.
    *
-   * Answered by the plugin, which may do two different things and often does
-   * both: redraw the panel by calling `show`, and hand back the words this
-   * button stands for. Those words are returned rather than sent from here —
-   * see `submit` below.
+   * Answered by the plugin whose panel the button was on, which may do two
+   * different things and often does both: redraw the panel by calling `show`,
+   * and hand back the words this button stands for. Those words are returned
+   * rather than sent from here — see `submit` below.
    *
-   * Refused unless the id belongs to an action currently on offer. A click
-   * carries an id the renderer read off a button, and a button can outlive the
-   * scene that drew it: a stale one firing a move in a world three turns further
-   * on is exactly the class of bug that is impossible to reproduce and easy to
-   * prevent.
-   */
-  /** Every id currently pressable: the moves, and any list row that is one. */
-  #offered() {
-    const ids = new Set((this.#scene?.actions ?? []).map((action) => action.id));
-    for (const group of this.#scene?.groups ?? []) {
-      for (const item of group.items) if (item.action) ids.add(item.action);
-    }
-    for (const point of this.#scene?.board?.points ?? []) if (point.action) ids.add(point.action);
-    for (const card of this.#scene?.cards?.items ?? []) if (card.action) ids.add(card.action);
-    if (this.#scene?.entry?.action) ids.add(this.#scene.entry.action);
-    return ids;
-  }
-
-  /**
+   * Refused unless the id belongs to an action currently on offer *on that
+   * panel*. A click carries an id the renderer read off a button, and a button
+   * can outlive the scene that drew it: a stale one firing a move in a world
+   * three turns further on is exactly the class of bug that is impossible to
+   * reproduce and easy to prevent. Checked per panel, or one plugin's card
+   * could be pressed into another plugin's game.
+   *
    * @param actionId which control was used
    * @param value what was typed into the field, when the control is the field
+   * @param pluginId whose panel it was on; the one that spoke last if unsaid
    */
-  async act(actionId, value = '') {
-    const presenter = this.#presenter;
+  async act(actionId, value = '', pluginId = '') {
+    const owner = String(pluginId ?? '') || (this.#newest() ?? this.#latest);
+    const presenter = this.#presenters.get(owner);
     if (!presenter) throw new Error('no game is running');
 
     const id = text(actionId, MAX_ID);
-    if (!this.#offered().has(id)) {
+    if (!this.#offered(owner).has(id)) {
       throw new Error('that action is no longer on offer');
     }
 

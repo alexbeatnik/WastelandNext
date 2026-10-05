@@ -74,10 +74,10 @@ function fakeModel(replies, { gate = null, fail = null } = {}) {
 }
 
 /** Enough of the app around the agent to run a turn through it. */
-function build({ usable = true, actions = {}, owners = {} } = {}) {
+function build({ usable = true, actions = {}, owners = {}, contextSize = 100_000 } = {}) {
   const events = [];
   const agent = new Agent({
-    server: { usable, baseUrl: 'http://127.0.0.1:1', contextSize: 100_000 },
+    server: { usable, baseUrl: 'http://127.0.0.1:1', contextSize },
     plugins: {
       ready: Promise.resolve(),
       beginTurn() {},
@@ -295,4 +295,98 @@ test('the model names the conversation once, on the first turn only', async () =
   }
   assert.equal(again.asked.length, 1, 'no second titling call');
   assert.equal(chats.read(chatId).title, 'Gulls and What They Eat');
+});
+
+/* ============================ stop ============================ */
+
+test('stopping before the model has said anything is a stop, not a failure', async () => {
+  // The common moment to press Stop is "Thinking…", and for llama.cpp that
+  // whole stretch is spent waiting on response headers. The abort rejected the
+  // request there, the turn was reported as failed, and the transcript gained
+  // "✗ This operation was aborted" for doing exactly what was asked.
+  const original = globalThis.fetch;
+  let asked = 0;
+  globalThis.fetch = (_url, init) => {
+    asked += 1;
+    return new Promise((_resolve, reject) => {
+      const fail = () => reject(init.signal.reason);
+      if (init.signal.aborted) fail();
+      else init.signal.addEventListener('abort', fail, { once: true });
+    });
+  };
+  const { agent, named } = build();
+
+  try {
+    const turn = agent.send('', 'think about this for a while');
+    while (asked === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+    agent.stop();
+    await turn;
+  } finally {
+    globalThis.fetch = original;
+  }
+
+  const [end] = named('reply:end');
+  assert.equal(end.aborted, true);
+  assert.equal(end.error, undefined, 'a stop is not an error');
+  assert.equal(asked, 1, 'and a stopped turn does not go on to ask for a title');
+});
+
+test('a stop pressed while an action runs does not go back to the model', async () => {
+  // The loop checked for a stop before each action and never after the last
+  // one, so the result of a stopped action was fed straight into another model
+  // call — on a signal already aborted, which is the failure above again.
+  const model = fakeModel([fence('work', ''), 'this must never be asked for']);
+  const actions = {};
+  const { agent, named } = build({ actions });
+  actions.work = {
+    pluginId: 'worker',
+    run: async () => {
+      agent.stop();
+      return { ok: false, summary: 'stopped', feedback: '[WORK STOPPED]' };
+    },
+  };
+
+  try {
+    await agent.send('', 'do the work');
+  } finally {
+    model.restore();
+  }
+
+  assert.equal(model.asked.length, 1, 'neither a follow-up turn nor a title');
+  assert.equal(named('reply:end').some((end) => end.error), false);
+});
+
+test('a summary cut short by Stop is not written over the conversation', async () => {
+  // Compaction replaces everything older than the kept tail with what the
+  // model wrote. Stop during "Compacting…" returns whatever had streamed so
+  // far, and that fragment was stored as the summary: eight messages of
+  // history exchanged for half a sentence, with nothing on screen saying so.
+  const chat = chats.create('a long one');
+  const long = 'word '.repeat(230);
+  for (let i = 0; i < 8; i += 1) {
+    chats.append(chat.id, { role: i % 2 ? 'assistant' : 'user', content: `${i}: ${long}` });
+  }
+
+  const { agent, named } = build({ contextSize: 4096 });
+  const original = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = async (_url, init) => {
+    asked.push(JSON.parse(init.body));
+    // Stop lands while the summary is still arriving.
+    agent.stop();
+    return stream('Half a summ');
+  };
+
+  try {
+    await agent.send(chat.id, 'and one more thing');
+  } finally {
+    globalThis.fetch = original;
+  }
+
+  assert.match(String(asked[0].messages[0].content), /^Summarise/, 'the call that was stopped is the compaction');
+  const stored = chats.read(chat.id);
+  assert.equal(stored.messages.length, 9, 'the history is whole');
+  assert.match(stored.messages[0].content, /^0: word/);
+  assert.equal(named('chat:compacted').length, 0);
+  assert.equal(asked.length, 1, 'and the turn stops there rather than asking again');
 });

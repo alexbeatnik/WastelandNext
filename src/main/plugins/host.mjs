@@ -4,8 +4,9 @@
  * A plugin contributes four things and nothing else: action types the model may
  * emit, a slice of the system prompt describing them, context appended to that
  * prompt each turn, and a hook run at the start of a turn. Everything it needs
- * from the app arrives as a named service it declared in its manifest, so what
- * a plugin can reach is legible without reading its code.
+ * from the host arrives as a named service it declared in its manifest. This
+ * limits host APIs, not Node itself: approved plugin code runs in the main
+ * process and can import Node modules. Approval must say that plainly.
  *
  * Built-ins are imported statically from `src/plugins/index.mjs` rather than
  * discovered on disk. They ship inside the app, so there is nothing to discover
@@ -28,6 +29,7 @@ import { PLUGIN_API_VERSION, mergeEnablement, needsApproval, parseManifest } fro
 import { pluginAssetUrl } from '../../shared/schemes.mjs';
 import { DEFAULT_CATEGORY } from '../../shared/categories.mjs';
 import { BUILTIN_PLUGINS } from '../../plugins/index.mjs';
+import { containedFile } from './files.mjs';
 
 export { PLUGIN_API_VERSION };
 
@@ -40,6 +42,17 @@ function byRank(a, b) {
   const [aBuiltin, aOrder, aId] = rank(a);
   const [bBuiltin, bOrder, bId] = rank(b);
   return aBuiltin - bBuiltin || aOrder - bOrder || aId.localeCompare(bId);
+}
+
+/**
+ * A module's `deactivate`, wherever `activate` was allowed to be.
+ *
+ * `#activate` accepts the pair on a default export as well as by name, so the
+ * stop has to be looked for in both places too — a plugin started through one
+ * door and never stopped through the other holds its timers for the session.
+ */
+function stopHook(module) {
+  return module?.deactivate ?? module?.default?.deactivate;
 }
 
 export class PluginHost extends EventEmitter {
@@ -69,6 +82,16 @@ export class PluginHost extends EventEmitter {
   #stateDir;
   #state = null;
   #ready = null;
+  /**
+   * The rebuild in flight, so the next one starts after it rather than inside it.
+   *
+   * Activation awaits — an import, a plugin's own async `activate` — and a
+   * rebuild clears the flat maps before it fills them. Two interleaving there
+   * each emptied what the other was halfway through filling: a toggle landing
+   * during the boot load, or during the rediscovery an auto-update ends with,
+   * left a plugin refused with "already provided by" naming itself.
+   */
+  #rebuilding = Promise.resolve();
 
   /**
    * @param services  named objects plugins may ask for — see `KNOWN_SERVICES`
@@ -92,9 +115,9 @@ export class PluginHost extends EventEmitter {
     return this.#state;
   }
 
-  /** Resolves once the first load has finished. Awaited before a turn runs. */
+  /** A turn waits for the current activation, including a later toggle. */
   get ready() {
-    return this.#ready ?? Promise.resolve();
+    return this.#rebuilding;
   }
 
   /**
@@ -104,7 +127,7 @@ export class PluginHost extends EventEmitter {
    * reload never overrules a decision the user made.
    */
   load() {
-    this.#ready = this.#load().catch((err) => {
+    this.#ready = this.#serial(() => this.#load()).catch((err) => {
       // Discovery itself failing is not a reason to have no app. The list will
       // be empty, the log will say why.
       this.emit('log', `plugins: ${err.message}`);
@@ -112,9 +135,23 @@ export class PluginHost extends EventEmitter {
     return this.#ready;
   }
 
+  /** Run one rebuild after whichever is already running, whatever became of it. */
+  #serial(task) {
+    const run = this.#rebuilding.then(task, task);
+    this.#rebuilding = run.catch(() => {});
+    return run;
+  }
+
   async #load() {
+    const found = this.#discover();
+    // Before the entries are replaced, not after: they are the only record of
+    // what is running. Rebuilt first, every active plugin was activated a
+    // second time with no `deactivate` in between, and one that had just been
+    // uninstalled was never stopped at all — it is not among the new entries,
+    // so neither `#reactivate` nor `shutdown` could ever reach it again.
+    await this.#teardown();
     this.#entries.clear();
-    for (const entry of this.#discover()) this.#entries.set(entry.manifest.id, entry);
+    for (const entry of found) this.#entries.set(entry.manifest.id, entry);
 
     // Newly discovered ids get a default; ids already recorded keep what the
     // user chose. The legacy capability checkboxes are read here, once.
@@ -246,19 +283,18 @@ export class PluginHost extends EventEmitter {
   }
 
   /**
-   * Tear down every contribution and put back the ones that should be there.
+   * Stop what is running, and have every service let go of it.
    *
-   * Rebuilding wholesale rather than adding and removing pieces is what keeps a
-   * disabled plugin from leaving an action behind: there is one place where the
-   * flat maps are filled, and it only ever reads from active entries.
+   * Everything, unless told which: removing one plugin stops that one first,
+   * while its files are still there to be stopped.
    */
-  async #reactivate() {
-    for (const entry of this.#entries.values()) {
+  async #teardown(entries = [...this.#entries.values()]) {
+    for (const entry of entries) {
       if (!entry.active) continue;
       entry.active = false;
       entry.contributions = null;
       try {
-        await entry.module?.deactivate?.();
+        await stopHook(entry.module)?.();
       } catch (err) {
         this.emit('log', `${entry.manifest.id}: deactivate failed — ${err.message}`);
       }
@@ -268,12 +304,23 @@ export class PluginHost extends EventEmitter {
       // the host does not have to know what any of them are for.
       for (const name of entry.manifest.services) {
         try {
-          this.#services[name]?.releasePlugin?.(entry.manifest.id);
+          await this.#services[name]?.releasePlugin?.(entry.manifest.id);
         } catch (err) {
           this.emit('log', `${entry.manifest.id}: ${name} would not release — ${err.message}`);
         }
       }
     }
+  }
+
+  /**
+   * Tear down every contribution and put back the ones that should be there.
+   *
+   * Rebuilding wholesale rather than adding and removing pieces is what keeps a
+   * disabled plugin from leaving an action behind: there is one place where the
+   * flat maps are filled, and it only ever reads from active entries.
+   */
+  async #reactivate() {
+    await this.#teardown();
 
     this.#actions.clear();
     this.#fragments = [];
@@ -290,6 +337,11 @@ export class PluginHost extends EventEmitter {
       // reason it failed may be the thing the user has just fixed.
       entry.error = '';
       if (!this.#stateOf(entry.manifest.id).enabled) continue;
+      if (!this.#loadable(entry)) continue;
+      if (this.#hasCode(entry)) {
+        await this.#activate(entry);
+        if (!entry.active) continue;
+      }
 
       // Themes come off the manifest, not out of an activation. A theme pack is
       // data the app reads with its own protocol handler, so it works with no
@@ -314,9 +366,6 @@ export class PluginHost extends EventEmitter {
         });
       }
 
-      if (!this.#hasCode(entry)) continue;
-      if (!this.#loadable(entry)) continue;
-      await this.#activate(entry);
     }
 
     this.emit('changed', this.list());
@@ -372,6 +421,20 @@ export class PluginHost extends EventEmitter {
       entry.active = false;
       entry.contributions = null;
       entry.error = err.message;
+      // Activation may already have started timers or claimed a service. It
+      // contributes nothing, but still owes the same cleanup as an active one.
+      try {
+        await stopHook(entry.module)?.();
+      } catch (stopError) {
+        this.emit('log', `${manifest.id}: deactivate failed — ${stopError.message}`);
+      }
+      for (const name of manifest.services) {
+        try {
+          await this.#services[name]?.releasePlugin?.(manifest.id);
+        } catch (releaseError) {
+          this.emit('log', `${manifest.id}: ${name} would not release — ${releaseError.message}`);
+        }
+      }
       this.emit('log', `${manifest.id}: ${err.message}`);
     }
   }
@@ -397,8 +460,8 @@ export class PluginHost extends EventEmitter {
    * app to fix one that a restart fixes for free.
    */
   async #import(entry) {
-    const target = join(entry.dir, entry.manifest.main);
-    if (!existsSync(target)) throw new Error(`${entry.manifest.main} is missing`);
+    const target = containedFile(entry.dir, entry.manifest.main);
+    if (!target) throw new Error(`${entry.manifest.main} is missing or points outside the plugin`);
 
     let stamp = entry.manifest.version;
     try {
@@ -436,7 +499,13 @@ export class PluginHost extends EventEmitter {
         }
         const service = services[name];
         if (!service) throw new Error(`service "${name}" is not available in this session`);
-        return service;
+        // A service that needs to know who is calling hands over a view of
+        // itself that already does. The scene is the one that exists: two
+        // plugins draw panels, `show(scene)` has no argument to say whose, and
+        // a plugin left to say so itself could say somebody else's. Asked for
+        // by name, like `releasePlugin`, so the host still does not have to
+        // know what any service is for.
+        return service.forPlugin?.(manifest.id) ?? service;
       },
 
       /**
@@ -605,7 +674,11 @@ export class PluginHost extends EventEmitter {
 
   /** Where an installed plugin's files are, for the protocol handler. */
   dirFor(id) {
-    return this.#entries.get(id)?.dir ?? null;
+    const entry = this.#entries.get(id);
+    return entry && !entry.broken && this.#stateOf(id).enabled && this.#loadable(entry)
+      && (entry.active || !this.#hasCode(entry))
+      ? entry.dir ?? null
+      : null;
   }
 
   /** Dynamic context for this turn, gathered from every active plugin. */
@@ -729,7 +802,7 @@ export class PluginHost extends EventEmitter {
     };
     config.update({ plugins });
 
-    await this.#reactivate();
+    await this.#serial(() => this.#reactivate());
     return this.list();
   }
 
@@ -849,9 +922,38 @@ export class PluginHost extends EventEmitter {
     }
   }
 
+  /**
+   * Remove a plugin: stop it, delete it, forget what it kept, rediscover.
+   *
+   * One operation rather than four calls in `ipc.mjs`, because the order is
+   * the whole of it. Stopped first, while its directory and its document still
+   * exist — `deactivate` is where a plugin saves, closes and lets go, and run
+   * after the delete it would do all of that to files that are gone, or write
+   * its document back a moment after the uninstall removed it. `remove` is the
+   * caller's, since deleting an installed directory is the registry's job and
+   * this object must not learn where that is.
+   *
+   * Rediscovered in a `finally`: a directory Windows refused to delete is a
+   * plugin that is still installed, and it has to come back as the running
+   * plugin it was rather than as a row that is switched on and doing nothing.
+   */
+  uninstall(id, remove) {
+    return this.#serial(async () => {
+      const entry = this.#entries.get(id);
+      if (entry) await this.#teardown([entry]);
+      try {
+        await remove();
+        this.forgetData(id);
+      } finally {
+        await this.#load();
+      }
+      return this.list();
+    });
+  }
+
   /** Rediscover after an install or a removal, keeping every recorded decision. */
   async refresh() {
-    await this.#load();
+    await this.#serial(() => this.#load());
     return this.list();
   }
 
@@ -861,7 +963,7 @@ export class PluginHost extends EventEmitter {
       if (!entry.active) continue;
       entry.active = false;
       try {
-        await entry.module?.deactivate?.();
+        await stopHook(entry.module)?.();
       } catch {
         /* going away anyway */
       }

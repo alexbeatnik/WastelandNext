@@ -56,6 +56,14 @@ const state = {
    */
   scene: { active: false, scene: null },
   /**
+   * Every panel the main process holds, whichever conversation each is in.
+   *
+   * `scene` above is the one of these that belongs to the open chat, picked by
+   * `paintScene`. Both are kept because switching conversations changes the
+   * pick without the main process having anything new to say.
+   */
+  sceneAll: { panels: [] },
+  /**
    * Which chooser has already been put on screen.
    *
    * A chooser is a question, so it opens itself when it arrives — but a game
@@ -431,8 +439,9 @@ async function loadChat(id) {
   // chat, and that is what the chips say.
   paintAttachments(state.attachments);
   // A game belongs to the conversation it is played in, so the panel goes with
-  // the switch — same reason the transcript and the meter do.
-  paintScene(state.scene);
+  // the switch — same reason the transcript and the meter do. Picked again from
+  // everything there is: another conversation may have a panel of its own.
+  paintScene();
   $('chat-log').replaceChildren();
   if (state.chatId) {
     const chat = await api.chats.read(state.chatId);
@@ -884,9 +893,12 @@ function paintModelPicker(models = [], llm = {}) {
 
   const ready = llm.state === 'ready' && llm.model;
   const current = models.find((model) => (model.external ? model.path : model.name) === llm.model);
+  // `starting` is the server's word for a load in progress — see the states in
+  // `server.mjs`. This compared against `loading`, which is not one of them, so
+  // the label read "— pick a model —" for the whole minute one was arriving.
   $('model-current-label').textContent = ready
     ? current?.name ?? llm.model
-    : llm.state === 'loading'
+    : llm.state === 'starting'
       ? 'loading…'
       : models.length === 0
         ? '— no model —'
@@ -1267,7 +1279,7 @@ function paintPlugins(list = []) {
       : plugin.stale
         ? `updated on disk — restart Wasteland Next to run ${plugin.version}`
         : awaitingApproval
-          ? 'runs code from outside the app — nothing of it has been loaded yet'
+          ? 'code is not loaded yet — allowing it gives it app-level file access'
           : plugin.enabled && !plugin.active
             ? 'switched on, but not running'
             : unchosen
@@ -1288,7 +1300,7 @@ function paintPlugins(list = []) {
     // way to click a box into a state it is already in.
     if (awaitingApproval) {
       const allow = el('button', '', '[ ALLOW AND RUN ]');
-      allow.title = 'Run this plugin’s code, now and on every start';
+      allow.title = 'Run this plugin in the main process, with access to local files, now and on every start';
       allow.addEventListener('click', async () => {
         allow.disabled = true;
         try {
@@ -1834,9 +1846,9 @@ function paintStore() {
        * So the same control appears here, where the person actually is. It is
        * still one deliberate press, and it still says what it means.
        */
-      row.append(el('div', 'plugin-note', 'installed, but not running — it needs your permission to execute'));
+      row.append(el('div', 'plugin-note', 'installed, but not running — allowing code gives it app-level file access'));
       const allow = el('button', '', '[ ALLOW AND RUN ]');
-      allow.title = 'Run this plugin’s code, now and on every start';
+      allow.title = 'Run this plugin in the main process, with access to local files, now and on every start';
       allow.addEventListener('click', async () => {
         allow.disabled = true;
         try {
@@ -2176,9 +2188,16 @@ function paintPlayer(status = { source: null }) {
   sound.volume = (status.volume ?? 1) ** 2;
 
   if (status.playing) {
-    // A play() rejection is ordinary here — a file that will not decode, or a
-    // src replaced mid-load — and it is reported rather than thrown away.
-    sound.play().catch((err) => api.audio.failed(err.message).then(paintPlayer).catch(() => {}));
+    // A play() rejection is ordinary here, and there are two kinds. A file that
+    // will not decode is a failure and is reported. `AbortError` is not one: it
+    // is this element saying the request was overtaken — by the next track's
+    // `load()`, or by a pause — which is what pressing NEXT twice in a second
+    // does. Reported as a failure it stopped the track that had just been
+    // asked for, under an error about the one it replaced.
+    sound.play().catch((err) => {
+      if (err?.name === 'AbortError') return;
+      api.audio.failed(err.message).then(paintPlayer).catch(() => {});
+    });
   } else {
     sound.pause();
   }
@@ -2310,9 +2329,38 @@ function sceneShowing() {
   return Boolean(state.scene?.scene && owner && owner === state.chatId);
 }
 
-function paintScene(status = { active: false, scene: null }) {
-  state.scene = status;
-  const scene = sceneShowing() ? status.scene : null;
+/**
+ * The panel that belongs to a conversation, out of all the panels there are.
+ *
+ * More than one plugin draws here now — browser control shows the page, a game
+ * shows its world — and each has a panel of its own, claimed by the
+ * conversation it acted in. Which of them is on screen is therefore a fact
+ * about the open chat, and the open chat is something only this window knows;
+ * the main process sends every panel and this picks.
+ *
+ * The newest one wins when two are claimed by the same conversation, which is
+ * what `panels` being oldest-first is for: the browser driven from inside a
+ * game's chat takes the strip, and the game takes it back by acting.
+ */
+function panelFor(status, chatId) {
+  if (!chatId) return null;
+  const panels = status?.panels ?? (status?.scene ? [status] : []);
+  return panels.filter((panel) => panel.scene && panel.chatId === chatId).at(-1) ?? null;
+}
+
+/**
+ * Called with what the main process reported, or with nothing to redraw from
+ * what it last reported — the open conversation changed, and with it the
+ * answer to which panel is ours.
+ */
+function paintScene(status = state.sceneAll) {
+  state.sceneAll = status ?? { panels: [] };
+  // `state.scene` stays what everything below reads: one panel, the one on
+  // screen. It used to be the main process's whole answer, back when there was
+  // one panel to have.
+  const mine = panelFor(state.sceneAll, state.chatId);
+  state.scene = mine ? { active: true, ...mine } : { active: false, scene: null, chatId: '', pluginId: '' };
+  const scene = sceneShowing() ? state.scene.scene : null;
 
   $('scene').hidden = !scene;
   const actions = $('scene-actions');
@@ -2667,7 +2715,10 @@ async function applyAnswer(answer) {
 async function pressAction(actionId, value = '') {
   if (state.streaming) return status('A turn is running — wait for it to finish.');
   try {
-    await applyAnswer(await api.scene.act(actionId, value));
+    // Whose panel the button was on goes with the press. There can be more
+    // than one, and an id that means a card on a web page must not be handed
+    // to a game that happens to be running in another conversation.
+    await applyAnswer(await api.scene.act(actionId, value, state.scene?.pluginId ?? ''));
   } catch (err) {
     status(err.message);
     activity(err.message, 'bad');
@@ -3348,7 +3399,7 @@ function handleEvent(payload) {
       // A game started in a fresh conversation is claimed by the id that only
       // arrives here; without this the panel would stay hidden for the whole
       // turn that summoned it.
-      paintScene(state.scene);
+      paintScene();
       break;
 
     case 'reply:start':

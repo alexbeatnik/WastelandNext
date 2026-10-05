@@ -14,7 +14,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setDataRoot } from '../src/main/paths.mjs';
@@ -693,6 +693,61 @@ test('a plugin that throws on activation is contained and explains itself', asyn
   assert.ok(host.action('fine'), 'one bad plugin must not take the others down');
 });
 
+test('a failed activation releases its timer and claimed services', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-failed-start-'));
+  globalThis.__failedStart = { started: 0, stopped: 0 };
+  install(root, 'failed-start', {
+    manifest: { services: ['audio'] },
+    source: `export function activate() {
+      globalThis.__failedStart.started++;
+      throw new Error('start failed');
+    }
+    export function deactivate() { globalThis.__failedStart.stopped++; }`,
+  });
+  const released = [];
+  config.update({ plugins: {
+    'read-file': { enabled: false, approved: true },
+    'system-shell': { enabled: false, approved: true },
+    'failed-start': { enabled: true, approved: true },
+  } });
+  const host = new PluginHost({ userDir: root, services: { audio: { releasePlugin: (id) => released.push(id) } } });
+  await host.load();
+
+  assert.deepEqual(globalThis.__failedStart, { started: 1, stopped: 1 });
+  assert.deepEqual(released, ['failed-start']);
+  assert.equal(host.dirFor('failed-start'), null, 'a failed module must not expose its files');
+});
+
+test('a plugin only exposes assets after it is switched on and starts', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-asset-start-'));
+  const dir = install(root, 'assets', { source: 'export function activate() {}' });
+  const host = await installedHost(root, { assets: { enabled: false, approved: false } });
+  assert.equal(host.dirFor('assets'), null);
+  await host.setEnabled('assets', true);
+  assert.equal(host.dirFor('assets'), dir);
+  await host.setEnabled('assets', false);
+  assert.equal(host.dirFor('assets'), null);
+});
+
+test('a turn waiting on ready sees the module started by a toggle', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-start-gate-'));
+  install(root, 'slow-start', {
+    manifest: { actions: ['ping'] },
+    source: `export async function activate(ctx) {
+      await globalThis.__startGate;
+      ctx.action({ type: 'ping', run: async () => ({ ok: true }) });
+    }`,
+  });
+  const host = await installedHost(root, { 'slow-start': { enabled: false, approved: false } });
+  globalThis.__startGate = new Promise((resolve) => { globalThis.__releaseStart = resolve; });
+  const switching = host.setEnabled('slow-start', true);
+  const visibleAfterReady = host.ready.then(() => host.action('ping'));
+  await Promise.resolve();
+  globalThis.__releaseStart();
+  assert.ok(await visibleAfterReady, 'ready resolved before the newly enabled module activated');
+  await switching;
+});
+
 test('a plugin registering half of itself before throwing registers none of it', async () => {
   const root = mkdtempSync(join(tmpdir(), 'wl-partial-'));
   install(root, 'partial', {
@@ -765,6 +820,275 @@ test('switching a plugin off and on again is not an update', async () => {
   const second = await host.action('count').run('', { status() {}, log() {} });
   assert.equal(second.summary, first.summary, 'an unchanged plugin was imported twice');
   assert.equal(host.list().find((plugin) => plugin.id === 'counted').stale, false);
+});
+
+test('rediscovery stops what was running before it starts it again', async () => {
+  // `refresh` runs after every install, update and removal. It rebuilt the
+  // entry list from disk first, so the entries that knew a plugin was running
+  // were gone before anything could be told to stop: every active plugin had
+  // `activate` called a second time with no `deactivate` between, and nothing
+  // it held through a service was ever released.
+  const root = mkdtempSync(join(tmpdir(), 'wl-rediscover-'));
+  install(root, 'lamp', {
+    manifest: { actions: ['shine'], services: ['audio'] },
+    source: `const seen = (globalThis.__lamp ??= { on: 0, off: 0 });
+    export function activate(ctx) {
+      seen.on += 1;
+      ctx.service('audio');
+      ctx.action({ type: 'shine', run: async () => ({ ok: true }) });
+    }
+    export function deactivate() {
+      seen.off += 1;
+    }`,
+  });
+
+  const plugins = {};
+  for (const id of ALL_BUILTINS) plugins[id] = { enabled: false, approved: true };
+  config.update({ plugins: { ...plugins, lamp: { enabled: true, approved: true } } });
+
+  const released = [];
+  const host = new PluginHost({ userDir: root, services: { audio: { releasePlugin: (id) => released.push(id) } } });
+  await host.load();
+  assert.deepEqual(globalThis.__lamp, { on: 1, off: 0 });
+
+  await host.refresh();
+  assert.deepEqual(globalThis.__lamp, { on: 2, off: 1 }, 'started twice without being stopped in between');
+  assert.deepEqual(released, ['lamp'], 'and what it held through a service was never let go');
+  assert.ok(host.action('shine'), 'it is still running afterwards');
+});
+
+test('a plugin removed from disk is stopped, not merely forgotten', async () => {
+  // The uninstall path deletes the directory and rediscovers. The plugin is no
+  // longer among the entries by then, so nothing — not rediscovery, and not
+  // `shutdown` on the way out of the app — ever reached its `deactivate`: a
+  // reminder ticker went on firing for a plugin that was gone, and a browser
+  // it had opened outlived the app.
+  const root = mkdtempSync(join(tmpdir(), 'wl-removed-'));
+  const dir = install(root, 'ghost', {
+    manifest: { actions: ['haunt'], services: ['audio'] },
+    source: `const seen = (globalThis.__ghost ??= { on: 0, off: 0 });
+    export function activate(ctx) {
+      seen.on += 1;
+      ctx.action({ type: 'haunt', run: async () => ({ ok: true }) });
+    }
+    export function deactivate() {
+      seen.off += 1;
+    }`,
+  });
+
+  const plugins = {};
+  for (const id of ALL_BUILTINS) plugins[id] = { enabled: false, approved: true };
+  config.update({ plugins: { ...plugins, ghost: { enabled: true, approved: true } } });
+
+  const released = [];
+  const host = new PluginHost({ userDir: root, services: { audio: { releasePlugin: (id) => released.push(id) } } });
+  await host.load();
+  assert.ok(host.action('haunt'));
+
+  rmSync(dir, { recursive: true, force: true });
+  await host.refresh();
+
+  assert.equal(host.list().some((plugin) => plugin.id === 'ghost'), false);
+  assert.equal(host.action('haunt'), null);
+  assert.deepEqual(globalThis.__ghost, { on: 1, off: 1 }, 'an uninstalled plugin was left running');
+  assert.deepEqual(released, ['ghost']);
+});
+
+test('a plugin is stopped before it is removed, and what it saves on the way out goes too', async () => {
+  // Removal used to delete the directory and the plugin's document first and
+  // rediscover afterwards. Stopping it only then would run `deactivate` against
+  // files that were already gone — and a plugin that saves its state on the way
+  // out, which is the ordinary thing to do there, would write its document back
+  // a moment after the uninstall had deleted it.
+  const { pluginStateDir } = await import('../src/main/paths.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'wl-uninstall-'));
+  const dir = install(root, 'saver', {
+    manifest: { actions: ['save'] },
+    source: `import { existsSync } from 'node:fs';
+    let kept = null;
+    export function activate(ctx) {
+      kept = ctx;
+      ctx.action({ type: 'save', run: async () => ({ ok: true }) });
+    }
+    export function deactivate() {
+      globalThis.__saver = { hadFiles: existsSync(new URL('./plugin.json', import.meta.url)) };
+      kept.state.set({ savedOnExit: true });
+    }`,
+  });
+  const host = await installedHost(root, { saver: { enabled: true, approved: true } });
+  assert.ok(host.action('save'));
+
+  const list = await host.uninstall('saver', async () => rmSync(dir, { recursive: true, force: true }));
+
+  assert.equal(globalThis.__saver?.hadFiles, true, 'it was stopped after its files had been deleted, or not at all');
+  assert.equal(existsSync(join(pluginStateDir(), 'saver.json')), false, 'its document came back after the uninstall');
+  assert.equal(list.some((plugin) => plugin.id === 'saver'), false);
+  assert.equal(host.action('save'), null);
+});
+
+test('a removal that fails leaves the plugin running rather than half stopped', async () => {
+  // On Windows a directory with an open handle in it will not delete. The
+  // plugin is still installed then, so it has to still be the plugin it was.
+  const root = mkdtempSync(join(tmpdir(), 'wl-uninstall-fails-'));
+  install(root, 'stayer', {
+    manifest: { actions: ['stay'] },
+    source: `export function activate(ctx) {
+      ctx.action({ type: 'stay', run: async () => ({ ok: true }) });
+    }`,
+  });
+  const host = await installedHost(root, { stayer: { enabled: true, approved: true } });
+
+  await assert.rejects(
+    host.uninstall('stayer', async () => {
+      throw new Error('EBUSY: resource busy or locked');
+    }),
+    /EBUSY/,
+  );
+
+  const row = host.list().find((plugin) => plugin.id === 'stayer');
+  assert.equal(row?.active, true, 'still on disk, so still running');
+  assert.ok(host.action('stay'));
+});
+
+test('two changes at once do not activate a plugin on top of itself', async () => {
+  // Activation awaits — an import, a plugin's own async `activate` — and two
+  // rebuilds interleaving there each cleared the maps the other was filling.
+  // The second one then found its own plugin's action already claimed and
+  // reported "already provided by slow" against a plugin that was running.
+  const root = mkdtempSync(join(tmpdir(), 'wl-racing-'));
+  for (const id of ['slow', 'other']) {
+    install(root, id, {
+      manifest: { actions: [`${id}_act`] },
+      source: `export async function activate(ctx) {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        ctx.action({ type: '${id}_act', run: async () => ({ ok: true }) });
+      }`,
+    });
+  }
+
+  const host = await installedHost(root, {
+    slow: { enabled: true, approved: true },
+    other: { enabled: false, approved: true },
+  });
+
+  await Promise.all([host.setEnabled('other', true), host.refresh()]);
+
+  for (const id of ['slow', 'other']) {
+    const row = host.list().find((plugin) => plugin.id === id);
+    assert.equal(row.error, '', `${id}: ${row.error}`);
+    assert.equal(row.active, true);
+    assert.equal(host.action(`${id}_act`)?.pluginId, id);
+  }
+});
+
+test('two plugins that draw a panel stay out of each other’s conversation', async () => {
+  // The report, as it happened: a playlist conversation, "find me a fridge in
+  // the browser", and a Space Trader panel where the page should have been —
+  // with a row of moves that answered "that move is no longer on the row".
+  //
+  // Browser control and the game both declare `scene`. The service held one
+  // document and one presenter, the last to register: the game, since the
+  // browser asks to be first in the prompt. So the browser's page was drawn
+  // under the game's name, its cards were answered by the game, and the game —
+  // repainting itself to answer a card it had never offered — inherited the
+  // conversation the browser had just claimed.
+  const { Scene } = await import('../src/main/scene.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'wl-two-panels-'));
+  globalThis.__pressed = [];
+
+  install(root, 'pager', {
+    manifest: { actions: ['browse'], services: ['scene'], order: 10 },
+    source: `export function activate(ctx) {
+      const scene = ctx.service('scene');
+      ctx.action({
+        type: 'browse',
+        run: async () => {
+          scene.show({ title: 'Samsung', actions: [{ id: 'card-1', label: 'Side-by-Side' }] });
+          return { ok: true };
+        },
+      });
+      scene.present({
+        pluginId: ctx.id,
+        pluginName: 'Browser',
+        act: async (id) => {
+          globalThis.__pressed.push('pager:' + id);
+          return { status: 'Pressed.' };
+        },
+      });
+    }`,
+  });
+  install(root, 'trader', {
+    manifest: { actions: ['trade'], services: ['scene'], order: 70 },
+    source: `const HOME = { title: 'Thalassa', actions: [{ id: 'market', label: 'MARKET' }] };
+    export function activate(ctx) {
+      const scene = ctx.service('scene');
+      ctx.action({
+        type: 'trade',
+        run: async () => {
+          scene.show(HOME);
+          return { ok: true };
+        },
+      });
+      scene.present({
+        pluginId: ctx.id,
+        pluginName: 'Space Trader',
+        act: async (id) => {
+          globalThis.__pressed.push('trader:' + id);
+          // What the real one does with an id it never offered.
+          scene.show(HOME);
+          return { status: 'That move is no longer on the row.' };
+        },
+      });
+    }`,
+  });
+
+  const plugins = {};
+  for (const id of ALL_BUILTINS) plugins[id] = { enabled: false, approved: true };
+  config.update({
+    plugins: { ...plugins, pager: { enabled: true, approved: true }, trader: { enabled: true, approved: true } },
+  });
+
+  const scene = new Scene();
+  const host = new PluginHost({ userDir: root, services: { scene } });
+  await host.load();
+  const turn = { status() {}, log() {} };
+
+  /** One turn in which one plugin acts, as `agent.mjs` and `ipc.mjs` run it. */
+  const act = async (chatId, type) => {
+    scene.setTurn(chatId);
+    const handler = host.action(type);
+    await handler.run('', turn);
+    scene.claimTurn(handler.pluginId);
+    scene.setTurn('');
+  };
+  /** What the window would draw in a conversation: the newest panel claimed by it. */
+  const drawnIn = (chatId) => {
+    const status = scene.status();
+    return (status.panels ?? [status]).filter((panel) => panel.scene && panel.chatId === chatId).at(-1) ?? null;
+  };
+
+  // Yesterday's game, in the conversation it is played in.
+  await act('chat-game', 'trade');
+  // Today, somewhere else entirely.
+  await act('chat-playlist', 'browse');
+
+  const here = drawnIn('chat-playlist');
+  assert.equal(here?.pluginId, 'pager', 'the page was drawn under another plugin’s name');
+  assert.equal(here.scene.title, 'Samsung');
+
+  // A card on the page is the browser's to answer.
+  await scene.act('card-1', '', here.pluginId);
+  assert.deepEqual(globalThis.__pressed, ['pager:card-1']);
+  assert.equal(drawnIn('chat-playlist').scene.title, 'Samsung', 'pressing a card put the game on screen');
+
+  // And the game is still where it was being played.
+  const there = drawnIn('chat-game');
+  assert.equal(there?.pluginId, 'trader');
+  assert.equal(there.scene.title, 'Thalassa');
+
+  // Switching the browser off takes its panel and leaves the game its own.
+  await host.setEnabled('pager', false);
+  assert.equal(drawnIn('chat-playlist'), null);
 });
 
 test('a plugin cannot claim an action type a built-in already provides', async () => {

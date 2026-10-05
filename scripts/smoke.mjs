@@ -169,10 +169,18 @@ async function checkLayouts(window) {
         logHeight: Math.round(log.height),
         activityShown: getComputedStyle(activity).display !== 'none',
         columns: getComputedStyle(document.getElementById('workspace')).gridTemplateColumns.split(' ').length,
+        // Sections of the rail drawn shorter than what is in them. The rail is
+        // a flex column that scrolls, and a section that is allowed to shrink
+        // gives up its own height before the rail ever starts to: headings cut
+        // in half, a vault list with its last row sliced off.
+        squashed: [...document.querySelectorAll('#panel-left > .section')]
+          .filter((section) => section.scrollHeight - section.clientHeight > 1)
+          .map((section) => (section.querySelector('summary')?.textContent ?? '?').trim()),
       };
     })()`);
 
     const problems = [];
+    if (layout.squashed.length) problems.push(`rail sections squashed: ${layout.squashed.join(', ')}`);
     if (layout.overflow > 1) problems.push(`h-overflow ${layout.overflow}px`);
     if (layout.chatWidth < 320) problems.push(`chat only ${layout.chatWidth}px`);
     if (layout.logHeight < 200) problems.push(`log only ${layout.logHeight}px`);
@@ -1116,7 +1124,7 @@ async function checkStoreApproval(window) {
       // The two halves of the failure that was reported: the row claimed to be
       // installed and said nothing about needing permission, and there was no
       // control here to give it.
-      check(`an installed plugin that is not running says so — "${row.note}"`, /needs your permission/.test(row.note), row.note);
+      check(`an installed plugin that is not running says so — "${row.note}"`, /not running.*app-level file access/.test(row.note), row.note);
       check('and the control that starts it is on that row', row.buttons.some((text) => text.includes('ALLOW AND RUN')), JSON.stringify(row.buttons));
     }
 
@@ -1485,7 +1493,7 @@ async function checkApproval(window) {
   check('it is not running before it is allowed', before.checked === false && before.off === true, JSON.stringify(before));
   // The checkbox cannot start it, so it must not look as though it could.
   check('and its checkbox does not pretend to be the control', before.boxDisabled === true, JSON.stringify(before));
-  check(`the row says what allowing it means — "${before.note}"`, /runs code from outside the app/.test(before.note), before.note);
+  check(`the row says what allowing it means — "${before.note}"`, /not loaded yet.*app-level file access/.test(before.note), before.note);
   check('there is a control that can actually start it', before.allow === true, JSON.stringify(before));
 
   await window.webContents.executeJavaScript(`(() => {
@@ -2456,6 +2464,71 @@ async function checkChooser(window) {
   check(`with its cards — ${claimed.cards}`, claimed.cards === 1, JSON.stringify(claimed));
 
   scene.clear();
+  await new Promise((r) => setTimeout(r, 200));
+
+  await checkTwoPanels(window, chatId);
+}
+
+/**
+ * Two plugins, each with a panel, and one window that has to pick.
+ *
+ * The report: a playlist conversation, a search in the browser, and a Space
+ * Trader panel where the page should have been. Browser control and the game
+ * both draw here, and the service held one document for the two of them.
+ * `scene.test.mjs` proves each plugin now has a panel of its own and that a
+ * press is routed to its owner; what it cannot see is whether the window draws
+ * the right one — the main process sends every panel and the pick is made here,
+ * from the one fact only the window has, which conversation is open.
+ */
+async function checkTwoPanels(window, chatId) {
+  const answered = [];
+  // As the host hands it to a plugin: its id already filled in.
+  const page = scene.forPlugin('smoke-browser');
+  const game = scene.forPlugin('smoke-game');
+  page.present({ pluginName: 'Smoke browser', act: (id) => { answered.push('browser:' + id); return { status: 'pressed a card' }; } });
+  game.present({ pluginName: 'Smoke game', act: (id) => { answered.push('game:' + id); return { status: 'made a move' }; } });
+
+  const WORLD = { title: 'Somewhere else', actions: [{ id: 'market', label: 'Market' }] };
+  // The game is being played in another conversation entirely…
+  scene.setTurn('a-conversation-that-is-not-open');
+  game.show(WORLD);
+  // …the browser is driven in this one…
+  scene.setTurn(chatId);
+  page.show({ title: 'A page', actions: [{ id: 'card-1', label: 'A result' }] });
+  scene.setTurn('');
+  // …and then the game repaints outside any turn. This is the step that put it
+  // on screen: with one shared panel it inherited the conversation the browser
+  // had just claimed, and it was also the last thing drawn.
+  game.show(WORLD);
+
+  await waitFor(window, `document.getElementById('scene-title').textContent === 'A page'`);
+  const shown = await window.webContents.executeJavaScript(`(() => ({
+    panel: getComputedStyle(document.getElementById('scene')).display,
+    title: document.getElementById('scene-title').textContent,
+    moves: [...document.querySelectorAll('#scene-actions .scene-action-label')].map((node) => node.textContent),
+  }))()`);
+  check(`the panel drawn is the one that acted in this conversation — ${shown.title}`,
+    shown.panel !== 'none' && shown.title === 'A page', JSON.stringify(shown));
+  check(`with its own moves and nobody else's — ${shown.moves.join(', ')}`,
+    shown.moves.length === 1 && shown.moves[0] === 'A result', JSON.stringify(shown));
+
+  await window.webContents.executeJavaScript(`document.querySelector('#scene-actions .scene-action')?.click()`);
+  await waitFor(window, `document.getElementById('status-line').textContent === 'pressed a card'`);
+  check(`a press goes to the plugin whose panel it was on — ${answered.join(', ') || 'nobody'}`,
+    answered.length === 1 && answered[0] === 'browser:card-1', JSON.stringify(answered));
+
+  // The browser going away leaves this conversation with no panel at all: the
+  // game's is still claimed by the other one, and must not slide in to fill it.
+  scene.releasePlugin('smoke-browser');
+  await waitFor(window, `getComputedStyle(document.getElementById('scene')).display === 'none'`);
+  const after = await window.webContents.executeJavaScript(`(() => ({
+    panel: getComputedStyle(document.getElementById('scene')).display,
+    moves: getComputedStyle(document.getElementById('scene-actions')).display,
+  }))()`);
+  check(`and a panel belonging to another conversation does not fill the gap — panel: ${after.panel}`,
+    after.panel === 'none' && after.moves === 'none', JSON.stringify(after));
+
+  scene.releasePlugin('smoke-game');
   await new Promise((r) => setTimeout(r, 200));
 }
 
