@@ -24,8 +24,8 @@
 import { protocol } from 'electron';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { join, normalize, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
+import { containedFile } from './files.mjs';
 import { mimeFor, parseRange } from '../../shared/media.mjs';
 // The scheme names and the URL builders live in `shared/` because this file
 // imports `electron` and therefore cannot be unit-tested at all — the same
@@ -129,9 +129,8 @@ export function serveProtocols({ pluginDir, pluginData, mediaAllows }) {
 
     // The manifest was validated, but this path comes off a URL rather than out
     // of the manifest, so it is checked again where it is about to be read.
-    const root = resolve(dir);
-    const target = normalize(join(root, decoded));
-    if (target !== root && !target.startsWith(root + sep)) return new Response('Forbidden', { status: 403 });
+    const target = containedFile(dir, decoded);
+    if (!target) return new Response('Forbidden', { status: 403 });
 
     return serveFile(target, request.headers.get('range'));
   });
