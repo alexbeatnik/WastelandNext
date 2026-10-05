@@ -138,22 +138,58 @@ async function checkLayouts(window) {
   // keeping the previous size. Shapes that cannot fit are reported as skipped
   // rather than measured against a viewport that never changed.
   const { screen } = await import('electron');
-  const workArea = screen.getPrimaryDisplay().workAreaSize;
+  const workArea = { ...screen.getPrimaryDisplay().workAreaSize };
+  // A way to be the hosted runner without owning one: its display is 768 tall,
+  // and what happens on a short screen should be checkable on a tall one.
+  if (Number(process.env.SMOKE_DISPLAY_HEIGHT) > 0) workArea.height = Number(process.env.SMOKE_DISPLAY_HEIGHT);
 
   for (const shape of SHAPES) {
-    if (shape.height > workArea.height - 60) {
-      skip(shape.name, `taller than this display's work area (${workArea.height}px)`);
-      continue;
-    }
+    /**
+     * A shape the display cannot hold is emulated, not skipped.
+     *
+     * Skipping was honest and it was also the whole check gone: on a 768-pixel
+     * runner every one of the seven shapes is too tall, so "the layout survives
+     * these screens" was reported as seven skips and nothing was ever measured
+     * there — including a rail whose sections had all been squashed. Device
+     * emulation gives the page a viewport of the size asked for whatever the
+     * window is, which is the only thing a layout reads: the media queries,
+     * the viewport units and `innerWidth` all answer from it.
+     */
+    const emulated = shape.height > workArea.height - 60;
+    const name = emulated ? `${shape.name}, emulated` : shape.name;
 
-    // A hidden window applies a resize on its own schedule, so the viewport is
-    // polled rather than assumed after a fixed sleep.
-    window.setContentSize(shape.width, shape.height);
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      await new Promise((r) => setTimeout(r, 100));
-      const width = await window.webContents.executeJavaScript('window.innerWidth');
-      if (Math.abs(width - shape.width) <= 4) break;
-      if (attempt === 9) window.setContentSize(shape.width, shape.height);
+    if (emulated) {
+      const size = { width: shape.width, height: shape.height };
+      window.webContents.enableDeviceEmulation({
+        screenPosition: 'desktop',
+        screenSize: size,
+        viewPosition: { x: 0, y: 0 },
+        deviceScaleFactor: 0,
+        viewSize: size,
+        scale: 1,
+      });
+      const took = await waitFor(
+        window,
+        `Math.abs(window.innerWidth - ${shape.width}) <= 4 && Math.abs(window.innerHeight - ${shape.height}) <= 4`,
+      );
+      if (!took) {
+        // Said out loud rather than measured anyway: numbers read off a
+        // viewport that never changed are the previous shape's numbers.
+        window.webContents.disableDeviceEmulation();
+        skip(shape.name, `taller than this display's work area (${workArea.height}px), and it would not be emulated`);
+        continue;
+      }
+    } else {
+      window.webContents.disableDeviceEmulation();
+      // A hidden window applies a resize on its own schedule, so the viewport is
+      // polled rather than assumed after a fixed sleep.
+      window.setContentSize(shape.width, shape.height);
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((r) => setTimeout(r, 100));
+        const width = await window.webContents.executeJavaScript('window.innerWidth');
+        if (Math.abs(width - shape.width) <= 4) break;
+        if (attempt === 9) window.setContentSize(shape.width, shape.height);
+      }
     }
 
     const layout = await window.webContents.executeJavaScript(`(() => {
@@ -196,11 +232,14 @@ async function checkLayouts(window) {
     }
 
     check(
-      `${shape.name} — ${layout.columns} col, chat ${layout.chatWidth}px, log ${layout.logHeight}px`,
+      `${name} — ${layout.columns} col, chat ${layout.chatWidth}px, log ${layout.logHeight}px`,
       problems.length === 0,
       problems.join('; '),
     );
   }
+
+  // Everything after this measures the real window again.
+  window.webContents.disableDeviceEmulation();
 }
 
 /**

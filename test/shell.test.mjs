@@ -94,6 +94,20 @@ test('the shell syntax the model writes still means what it says', onWindows, as
   assert.equal((await runIn(dir, 'dir /b | findstr txt')).out, 'привіт-файл.txt');
 });
 
+test('the runner the plugin uses reads the same names the wrapped command prints', onWindows, async () => {
+  // Everything above drives `exec` by hand, to compare the wrapped command with
+  // the bare one. The plugin itself goes through `runCommand`, which spawns the
+  // shell differently — so the reported case is asked of that as well, or the
+  // two could part company with every test here still passing.
+  const dir = folderWithCyrillicFile();
+  if (!original) return;
+
+  await raw(dir, 'chcp 437>nul');
+  const listed = await runCommand(`dir /b "${dir}"`);
+  assert.equal(listed.ok, true, listed.text);
+  assert.match(listed.text, /привіт-файл\.txt/);
+});
+
 /* ============================ stopping one ============================ */
 
 /**

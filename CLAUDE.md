@@ -500,7 +500,18 @@ matches instead of sleeping a fixed interval — an early version silently measu
 reported three different screen shapes as identical. If you add a shape, keep the poll.
 
 **Windows refuses a content height taller than the work area**, keeping the previous size silently. Shapes taller than
-the display are skipped rather than measured.
+the display are *emulated* rather than resized to. They used to be skipped, which was honest and was also the whole
+check gone: a hosted runner's display is 768 tall, every one of the seven shapes is taller than that, and "the layout
+survives these screens" was seven skips with nothing measured — a rail whose sections had all been squashed included.
+`enableDeviceEmulation` gives the page a viewport of the size asked for whatever the window is, which is all a layout
+reads; the seven shapes measure identically emulated and real, to the pixel. `SMOKE_DISPLAY_HEIGHT=720` makes a tall
+screen behave like the short one, so that path can be run without owning a runner. Emulation is switched off again
+after the loop — everything later measures the real window.
+
+**`path.basename` only knows the separator of the platform it runs on.** A Windows path is one long filename to it on
+Linux, so the audio bar's fallback label came out as the whole path there — found by the Linux runner, the first time
+this branch met it. `nameOf` in `audio.mjs` splits on either separator by hand. A test that feeds a `C:\…` path to
+code using `node:path` passes on the machine it was written on and nowhere else.
 
 **Never `emit('error')` on an EventEmitter nothing listens to.** Node rethrows it as an uncaught exception. `LlamaServer`
 did this on spawn `ENOENT`, and a missing `llama-server` took the whole app down with a modal "A JavaScript error
@@ -727,6 +738,14 @@ killing the top one orphans the thing that was meant to stop — measured, a `pi
 task list with the turn reporting it ended. The timeout had the same hole. `killTree` uses `taskkill /T /F`, then
 destroys the pipes, since `exec`'s callback waits on them. `shell.test.mjs` watches a heartbeat file go still rather
 than trusting that the promise resolved.
+
+**And on Linux it is the same hole.** The first version left a POSIX shell to `kill` alone, on the reasoning that
+`sh -c` hands a simple command its own process. dash — `/bin/sh` on Debian and Ubuntu — does not: the command is a
+child of the shell, and a signal to the shell leaves it running, which is what Node's own documentation says and what
+those two tests said the first time they ran on the Linux runner. `runCommand` uses `spawn` with `detached` there, so
+the shell leads a process group of its own, and `killTree` signals the group with a negative pid — then `SIGKILL`
+after a grace period, for a command that ignores being asked. Not on Windows, where `detached` means a console window
+and `taskkill` already walks the tree. `exec` cannot do this at all; it does not pass `detached` through.
 
 **Preconditions are checked before anything is persisted.** `send()` refuses with no usable endpoint *before* creating
 the chat, so a failed send leaves no orphan user turn in the history — which is also what lets the renderer hand the
