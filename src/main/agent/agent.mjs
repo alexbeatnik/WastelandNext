@@ -630,7 +630,8 @@ export class Agent extends EventEmitter {
         .filter((segment) => segment.kind === 'text')
         .map((segment) => segment.content)
         .join(' ');
-      const updated = chats.rename(chatId, prose || text);
+      // The title, not the reply: a model asked for one line often writes two.
+      const updated = chats.rename(chatId, chats.titleFromReply(prose || text));
       if (updated) this.#say('chat:renamed', { chatId, title: updated.title });
     } catch {
       /* the prompt-derived title is already good enough */

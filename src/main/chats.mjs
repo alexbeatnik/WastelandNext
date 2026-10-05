@@ -37,6 +37,31 @@ export function sanitizeTitle(raw) {
   return (lastSpace > TITLE_CAP / 2 ? cut.slice(0, lastSpace) : cut).trim();
 }
 
+/**
+ * The title out of what a model wrote when it was asked for one.
+ *
+ * Asked for "the title alone", a small model writes the title and then a
+ * remark about it. `sanitizeTitle` joins lines — which is right for a title
+ * somebody typed across two — so the remark was folded in and then cut by the
+ * cap: a conversation named "Плейліст Перл Джейм *(Continuing your".
+ *
+ * Three rules, each for a shape that has been seen. The first line is the
+ * title, because that is where one goes. An aside written in emphasis after it
+ * on the same line is dropped. And a bracket the cap cut open goes with
+ * everything after it: brackets that belong to a title close inside it.
+ */
+export function titleFromReply(reply) {
+  const first =
+    String(reply ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .find(Boolean) ?? '';
+
+  const title = sanitizeTitle(first.replace(/\s*[*_]+\(.*$/u, ''));
+  const open = title.lastIndexOf('(');
+  return open !== -1 && !title.includes(')', open) ? sanitizeTitle(title.slice(0, open)) : title;
+}
+
 /** First-pass title, taken from the user's own words before the model replies. */
 export function titleFromPrompt(prompt) {
   const cleaned = sanitizeTitle(String(prompt ?? '').split('\n').find((l) => l.trim()) ?? '');

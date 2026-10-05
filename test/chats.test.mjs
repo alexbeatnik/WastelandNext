@@ -33,6 +33,30 @@ test('sanitizeTitle keeps Cyrillic intact', () => {
   assert.equal(chats.sanitizeTitle('Огляд коду'), 'Огляд коду');
 });
 
+test('a title is the title, not what the model said after it', () => {
+  // Reported from a conversation named "Плейліст Перл Джейм *(Continuing your":
+  // asked for a title alone, the model added a remark, the newline between them
+  // became a space, and the cap cut the remark off mid-word.
+  assert.equal(
+    chats.titleFromReply('Плейліст Перл Джейм *(Continuing your request with a short title)*'),
+    'Плейліст Перл Джейм',
+  );
+  assert.equal(chats.titleFromReply('Плейліст Перл Джейм\n\n*(Continuing your request…)*'), 'Плейліст Перл Джейм');
+  assert.equal(chats.titleFromReply('\n  "Gulls and What They Eat"\nHope that helps!'), 'Gulls and What They Eat');
+
+  // Brackets that belong to the title stay. Only one the cap cut open goes —
+  // half a bracket is the tell that the rest was never meant to be read here.
+  assert.equal(chats.titleFromReply('Python (3.12) notes'), 'Python (3.12) notes');
+  assert.equal(
+    chats.titleFromReply('Порівняння мов програмування (Python, Go, Rust та інші)'),
+    'Порівняння мов програмування',
+  );
+
+  // Nothing usable is nothing, so the caller keeps the title it already had.
+  assert.equal(chats.titleFromReply(''), '');
+  assert.equal(chats.titleFromReply('*(no title)*'), '');
+});
+
 test('titleFromPrompt uses the first non-empty line', () => {
   assert.equal(chats.titleFromPrompt('\n\nopen youtube\nand play something'), 'open youtube');
 });
