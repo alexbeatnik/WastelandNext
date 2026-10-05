@@ -3,10 +3,10 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setDataRoot } from '../src/main/paths.mjs';
+import { chatsDir, setDataRoot } from '../src/main/paths.mjs';
 
 setDataRoot(mkdtempSync(join(tmpdir(), 'wl-data-')));
 
@@ -31,6 +31,30 @@ test('sanitizeTitle caps length on a word boundary', () => {
 
 test('sanitizeTitle keeps Cyrillic intact', () => {
   assert.equal(chats.sanitizeTitle('Огляд коду'), 'Огляд коду');
+});
+
+test('a title is the title, not what the model said after it', () => {
+  // Reported from a conversation named "Плейліст Перл Джейм *(Continuing your":
+  // asked for a title alone, the model added a remark, the newline between them
+  // became a space, and the cap cut the remark off mid-word.
+  assert.equal(
+    chats.titleFromReply('Плейліст Перл Джейм *(Continuing your request with a short title)*'),
+    'Плейліст Перл Джейм',
+  );
+  assert.equal(chats.titleFromReply('Плейліст Перл Джейм\n\n*(Continuing your request…)*'), 'Плейліст Перл Джейм');
+  assert.equal(chats.titleFromReply('\n  "Gulls and What They Eat"\nHope that helps!'), 'Gulls and What They Eat');
+
+  // Brackets that belong to the title stay. Only one the cap cut open goes —
+  // half a bracket is the tell that the rest was never meant to be read here.
+  assert.equal(chats.titleFromReply('Python (3.12) notes'), 'Python (3.12) notes');
+  assert.equal(
+    chats.titleFromReply('Порівняння мов програмування (Python, Go, Rust та інші)'),
+    'Порівняння мов програмування',
+  );
+
+  // Nothing usable is nothing, so the caller keeps the title it already had.
+  assert.equal(chats.titleFromReply(''), '');
+  assert.equal(chats.titleFromReply('*(no title)*'), '');
 });
 
 test('titleFromPrompt uses the first non-empty line', () => {
@@ -126,4 +150,41 @@ test('generated ids are accepted by the same rule', () => {
   const chat = chats.create('naming');
   assert.equal(chats.isSafeId(chat.id), true, `${chat.id} should be allowed`);
   assert.ok(chats.read(chat.id));
+});
+
+// Reported as a chat "resurrecting": a turn was running, the conversation was
+// deleted from the picker, and when the reply landed it reappeared as a fresh
+// "New Chat" holding the reply and none of the words it was answering.
+test('appending to a chat that was deleted mid-turn writes nowhere', () => {
+  const chat = chats.create('Deleted while the reply was being written');
+  chats.append(chat.id, { role: 'user', content: 'a question' });
+  chats.remove(chat.id);
+  const before = chats.list().length;
+
+  assert.equal(chats.append(chat.id, { role: 'assistant', content: 'the reply' }), null);
+  assert.equal(chats.append(chat.id, { role: 'tool', content: '[TOOL] ok' }), null);
+
+  // The refusal is the point: not a new row, and not a revived old one either.
+  assert.equal(chats.list().length, before);
+  assert.equal(chats.read(chat.id), null);
+});
+
+test('an empty id still means "there is no chat yet", not "it is gone"', () => {
+  const chat = chats.append('', { role: 'assistant', content: 'unprompted' });
+  assert.ok(chat?.id);
+  assert.equal(chat.messages.length, 1);
+});
+
+test('a half-written chat file does not take the picker down with it', () => {
+  // A process that died mid-write leaves a truncated JSON file. It is one
+  // conversation, and it must cost one conversation: a picker that throws while
+  // being drawn loses every other chat in the app, which is the same failure
+  // `#broken` exists to prevent on the plugin list.
+  const good = chats.append('', { role: 'user', content: 'still here' });
+  writeFileSync(join(chatsDir(), '20250101120000-abcdef.json'), '{"id":"20250101120000-abcdef","messa', 'utf8');
+
+  const listed = chats.list();
+  assert.ok(listed.some((row) => row.id === good.id), 'the readable conversations still list');
+  assert.equal(listed.some((row) => row.id === '20250101120000-abcdef'), false, 'and the unreadable one is skipped');
+  assert.equal(chats.read('20250101120000-abcdef'), null);
 });

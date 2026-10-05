@@ -6,7 +6,7 @@
  * many plugins end up wanting to ask it — and no plugin can arrange to skip it
  * by not calling anything.
  */
-import { exec } from 'node:child_process';
+import { spawn } from 'node:child_process';
 
 export const manifest = {
   id: 'system-shell',
@@ -60,6 +60,143 @@ export function shellCommandFor(command, platform = process.platform) {
   return platform === 'win32' ? `chcp 65001>nul & cmd /d /s /c "${command}"` : command;
 }
 
+/**
+ * End a command, and whatever it started.
+ *
+ * `child.kill()` ends the process `exec` spawned, which is the shell — and on
+ * Windows the command is two `cmd`s below that (see `shellCommandFor`), so
+ * killing the top one orphans the thing that was meant to stop. Measured, not
+ * assumed: a `ping` stopped that way was still in the task list afterwards,
+ * with the turn reporting it as ended. `taskkill /T` walks the tree.
+ *
+ * Everywhere else it is the same hole with a different shape. `sh -c` runs the
+ * command as a child of the shell — dash, which is `/bin/sh` on Debian and
+ * Ubuntu, does not replace itself with it — so a signal to the shell leaves
+ * the command running. The first version of this said a POSIX shell could be
+ * left to `kill` alone, and the tests said otherwise the first time they ran
+ * on Linux. The command is therefore started as the leader of its own process
+ * group (`detached`, in `runCommand`), and a negative pid signals the whole
+ * group.
+ *
+ * The pipes are destroyed as well: `close` waits for them, and anything still
+ * holding one would keep the turn waiting on a command that has been told to
+ * stop.
+ */
+function killTree(child, signal = 'SIGTERM') {
+  const finish = () => {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    child.kill(signal);
+  };
+  if (!child.pid) return finish();
+
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, signal);
+    } catch {
+      /* the group is already gone, which is the outcome being asked for */
+    }
+    return finish();
+  }
+
+  const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+  // Either way the shell itself still has to go: `error` is a machine with no
+  // `taskkill` on PATH, and `close` is the tree gone or refusing to be.
+  killer.once('error', finish);
+  killer.once('close', finish);
+}
+
+/** As much output as is kept. Past it the command is stopped, as `exec` did. */
+const MAX_OUTPUT_BYTES = 1024 * 1024;
+/** How long a stopped command gets to go quietly before it is made to. */
+const KILL_GRACE_MS = 3000;
+
+/**
+ * Run one approved command to its end — its own, Stop's, or the timeout's.
+ *
+ * Answers `{ok, ended, text}`, where `ended` says what stopped it: `'stopped'`
+ * for Stop, `'timeout'`, `'flood'` for more output than is kept, or `''` for a
+ * command that finished by itself. Stop used to do nothing here: the signal
+ * reached the handler and was never passed on, so the turn sat on "Running…"
+ * for as long as the command cared to take.
+ *
+ * `spawn` rather than `exec`, for one option: `exec` cannot start a process
+ * as the leader of its own group, and without that there is no way to stop a
+ * command on Linux or macOS — see `killTree`. Not on Windows, where `detached`
+ * means a console window of its own and `taskkill` already walks the tree.
+ */
+export function runCommand(command, { signal = null, timeoutMs = TIMEOUT_MS } = {}) {
+  // Before anything is spawned. A listener added to a signal that has already
+  // fired never runs, and the command would then be started for a turn that
+  // had been stopped.
+  if (signal?.aborted) return Promise.resolve({ ok: false, ended: 'stopped', text: '(not run)' });
+
+  return new Promise((resolve) => {
+    let ended = '';
+    let failure = '';
+    let settled = false;
+    let timer = null;
+    let force = null;
+    let kept = 0;
+    const out = [];
+    const err = [];
+
+    const child = spawn(shellCommandFor(command), { shell: true, detached: process.platform !== 'win32' });
+
+    const end = (why) => {
+      if (ended || settled) return;
+      ended = why;
+      killTree(child);
+      // A command that ignores being asked is not thereby allowed to keep the
+      // turn. Unreferenced, so a grace period never holds the app open.
+      force = setTimeout(() => killTree(child, 'SIGKILL'), KILL_GRACE_MS);
+      force.unref?.();
+    };
+    const onAbort = () => end('stopped');
+
+    const settle = (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(force);
+      signal?.removeEventListener('abort', onAbort);
+
+      // Joined as bytes and decoded once, so a character split across two
+      // chunks is still a character.
+      const printed = `${Buffer.concat(out).toString('utf8')}${Buffer.concat(err).toString('utf8')}`.trim();
+      const note =
+        ended === 'timeout'
+          ? `(did not finish within ${Math.round(timeoutMs / 1000)}s and was stopped)`
+          : ended === 'flood'
+            ? '(stopped: it printed more than this keeps)'
+            : '';
+      const quiet = failure || (code === 0 ? '(no output)' : `exited with code ${code ?? 'unknown'}`);
+      resolve({
+        ok: code === 0 && !ended && !failure,
+        ended,
+        text: note ? `${printed}\n${note}`.trim() : printed || quiet,
+      });
+    };
+
+    const keep = (list) => (chunk) => {
+      kept += chunk.length;
+      if (kept > MAX_OUTPUT_BYTES) return end('flood');
+      list.push(chunk);
+    };
+    child.stdout?.on('data', keep(out));
+    child.stderr?.on('data', keep(err));
+    // No shell to run it in at all. `close` may not follow, so this settles.
+    child.once('error', (problem) => {
+      failure = problem.message;
+      settle(null);
+    });
+    child.once('close', (code) => settle(code));
+
+    timer = setTimeout(() => end('timeout'), timeoutMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 async function run(command, turn) {
   const approved = await turn.confirm({ kind: 'shell', command });
   if (!approved) {
@@ -71,11 +208,14 @@ async function run(command, turn) {
   }
 
   turn.status('Running…');
-  const output = await new Promise((resolve) => {
-    exec(shellCommandFor(command), { timeout: TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
-      resolve({ ok: !err, text: `${stdout ?? ''}${stderr ?? ''}`.trim() || (err ? err.message : '(no output)') });
-    });
-  });
+  const output = await runCommand(command, { signal: turn.signal });
+  if (output.ended === 'stopped') {
+    return {
+      ok: false,
+      summary: 'stopped',
+      feedback: `[SHELL STOPPED] The user stopped \`${command}\` before it finished. Do not retry it.`,
+    };
+  }
 
   return {
     ok: output.ok,

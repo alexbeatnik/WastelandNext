@@ -56,6 +56,14 @@ const state = {
    */
   scene: { active: false, scene: null },
   /**
+   * Every panel the main process holds, whichever conversation each is in.
+   *
+   * `scene` above is the one of these that belongs to the open chat, picked by
+   * `paintScene`. Both are kept because switching conversations changes the
+   * pick without the main process having anything new to say.
+   */
+  sceneAll: { panels: [] },
+  /**
    * Which chooser has already been put on screen.
    *
    * A chooser is a question, so it opens itself when it arrives — but a game
@@ -431,8 +439,9 @@ async function loadChat(id) {
   // chat, and that is what the chips say.
   paintAttachments(state.attachments);
   // A game belongs to the conversation it is played in, so the panel goes with
-  // the switch — same reason the transcript and the meter do.
-  paintScene(state.scene);
+  // the switch — same reason the transcript and the meter do. Picked again from
+  // everything there is: another conversation may have a panel of its own.
+  paintScene();
   $('chat-log').replaceChildren();
   if (state.chatId) {
     const chat = await api.chats.read(state.chatId);
@@ -884,9 +893,12 @@ function paintModelPicker(models = [], llm = {}) {
 
   const ready = llm.state === 'ready' && llm.model;
   const current = models.find((model) => (model.external ? model.path : model.name) === llm.model);
+  // `starting` is the server's word for a load in progress — see the states in
+  // `server.mjs`. This compared against `loading`, which is not one of them, so
+  // the label read "— pick a model —" for the whole minute one was arriving.
   $('model-current-label').textContent = ready
     ? current?.name ?? llm.model
-    : llm.state === 'loading'
+    : llm.state === 'starting'
       ? 'loading…'
       : models.length === 0
         ? '— no model —'
@@ -986,6 +998,26 @@ function settingControls(plugin, where = 'row') {
       node.dataset.where = where;
       return node;
     };
+
+    if (setting.type === 'button') {
+      // No value, no label beside it, no storage: the row *is* the control.
+      // Drawn in the app's own bracketed style so it reads as a thing that
+      // happens rather than as a field somebody forgot to fill in.
+      const press = el('button', 'ghost', `[ ${setting.label} ]`);
+      if (setting.hint) press.title = setting.hint;
+      press.addEventListener('click', async () => {
+        press.disabled = true;
+        try {
+          await pressPluginButton(plugin.id, setting.key);
+        } finally {
+          press.disabled = false;
+        }
+      });
+      row.textContent = '';
+      row.append(mark(press));
+      box.append(row);
+      continue;
+    }
 
     if (setting.type === 'toggle') {
       const input = document.createElement('input');
@@ -1247,7 +1279,7 @@ function paintPlugins(list = []) {
       : plugin.stale
         ? `updated on disk — restart Wasteland Next to run ${plugin.version}`
         : awaitingApproval
-          ? 'runs code from outside the app — nothing of it has been loaded yet'
+          ? 'code is not loaded yet — allowing it gives it app-level file access'
           : plugin.enabled && !plugin.active
             ? 'switched on, but not running'
             : unchosen
@@ -1268,7 +1300,7 @@ function paintPlugins(list = []) {
     // way to click a box into a state it is already in.
     if (awaitingApproval) {
       const allow = el('button', '', '[ ALLOW AND RUN ]');
-      allow.title = 'Run this plugin’s code, now and on every start';
+      allow.title = 'Run this plugin in the main process, with access to local files, now and on every start';
       allow.addEventListener('click', async () => {
         allow.disabled = true;
         try {
@@ -1285,6 +1317,16 @@ function paintPlugins(list = []) {
       update.addEventListener('click', () => installPlugin(published, update));
       buttons.append(update);
     }
+    // The one thing left to do about an update that has already landed. It is
+    // in the topbar as well, because this row is inside a collapsed section in
+    // a panel that a narrow window closes entirely — but the note explaining
+    // why is here, and a note with nothing to press beside it is half an answer.
+    if (plugin.stale) {
+      const restart = el('button', '', '[ RESTART ]');
+      restart.title = 'Close and start again, so the new version is the one that runs';
+      restart.addEventListener('click', () => restart$(restart));
+      buttons.append(restart);
+    }
     if (!plugin.builtin) {
       const remove = el('button', 'ghost danger', '[ REMOVE ]');
       remove.title = 'Delete this plugin from disk';
@@ -1299,6 +1341,37 @@ function paintPlugins(list = []) {
         }
       });
       buttons.append(remove);
+
+      /**
+       * Keep this one at whatever its registry publishes.
+       *
+       * A separate decision from the switch beside the name, and it is drawn
+       * separately for that reason: that one says the plugin may run, this one
+       * says a version nobody has looked at may replace it. Off unless it is
+       * ticked, and never offered for a built-in — those are part of the build
+       * and arrive with the app's own update, so a box promising anything else
+       * would be a control that cannot work.
+       */
+      const auto = el('label', 'check plugin-auto');
+      const autoBox = document.createElement('input');
+      autoBox.type = 'checkbox';
+      autoBox.checked = Boolean(plugin.autoUpdate);
+      autoBox.title = 'Install new versions of this plugin at start-up, without asking';
+      autoBox.addEventListener('change', async () => {
+        autoBox.disabled = true;
+        try {
+          paintPlugins(await api.plugins.setAutoUpdate(plugin.id, autoBox.checked));
+        } catch (err) {
+          // Put it back: the setting did not change, and a box showing a state
+          // the main process never accepted is a lie with nothing to correct it.
+          autoBox.checked = !autoBox.checked;
+          $('plugin-status').textContent = err.message;
+        } finally {
+          autoBox.disabled = false;
+        }
+      });
+      auto.append(autoBox, el('span', '', t('AUTO-UPDATE')));
+      buttons.append(auto);
     }
     if (buttons.childElementCount) row.append(buttons);
     // Redrawn from state rather than left in the DOM: this function replaces
@@ -1316,10 +1389,101 @@ function paintPlugins(list = []) {
   const active = list.filter((plugin) => plugin.active).length;
   $('plugin-status').textContent = list.length ? `${active} of ${list.length} active` : 'No plugins found.';
 
+  // From the same list: a plugin newer on disk than in memory is the only thing
+  // that puts RESTART in the topbar, and this is where that fact arrives.
+  paintRestart(list);
+  // And the count on GET PLUGINS, which is this list measured against what the
+  // registries published. Either half can change without the other, so both
+  // paints ask for it.
+  paintUpdateBadge();
+
   // From the same list and in the same breath: a plugin switched off here has
   // to lose its panel section now, not at the next repaint of something else.
   paintPluginPanels(list);
   restoreFocus(focused);
+}
+
+/**
+ * The one control that finishes a plugin update.
+ *
+ * Node caches ES modules by resolved URL for the life of the process, so an
+ * updated plugin goes on running the code it was first imported with. The row
+ * has said so for a while and that was not enough: the row is inside a
+ * collapsed section, in a panel a narrow window closes entirely, and an update
+ * that auto-installed at boot leaves no trace anywhere the user was looking. So
+ * it is in the topbar, beside the model — absent whenever there is nothing to
+ * finish, which is almost always.
+ *
+ * `hidden` alone would not do it: `.topbar .restart` gives the button a
+ * `display`, and any author-level `display` outranks the UA rule behind the
+ * attribute. The stylesheet carries the matching `[hidden]` rule.
+ */
+function paintRestart(list = []) {
+  const stale = list.filter((plugin) => plugin.stale);
+  const button = $('btn-restart');
+  button.hidden = stale.length === 0;
+  if (stale.length === 0) return;
+
+  // Named, because "restart to finish an update" with no subject is a request
+  // to restart for a reason the user cannot check.
+  const names = stale.map((plugin) => plugin.name).join(', ');
+  button.title = t('Restart to finish updating') + ` ${names}`;
+}
+
+/**
+ * How many installed plugins have an update waiting for somebody to press it.
+ *
+ * Drawn on the GET PLUGINS heading because that is the one place it can be
+ * read without opening anything: the section is closed by default, the boot
+ * fetch already knows what the registries published, and an update sitting
+ * inside a list nobody opens is an update nobody applies. The UPDATE buttons
+ * themselves have been on the rows all along — what was missing was any reason
+ * to go and look.
+ *
+ * A plugin set to AUTO-UPDATE is deliberately not counted. The number is a
+ * request for attention, and that one needs none: it fetches its own new
+ * version a few seconds after the next launch. Counting it would make the badge
+ * a number that does not go down when everything actionable has been done.
+ *
+ * `compatible` is required for the same reason, from the other direction: an
+ * entry needing a plugin API this build does not implement draws no button, and
+ * a count with no control behind it is a number nobody can clear.
+ */
+function updatesWaiting() {
+  return state.plugins.filter((plugin) => {
+    if (plugin.builtin || plugin.autoUpdate) return false;
+    const published = state.store.plugins.find((entry) => entry.id === plugin.id);
+    return Boolean(published) && published.compatible && isNewerVersion(published.version, plugin.version);
+  });
+}
+
+function paintUpdateBadge() {
+  const waiting = updatesWaiting();
+  const badge = $('store-badge');
+  badge.textContent = waiting.length ? String(waiting.length) : '';
+  badge.hidden = waiting.length === 0;
+  if (waiting.length === 0) return;
+
+  // Named, because a bare number on a heading is a quantity of something
+  // unstated. Set through `t()` rather than left in the markup: it is written
+  // after boot, so `applyDictionary` never captured it and would never reach it.
+  badge.title = `${t('Updates waiting')}: ${waiting.map((plugin) => `${plugin.name} → ${
+    state.store.plugins.find((entry) => entry.id === plugin.id)?.version ?? ''
+  }`).join(', ')}`;
+}
+
+/** Close and start again. The main process owns everything that has to stop. */
+async function restart$(button) {
+  if (button) button.disabled = true;
+  status(t('Restarting…'));
+  try {
+    await api.restart();
+  } catch (err) {
+    // The window is still here, so the button has to work again — a restart
+    // that failed silently is one the user presses forever.
+    status(err.message);
+    if (button) button.disabled = false;
+  }
 }
 
 /**
@@ -1682,9 +1846,9 @@ function paintStore() {
        * So the same control appears here, where the person actually is. It is
        * still one deliberate press, and it still says what it means.
        */
-      row.append(el('div', 'plugin-note', 'installed, but not running — it needs your permission to execute'));
+      row.append(el('div', 'plugin-note', 'installed, but not running — allowing code gives it app-level file access'));
       const allow = el('button', '', '[ ALLOW AND RUN ]');
-      allow.title = 'Run this plugin’s code, now and on every start';
+      allow.title = 'Run this plugin in the main process, with access to local files, now and on every start';
       allow.addEventListener('click', async () => {
         allow.disabled = true;
         try {
@@ -1709,6 +1873,11 @@ function paintStore() {
   if (state.store.error) $('store-status').textContent = state.store.error;
   else if (state.store.plugins.length) $('store-status').textContent = `${state.store.plugins.length} available`;
   else if (state.store.fetched) $('store-status').textContent = 'The registry lists nothing yet.';
+
+  // The other half of the count. `paintStore` runs when the registries have
+  // answered and `paintPlugins` when what is installed changes; the badge is
+  // the two measured against each other, so neither can be the only caller.
+  paintUpdateBadge();
 }
 
 /**
@@ -2019,9 +2188,16 @@ function paintPlayer(status = { source: null }) {
   sound.volume = (status.volume ?? 1) ** 2;
 
   if (status.playing) {
-    // A play() rejection is ordinary here — a file that will not decode, or a
-    // src replaced mid-load — and it is reported rather than thrown away.
-    sound.play().catch((err) => api.audio.failed(err.message).then(paintPlayer).catch(() => {}));
+    // A play() rejection is ordinary here, and there are two kinds. A file that
+    // will not decode is a failure and is reported. `AbortError` is not one: it
+    // is this element saying the request was overtaken — by the next track's
+    // `load()`, or by a pause — which is what pressing NEXT twice in a second
+    // does. Reported as a failure it stopped the track that had just been
+    // asked for, under an error about the one it replaced.
+    sound.play().catch((err) => {
+      if (err?.name === 'AbortError') return;
+      api.audio.failed(err.message).then(paintPlayer).catch(() => {});
+    });
   } else {
     sound.pause();
   }
@@ -2153,9 +2329,38 @@ function sceneShowing() {
   return Boolean(state.scene?.scene && owner && owner === state.chatId);
 }
 
-function paintScene(status = { active: false, scene: null }) {
-  state.scene = status;
-  const scene = sceneShowing() ? status.scene : null;
+/**
+ * The panel that belongs to a conversation, out of all the panels there are.
+ *
+ * More than one plugin draws here now — browser control shows the page, a game
+ * shows its world — and each has a panel of its own, claimed by the
+ * conversation it acted in. Which of them is on screen is therefore a fact
+ * about the open chat, and the open chat is something only this window knows;
+ * the main process sends every panel and this picks.
+ *
+ * The newest one wins when two are claimed by the same conversation, which is
+ * what `panels` being oldest-first is for: the browser driven from inside a
+ * game's chat takes the strip, and the game takes it back by acting.
+ */
+function panelFor(status, chatId) {
+  if (!chatId) return null;
+  const panels = status?.panels ?? (status?.scene ? [status] : []);
+  return panels.filter((panel) => panel.scene && panel.chatId === chatId).at(-1) ?? null;
+}
+
+/**
+ * Called with what the main process reported, or with nothing to redraw from
+ * what it last reported — the open conversation changed, and with it the
+ * answer to which panel is ours.
+ */
+function paintScene(status = state.sceneAll) {
+  state.sceneAll = status ?? { panels: [] };
+  // `state.scene` stays what everything below reads: one panel, the one on
+  // screen. It used to be the main process's whole answer, back when there was
+  // one panel to have.
+  const mine = panelFor(state.sceneAll, state.chatId);
+  state.scene = mine ? { active: true, ...mine } : { active: false, scene: null, chatId: '', pluginId: '' };
+  const scene = sceneShowing() ? state.scene.scene : null;
 
   $('scene').hidden = !scene;
   const actions = $('scene-actions');
@@ -2477,28 +2682,62 @@ function setSheet(open) {
  * journal — costs nothing and involves no model at all, which is most of what
  * made those commands slow and unreliable when they had to be typed at one.
  */
+/**
+ * What a press asked the window to do.
+ *
+ * Shared by the two things that can produce an answer: a move on the game's own
+ * row, and a `button` setting pressed in the left panel. One implementation
+ * because they are one contract — a game that answers LOAD GAME with
+ * `{sheet: true}` means the same thing by it as a game answering an inventory
+ * button, and two copies of this would eventually disagree about which.
+ */
+async function applyAnswer(answer) {
+  if (answer.status) status(answer.status);
+  // Asked for before anything is sent: a game that opens the bag and then
+  // takes a turn should show the bag first, not after the reply lands.
+  if (answer.sheet) setSheet(true);
+  if (answer.board) setBoard(true);
+  if (answer.cards) setCards(true);
+  if (answer.entry) setEntry(true);
+  // Sent from here, not from the main process, so a pressed button is an
+  // ordinary message in the conversation this window has open.
+  if (answer.submit) {
+    // A move made from a dialog closes it. Pressing a place on the map and
+    // then watching the reply arrive behind the still-open map is the map
+    // refusing to get out of the way of the thing it was used to do.
+    setBoard(false);
+    setCards(false);
+    setEntry(false);
+    await submitPrompt(answer.submit);
+  }
+}
+
 async function pressAction(actionId, value = '') {
   if (state.streaming) return status('A turn is running — wait for it to finish.');
   try {
-    const answer = await api.scene.act(actionId, value);
-    if (answer.status) status(answer.status);
-    // Asked for before anything is sent: a game that opens the bag and then
-    // takes a turn should show the bag first, not after the reply lands.
-    if (answer.sheet) setSheet(true);
-    if (answer.board) setBoard(true);
-    if (answer.cards) setCards(true);
-    if (answer.entry) setEntry(true);
-    // Sent from here, not from the main process, so a pressed button is an
-    // ordinary message in the conversation this window has open.
-    if (answer.submit) {
-      // A move made from a dialog closes it. Pressing a place on the map and
-      // then watching the reply arrive behind the still-open map is the map
-      // refusing to get out of the way of the thing it was used to do.
-      setBoard(false);
-      setCards(false);
-      setEntry(false);
-      await submitPrompt(answer.submit);
-    }
+    // Whose panel the button was on goes with the press. There can be more
+    // than one, and an id that means a card on a web page must not be handed
+    // to a game that happens to be running in another conversation.
+    await applyAnswer(await api.scene.act(actionId, value, state.scene?.pluginId ?? ''));
+  } catch (err) {
+    status(err.message);
+    activity(err.message, 'bad');
+  }
+}
+
+/**
+ * A `button` setting, pressed.
+ *
+ * The conversation goes with it because the main process does not have one, and
+ * this press is the case that needs it most: LOAD GAME is pressed when nothing
+ * is on screen, so the panel it paints has nowhere to belong unless the window
+ * says where. Repainting the list afterwards is what a button that changed
+ * something — started a run, wrote a slot — needs to show it.
+ */
+async function pressPluginButton(pluginId, key) {
+  if (state.streaming) return status('A turn is running — wait for it to finish.');
+  try {
+    await applyAnswer(await api.plugins.pressButton(pluginId, key, state.chatId));
   } catch (err) {
     status(err.message);
     activity(err.message, 'bad');
@@ -3160,7 +3399,7 @@ function handleEvent(payload) {
       // A game started in a fresh conversation is claimed by the id that only
       // arrives here; without this the panel would stay hidden for the whole
       // turn that summoned it.
-      paintScene(state.scene);
+      paintScene();
       break;
 
     case 'reply:start':
@@ -3201,6 +3440,11 @@ function handleEvent(payload) {
       // never leave a blinking cursor behind.
       state.streamEl?.remove();
       state.streamEl = null;
+      // And the busy state with it. `submitPrompt`'s `finally` is the ordinary
+      // way out, but it hangs off a promise this window owns — a reload during
+      // a turn leaves nobody holding it, so the only thing that can put the
+      // composer back is the event the main process emits either way.
+      setStreaming(false);
       break;
 
     case 'action:start': {
@@ -3561,6 +3805,8 @@ function wire() {
 
   bindCheck('set-crt', 'crtEffects');
 
+  $('btn-restart').addEventListener('click', (event) => restart$(event.currentTarget));
+
   $('btn-store-refresh').addEventListener('click', () => refreshStore());
   $('btn-store-file').addEventListener('click', () => installFromFile$());
   $('btn-registry-add').addEventListener('click', () => addRegistry$());
@@ -3649,6 +3895,15 @@ async function boot() {
     refreshLocales(),
     refreshRegistries(),
   ]);
+
+  // A turn outlives this window: it belongs to the main process, which is the
+  // whole reason the renderer holds no pipeline state. `busy` has been in the
+  // snapshot from the start and was never read, so a window reloaded mid-turn
+  // came back believing nothing was running — SEND where STOP belonged, the
+  // scene's moves live, and both delete guards open, which is exactly how a
+  // conversation got deleted out from under the reply being written into it.
+  // `turn:end` is what clears it again, on every path.
+  setStreaming(snapshot.busy === true);
 
   // After `refreshPlugins`, because a notice is signed with the name on the
   // plugin's own row and that list is where the name comes from. These are the

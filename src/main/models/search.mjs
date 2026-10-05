@@ -57,6 +57,23 @@ export function isShard(filename) {
 }
 
 /**
+ * A `owner/name` repository id, safe to interpolate into a URL path.
+ *
+ * The same rule the file path below follows, and for the same reason: the id is
+ * typed into a box by the user, so `#`, `?` or a space in it truncates the
+ * request at that character and asks HuggingFace about something else — a 404,
+ * or worse a question about the wrong repository. The `/` between owner and
+ * name is a separator and has to survive, which is what rules out
+ * `encodeURIComponent` over the whole string.
+ */
+export function encodeRepoId(repoId) {
+  return String(repoId ?? '')
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+}
+
+/**
  * The download URL for one file in a repository.
  *
  * Each path segment is encoded on its own. `encodeURI` leaves `#` and `?`
@@ -67,11 +84,8 @@ export function isShard(filename) {
  * separators instead, so the split is what keeps a nested path a path.
  */
 export function downloadUrlFor(repoId, path) {
-  const encoded = String(path ?? '')
-    .split('/')
-    .map((segment) => encodeURIComponent(segment))
-    .join('/');
-  return `https://huggingface.co/${repoId}/resolve/main/${encoded}`;
+  const encoded = encodeRepoId(path);
+  return `https://huggingface.co/${encodeRepoId(repoId)}/resolve/main/${encoded}`;
 }
 
 async function getJson(url, signal) {
@@ -141,7 +155,7 @@ export async function listGgufFiles(repoId, { signal } = {}) {
   const id = String(repoId ?? '').trim();
   if (!id) throw new Error('no repository given');
 
-  const entries = await getJson(`${API}/models/${id}/tree/main?recursive=true`, signal);
+  const entries = await getJson(`${API}/models/${encodeRepoId(id)}/tree/main?recursive=true`, signal);
   const files = (Array.isArray(entries) ? entries : [])
     .filter((entry) => entry.type === 'file' && /\.gguf$/i.test(entry.path ?? ''))
     .map((entry) => ({

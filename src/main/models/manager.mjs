@@ -12,7 +12,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import * as config from '../config.mjs';
 import { modelsDir } from '../paths.mjs';
 import { RateMeter } from './rate.mjs';
-import { downloadUrlFor } from './search.mjs';
+import { downloadUrlFor, encodeRepoId } from './search.mjs';
 
 /** Quantisations we prefer when a repo offers several, best trade-off first. */
 const QUANT_PREFERENCE = ['q4_k_m', 'q4_k_s', 'q4_0', 'q5_k_m', 'q8_0'];
@@ -101,7 +101,7 @@ export async function resolveTarget(input) {
     return { url, filename };
   }
 
-  const res = await fetch(`https://huggingface.co/api/models/${value}`, {
+  const res = await fetch(`https://huggingface.co/api/models/${encodeRepoId(value)}`, {
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`HuggingFace says ${res.status} for ${value}`);

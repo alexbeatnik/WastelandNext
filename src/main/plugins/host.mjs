@@ -4,8 +4,9 @@
  * A plugin contributes four things and nothing else: action types the model may
  * emit, a slice of the system prompt describing them, context appended to that
  * prompt each turn, and a hook run at the start of a turn. Everything it needs
- * from the app arrives as a named service it declared in its manifest, so what
- * a plugin can reach is legible without reading its code.
+ * from the host arrives as a named service it declared in its manifest. This
+ * limits host APIs, not Node itself: approved plugin code runs in the main
+ * process and can import Node modules. Approval must say that plainly.
  *
  * Built-ins are imported statically from `src/plugins/index.mjs` rather than
  * discovered on disk. They ship inside the app, so there is nothing to discover
@@ -28,6 +29,7 @@ import { PLUGIN_API_VERSION, mergeEnablement, needsApproval, parseManifest } fro
 import { pluginAssetUrl } from '../../shared/schemes.mjs';
 import { DEFAULT_CATEGORY } from '../../shared/categories.mjs';
 import { BUILTIN_PLUGINS } from '../../plugins/index.mjs';
+import { containedFile } from './files.mjs';
 
 export { PLUGIN_API_VERSION };
 
@@ -40,6 +42,17 @@ function byRank(a, b) {
   const [aBuiltin, aOrder, aId] = rank(a);
   const [bBuiltin, bOrder, bId] = rank(b);
   return aBuiltin - bBuiltin || aOrder - bOrder || aId.localeCompare(bId);
+}
+
+/**
+ * A module's `deactivate`, wherever `activate` was allowed to be.
+ *
+ * `#activate` accepts the pair on a default export as well as by name, so the
+ * stop has to be looked for in both places too — a plugin started through one
+ * door and never stopped through the other holds its timers for the session.
+ */
+function stopHook(module) {
+  return module?.deactivate ?? module?.default?.deactivate;
 }
 
 export class PluginHost extends EventEmitter {
@@ -57,6 +70,8 @@ export class PluginHost extends EventEmitter {
   #locales = [];
   /** `id → [fn]`, called when the user edits one of a plugin's settings. */
   #settingsHooks = new Map();
+  /** `id → fn`, called when the user presses one of its `button` settings. */
+  #buttonHooks = new Map();
   /**
    * `id → version-mtime` of the code actually imported, for the life of the
    * process. Kept outside `#entries` because rediscovery rebuilds those, and
@@ -67,6 +82,16 @@ export class PluginHost extends EventEmitter {
   #stateDir;
   #state = null;
   #ready = null;
+  /**
+   * The rebuild in flight, so the next one starts after it rather than inside it.
+   *
+   * Activation awaits — an import, a plugin's own async `activate` — and a
+   * rebuild clears the flat maps before it fills them. Two interleaving there
+   * each emptied what the other was halfway through filling: a toggle landing
+   * during the boot load, or during the rediscovery an auto-update ends with,
+   * left a plugin refused with "already provided by" naming itself.
+   */
+  #rebuilding = Promise.resolve();
 
   /**
    * @param services  named objects plugins may ask for — see `KNOWN_SERVICES`
@@ -90,9 +115,9 @@ export class PluginHost extends EventEmitter {
     return this.#state;
   }
 
-  /** Resolves once the first load has finished. Awaited before a turn runs. */
+  /** A turn waits for the current activation, including a later toggle. */
   get ready() {
-    return this.#ready ?? Promise.resolve();
+    return this.#rebuilding;
   }
 
   /**
@@ -102,7 +127,7 @@ export class PluginHost extends EventEmitter {
    * reload never overrules a decision the user made.
    */
   load() {
-    this.#ready = this.#load().catch((err) => {
+    this.#ready = this.#serial(() => this.#load()).catch((err) => {
       // Discovery itself failing is not a reason to have no app. The list will
       // be empty, the log will say why.
       this.emit('log', `plugins: ${err.message}`);
@@ -110,9 +135,23 @@ export class PluginHost extends EventEmitter {
     return this.#ready;
   }
 
+  /** Run one rebuild after whichever is already running, whatever became of it. */
+  #serial(task) {
+    const run = this.#rebuilding.then(task, task);
+    this.#rebuilding = run.catch(() => {});
+    return run;
+  }
+
   async #load() {
+    const found = this.#discover();
+    // Before the entries are replaced, not after: they are the only record of
+    // what is running. Rebuilt first, every active plugin was activated a
+    // second time with no `deactivate` in between, and one that had just been
+    // uninstalled was never stopped at all — it is not among the new entries,
+    // so neither `#reactivate` nor `shutdown` could ever reach it again.
+    await this.#teardown();
     this.#entries.clear();
-    for (const entry of this.#discover()) this.#entries.set(entry.manifest.id, entry);
+    for (const entry of found) this.#entries.set(entry.manifest.id, entry);
 
     // Newly discovered ids get a default; ids already recorded keep what the
     // user chose. The legacy capability checkboxes are read here, once.
@@ -244,19 +283,18 @@ export class PluginHost extends EventEmitter {
   }
 
   /**
-   * Tear down every contribution and put back the ones that should be there.
+   * Stop what is running, and have every service let go of it.
    *
-   * Rebuilding wholesale rather than adding and removing pieces is what keeps a
-   * disabled plugin from leaving an action behind: there is one place where the
-   * flat maps are filled, and it only ever reads from active entries.
+   * Everything, unless told which: removing one plugin stops that one first,
+   * while its files are still there to be stopped.
    */
-  async #reactivate() {
-    for (const entry of this.#entries.values()) {
+  async #teardown(entries = [...this.#entries.values()]) {
+    for (const entry of entries) {
       if (!entry.active) continue;
       entry.active = false;
       entry.contributions = null;
       try {
-        await entry.module?.deactivate?.();
+        await stopHook(entry.module)?.();
       } catch (err) {
         this.emit('log', `${entry.manifest.id}: deactivate failed — ${err.message}`);
       }
@@ -266,12 +304,23 @@ export class PluginHost extends EventEmitter {
       // the host does not have to know what any of them are for.
       for (const name of entry.manifest.services) {
         try {
-          this.#services[name]?.releasePlugin?.(entry.manifest.id);
+          await this.#services[name]?.releasePlugin?.(entry.manifest.id);
         } catch (err) {
           this.emit('log', `${entry.manifest.id}: ${name} would not release — ${err.message}`);
         }
       }
     }
+  }
+
+  /**
+   * Tear down every contribution and put back the ones that should be there.
+   *
+   * Rebuilding wholesale rather than adding and removing pieces is what keeps a
+   * disabled plugin from leaving an action behind: there is one place where the
+   * flat maps are filled, and it only ever reads from active entries.
+   */
+  async #reactivate() {
+    await this.#teardown();
 
     this.#actions.clear();
     this.#fragments = [];
@@ -280,6 +329,7 @@ export class PluginHost extends EventEmitter {
     this.#themes = [];
     this.#locales = [];
     this.#settingsHooks.clear();
+    this.#buttonHooks.clear();
 
     for (const entry of [...this.#entries.values()].sort(byRank)) {
       if (entry.broken) continue;
@@ -287,6 +337,11 @@ export class PluginHost extends EventEmitter {
       // reason it failed may be the thing the user has just fixed.
       entry.error = '';
       if (!this.#stateOf(entry.manifest.id).enabled) continue;
+      if (!this.#loadable(entry)) continue;
+      if (this.#hasCode(entry)) {
+        await this.#activate(entry);
+        if (!entry.active) continue;
+      }
 
       // Themes come off the manifest, not out of an activation. A theme pack is
       // data the app reads with its own protocol handler, so it works with no
@@ -311,9 +366,6 @@ export class PluginHost extends EventEmitter {
         });
       }
 
-      if (!this.#hasCode(entry)) continue;
-      if (!this.#loadable(entry)) continue;
-      await this.#activate(entry);
     }
 
     this.emit('changed', this.list());
@@ -324,7 +376,7 @@ export class PluginHost extends EventEmitter {
     try {
       if (!entry.module) entry.module = await this.#import(entry);
 
-      const contributions = { actions: [], fragments: [], contexts: [], turnHooks: [], settingsHooks: [] };
+      const contributions = { actions: [], fragments: [], contexts: [], turnHooks: [], settingsHooks: [], button: null };
       const activate = entry.module?.activate ?? entry.module?.default?.activate;
       if (typeof activate !== 'function') throw new Error('exports no activate() function');
 
@@ -360,6 +412,7 @@ export class PluginHost extends EventEmitter {
       this.#contexts.push(...contributions.contexts.map((fn) => ({ id: manifest.id, fn })));
       this.#turnHooks.push(...contributions.turnHooks.map((fn) => ({ id: manifest.id, fn })));
       if (contributions.settingsHooks.length) this.#settingsHooks.set(manifest.id, contributions.settingsHooks);
+      if (contributions.button) this.#buttonHooks.set(manifest.id, contributions.button);
 
       entry.active = true;
       entry.contributions = contributions;
@@ -368,6 +421,20 @@ export class PluginHost extends EventEmitter {
       entry.active = false;
       entry.contributions = null;
       entry.error = err.message;
+      // Activation may already have started timers or claimed a service. It
+      // contributes nothing, but still owes the same cleanup as an active one.
+      try {
+        await stopHook(entry.module)?.();
+      } catch (stopError) {
+        this.emit('log', `${manifest.id}: deactivate failed — ${stopError.message}`);
+      }
+      for (const name of manifest.services) {
+        try {
+          await this.#services[name]?.releasePlugin?.(manifest.id);
+        } catch (releaseError) {
+          this.emit('log', `${manifest.id}: ${name} would not release — ${releaseError.message}`);
+        }
+      }
       this.emit('log', `${manifest.id}: ${err.message}`);
     }
   }
@@ -393,8 +460,8 @@ export class PluginHost extends EventEmitter {
    * app to fix one that a restart fixes for free.
    */
   async #import(entry) {
-    const target = join(entry.dir, entry.manifest.main);
-    if (!existsSync(target)) throw new Error(`${entry.manifest.main} is missing`);
+    const target = containedFile(entry.dir, entry.manifest.main);
+    if (!target) throw new Error(`${entry.manifest.main} is missing or points outside the plugin`);
 
     let stamp = entry.manifest.version;
     try {
@@ -432,7 +499,13 @@ export class PluginHost extends EventEmitter {
         }
         const service = services[name];
         if (!service) throw new Error(`service "${name}" is not available in this session`);
-        return service;
+        // A service that needs to know who is calling hands over a view of
+        // itself that already does. The scene is the one that exists: two
+        // plugins draw panels, `show(scene)` has no argument to say whose, and
+        // a plugin left to say so itself could say somebody else's. Asked for
+        // by name, like `releasePlugin`, so the host still does not have to
+        // know what any service is for.
+        return service.forPlugin?.(manifest.id) ?? service;
       },
 
       /**
@@ -494,6 +567,25 @@ export class PluginHost extends EventEmitter {
       /** Called after the user edits one of those settings. */
       onSettingsChanged(fn) {
         if (typeof fn === 'function') contributions.settingsHooks.push(fn);
+      },
+
+      /**
+       * Called when the user presses one of the plugin's `button` settings.
+       *
+       * One handler and not a list, unlike the settings hooks: a press is a
+       * thing being done and it has an answer, and two handlers answering one
+       * press would be two plugins' worth of contradictory instructions about
+       * what the window should do next. The last one registered wins, which is
+       * the same rule the scene presenter follows.
+       *
+       * `fn(key)` may answer with the same object a scene move answers with —
+       * `{status, submit, sheet, board, cards, entry}` — so a button in the left
+       * panel can open the game's own dialogs. That is the whole reason this
+       * exists: a control that could only change a stored value would be a
+       * setting, and settings already had a type for that.
+       */
+      onButton(fn) {
+        if (typeof fn === 'function') contributions.button = fn;
       },
 
       /**
@@ -582,7 +674,11 @@ export class PluginHost extends EventEmitter {
 
   /** Where an installed plugin's files are, for the protocol handler. */
   dirFor(id) {
-    return this.#entries.get(id)?.dir ?? null;
+    const entry = this.#entries.get(id);
+    return entry && !entry.broken && this.#stateOf(id).enabled && this.#loadable(entry)
+      && (entry.active || !this.#hasCode(entry))
+      ? entry.dir ?? null
+      : null;
   }
 
   /** Dynamic context for this turn, gathered from every active plugin. */
@@ -658,6 +754,18 @@ export class PluginHost extends EventEmitter {
         icon: entry.manifest.icon && entry.dir ? pluginAssetUrl(entry.manifest.id, entry.manifest.icon) : '',
         enabled: Boolean(state.enabled),
         approved: Boolean(state.approved),
+        /**
+         * Keep this one at whatever the registry publishes, without being asked.
+         *
+         * Off unless somebody ticked it. An update is code arriving from
+         * outside the app, and the approval on the row below was given for the
+         * version that was there at the time — so this is a second, separate
+         * decision, made once, about one plugin. It is reported even for a
+         * built-in, where it is always false: the row draws the control from
+         * this list, and a field that is sometimes absent is a control that is
+         * sometimes `undefined`.
+         */
+        autoUpdate: Boolean(state.autoUpdate) && !entry.manifest.builtin,
         /** Switching this one on means running code that came from elsewhere. */
         needsApproval: needsApproval(entry.manifest),
         // What the user asked for and what is actually running are different
@@ -694,7 +802,35 @@ export class PluginHost extends EventEmitter {
     };
     config.update({ plugins });
 
-    await this.#reactivate();
+    await this.#serial(() => this.#reactivate());
+    return this.list();
+  }
+
+  /**
+   * Keep this plugin at whatever its registry publishes.
+   *
+   * A separate decision from approval and stored beside it, because it is a
+   * separate question: approval says this plugin's code may run, and this says
+   * code the user has not seen may replace it. Nothing here grants the first —
+   * `mergeEnablement` never overrules a record that already exists, so a plugin
+   * that was never allowed to run does not become allowed by being newer, and
+   * one that was switched off stays switched off.
+   *
+   * Refused for a built-in rather than ignored: a built-in is part of the
+   * build, there is no registry entry that could replace it, and a ticked box
+   * promising updates that can never arrive is worse than no box at all.
+   */
+  async setAutoUpdate(id, on) {
+    const entry = this.#entries.get(id);
+    if (!entry) throw new Error(`no plugin called "${id}"`);
+    if (entry.manifest.builtin) throw new Error(`${entry.manifest.name} ships with the app and updates with it`);
+
+    const plugins = { ...(config.get('plugins') ?? {}) };
+    const state = plugins[id] ?? { enabled: false, approved: false };
+    plugins[id] = { ...state, autoUpdate: Boolean(on) };
+    config.update({ plugins });
+
+    this.emit('changed', this.list());
     return this.list();
   }
 
@@ -711,6 +847,10 @@ export class PluginHost extends EventEmitter {
     if (!entry) throw new Error(`no plugin called "${id}"`);
     const declared = entry.manifest.settings.find((setting) => setting.key === key);
     if (!declared) throw new Error(`"${id}" has no setting called "${key}"`);
+    // A button holds nothing. Storing against one would put a value in
+    // `config.json` under a key the plugin can only ever read back as noise,
+    // and `store.get` would hand it out as though somebody had chosen it.
+    if (declared.type === 'button') throw new Error(`"${key}" is a button, not a setting to store`);
 
     const next = declared.type === 'toggle' ? Boolean(value) : String(value ?? '');
     // A picker can only hold one of the things it offered. Anything else is a
@@ -737,6 +877,31 @@ export class PluginHost extends EventEmitter {
   }
 
   /**
+   * A `button` setting, pressed.
+   *
+   * Answers with whatever the plugin's `onButton` handler answered, unchecked
+   * and unshaped: this is the plugin host, and what a scene answer is allowed
+   * to contain is the scene service's rule rather than one restated here. The
+   * caller in `ipc.mjs` runs it through the scene's own normaliser before any
+   * of it reaches a window.
+   *
+   * Refused rather than ignored when the plugin declares the button and
+   * registers no handler: a control drawn on somebody's panel that silently
+   * does nothing is the failure this returns a sentence about instead.
+   */
+  async pressButton(id, key) {
+    const entry = this.#entries.get(id);
+    if (!entry) throw new Error(`no plugin called "${id}"`);
+    const declared = entry.manifest.settings.find((setting) => setting.key === key);
+    if (!declared || declared.type !== 'button') throw new Error(`"${id}" has no button called "${key}"`);
+    if (!this.#stateOf(id).enabled) throw new Error(`"${id}" is switched off`);
+
+    const press = this.#buttonHooks.get(id);
+    if (!press) throw new Error(`"${id}" draws a button called "${key}" and answers nothing when it is pressed`);
+    return (await press(key)) ?? {};
+  }
+
+  /**
    * Throw away everything a plugin kept, on uninstall.
    *
    * Its document and its data directory both, and the second matters more than
@@ -757,9 +922,38 @@ export class PluginHost extends EventEmitter {
     }
   }
 
+  /**
+   * Remove a plugin: stop it, delete it, forget what it kept, rediscover.
+   *
+   * One operation rather than four calls in `ipc.mjs`, because the order is
+   * the whole of it. Stopped first, while its directory and its document still
+   * exist — `deactivate` is where a plugin saves, closes and lets go, and run
+   * after the delete it would do all of that to files that are gone, or write
+   * its document back a moment after the uninstall removed it. `remove` is the
+   * caller's, since deleting an installed directory is the registry's job and
+   * this object must not learn where that is.
+   *
+   * Rediscovered in a `finally`: a directory Windows refused to delete is a
+   * plugin that is still installed, and it has to come back as the running
+   * plugin it was rather than as a row that is switched on and doing nothing.
+   */
+  uninstall(id, remove) {
+    return this.#serial(async () => {
+      const entry = this.#entries.get(id);
+      if (entry) await this.#teardown([entry]);
+      try {
+        await remove();
+        this.forgetData(id);
+      } finally {
+        await this.#load();
+      }
+      return this.list();
+    });
+  }
+
   /** Rediscover after an install or a removal, keeping every recorded decision. */
   async refresh() {
-    await this.#load();
+    await this.#serial(() => this.#load());
     return this.list();
   }
 
@@ -769,7 +963,7 @@ export class PluginHost extends EventEmitter {
       if (!entry.active) continue;
       entry.active = false;
       try {
-        await entry.module?.deactivate?.();
+        await stopHook(entry.module)?.();
       } catch {
         /* going away anyway */
       }

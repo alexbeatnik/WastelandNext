@@ -1,7 +1,7 @@
 {
   "name": "wasteland-next",
   "productName": "Wasteland Next",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Local LLM terminal — amber CRT aesthetic, Electron, plugins for everything the model may do.",
   "license": "Apache-2.0",
   "author": "Oleksii Poliakov",

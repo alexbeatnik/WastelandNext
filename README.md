@@ -34,6 +34,12 @@ costs a model real time deliberating over whether a fenced action block counts a
 plain data and built into DOM nodes, never assigned as HTML, so a reply that happens to contain markup is displayed
 rather than executed.
 
+**The reply comes back in the language of the question.** Not the language of the conversation so far — a question
+typed in English is answered in English however many turns before it were not — and not a language some installed
+plugin names. A game plugin set to Ukrainian used to make the whole session Ukrainian, so "what can you do?" got an
+answer nobody had asked for in that language; the base rule now says which of the two wins. Asking for a language still
+works, because that is the user asking.
+
 **A reply can end in buttons.** A numbered list is not a menu: "1. Open it 2. Show other versions — which would you
 like?" is a control nobody can press, and it was the only thing a model could produce. A reply may instead end in a
 fenced `choices` block stating the options as data; the app reads it, draws a button each, and pressing one sends that
@@ -118,7 +124,9 @@ every node on screen is built here from a document with a fixed set of keys. The
 so no two moves can claim the same digit, and a digit typed into the composer stays a digit. A move is sent by the
 window down exactly the path typed text takes, which is also what stops a game looping: nothing in the service can
 start a turn, so a move happens because somebody pressed a key. The panel belongs to the conversation the game is
-played in, and is drawn nowhere else. [Space Trader](https://github.com/alexbeatnik/wasteland-plugin-space-trader) and
+played in, and is drawn nowhere else. A run does not have to be started by typing at it, either: a manifest can declare
+a button, and a press is the one thing that reaches a plugin from *outside* a turn — which is exactly the moment NEW
+GAME and LOAD GAME exist for. [Space Trader](https://github.com/alexbeatnik/wasteland-plugin-space-trader) and
 [Fantasy RPG](https://github.com/awakeserg/wasteland-plugin-fantasy-rpg) both drive it.
 
 **Audio** is the smallest part of a music player that cannot be a plugin: an `<audio>` element, the transport bar under
@@ -144,8 +152,10 @@ is gone the moment it is dismissed. Notices raised before the window was listeni
 which is how a reminder that came due while the app was closed still reaches you.
 
 **A setting can be drawn twice.** Every control on a plugin's row is declared in its manifest — a folder to pick, an
-endpoint to type, a list to choose from — so the row can be drawn before a line of the plugin's code has run, and a
-value it never offered is refused. A row in PLUGINS is where a plugin is *decided* about, beside its description and
+endpoint to type, a list to choose from, a button to press — so the row can be drawn before a line of the plugin's code
+has run, and a value it never offered is refused. A button is the odd one out and is declared there anyway, because the
+row and the panel section are built from that list and NEW GAME has nowhere else to go; it stores nothing, and it
+answers with exactly what a move on the action row answers with, so the window has one way to act on a press. A row in PLUGINS is where a plugin is *decided* about, beside its description and
 the switch that turns it off, and a poor place to actually *use* one: a music folder and a model size get changed far
 more often than the plugin gets reconsidered, and reaching either meant opening the section and reading a dozen rows.
 A manifest may therefore ask for a section of its own in the left panel, drawn from the same declarations, with nothing
@@ -157,8 +167,10 @@ row; a list of reminders is neither of those, so a plugin also gets one JSON doc
 which the app never reads the inside of. It is written whole and renamed into place, because a half-written file reads
 back as empty — which would be every reminder you had set, gone, with nothing saying so.
 
-**More than one registry, and archives off your own disk.** GET PLUGINS lists the registries it asks; paste a
-repository URL — `https://github.com/owner/repo` is expanded to the index inside it — and press ADD. An index has to be
+**More than one registry, and archives off your own disk.** **REGISTRIES**, folded away at the bottom of GET PLUGINS,
+lists the indexes it asks; paste a repository URL — `https://github.com/owner/repo` is expanded to the index inside it
+— and press ADD. It is folded because it is the app's own list nine times out of ten and grows a row with every plugin
+that ships, and left open it pushed the plugins themselves off the bottom of the panel. An index has to be
 served over https, since it is a list of URLs and checksums deciding what gets downloaded and unpacked; loopback is the
 exception, for anyone serving their own. More than one index ships with the app — something large enough to have its
 own release cycle is reasonably published from its own repository, and asking you to paste a URL to find a plugin the
@@ -174,10 +186,27 @@ distinction the app draws between a path a model names and a path a person picks
 archive is refused if any entry would unpack outside its own directory, the manifest has to be one this build can use,
 and the code does not run until you press ALLOW AND RUN.
 
+**A number on the GET PLUGINS heading is how many updates are waiting.** The section is closed by default and the
+UPDATE buttons are inside it, so an update nobody knew about was an update nobody applied. The count leaves out
+anything already looked after — a plugin set to AUTO-UPDATE fetches its own, and an entry needing a newer plugin API
+draws no button — so pressing everything it points at clears it.
+
+**AUTO-UPDATE keeps one plugin current without being asked.** A box on the plugin's own row, off until you tick it,
+and it is a separate decision from ALLOW AND RUN on purpose: that one says this plugin's code may run, this one says a
+version you have not looked at may replace it. A few seconds after launch the app asks the registries and installs
+anything newer for the plugins that asked for it, reporting on the row it belongs to rather than into a section nobody
+has opened. It can only ever replace something already installed — it installs nothing new, approves nothing and
+switches nothing on, so a plugin waiting for permission is still waiting for it afterwards, and one you switched off
+stays off. Every check the ordinary install path makes still runs, checksum included. Built-ins have no box: they are
+part of the app and arrive with its own update.
+
 **Updating a plugin needs a restart to finish.** Node caches modules by URL for the life of the process, so replacing
-files does not replace what is running; the row says so, and the version shown is what is installed. An earlier attempt
-to defeat the cache by importing the entry point under a unique query made it worse — the query is not inherited by the
-plugin's own imports, so a new entry point linked against cached dependencies and failed outright.
+files does not replace what is running; the row says so, the version shown is what is installed, and **`[ RESTART ]`**
+appears in the top bar for as long as anything is in that state — on the row too, beside the note that explains it. An
+earlier attempt to defeat the cache by importing the entry point under a unique query made it worse — the query is not
+inherited by the plugin's own imports, so a new entry point linked against cached dependencies and failed outright.
+Restarting goes through the ordinary shutdown, so llama-server is stopped before the new instance comes up rather than
+left holding port 8080 against it.
 
 **Writing one is documented in full in [docs/PLUGIN-API.md](docs/PLUGIN-API.md)** — the manifest, every method on
 `ctx`, every service, the rules that are not negotiable, and a checklist. It is written to be followed straight
@@ -189,8 +218,9 @@ and the workflow that publishes it:
 [browser control](https://github.com/alexbeatnik/wasteland-plugin-manul-browser),
 [Space Trader](https://github.com/alexbeatnik/wasteland-plugin-space-trader),
 [Fantasy RPG](https://github.com/awakeserg/wasteland-plugin-fantasy-rpg),
-[Ukrainian](https://github.com/alexbeatnik/wasteland-plugin-ukrainian) and
-[phosphor themes](https://github.com/alexbeatnik/wasteland-plugin-phosphor-themes).
+[Ukrainian](https://github.com/alexbeatnik/wasteland-plugin-ukrainian),
+[phosphor themes](https://github.com/alexbeatnik/wasteland-plugin-phosphor-themes) and
+[Valley](https://github.com/awakeserg/wasteland-plugin-valley-theme).
 
 ## Requirements
 
@@ -226,8 +256,8 @@ Runs electron-builder. Two artifacts land in `dist/`:
 
 | File | What it is |
 |---|---|
-| `WastelandNext-<version>-portable.exe` | ~75 MB, single self-contained file, runs with no install |
-| `WastelandNext-<version>-setup.exe` | ~76 MB installer, per-user, installation directory selectable |
+| `WastelandNext-<version>-portable.exe` | ~74 MB, single self-contained file, runs with no install |
+| `WastelandNext-<version>-setup.exe` | ~74 MB installer, per-user, installation directory selectable |
 
 `dist/win-unpacked/` holds the same app as a plain directory, which is the quickest thing to debug against.
 
@@ -257,6 +287,12 @@ Nothing is signed, so SmartScreen warns on first run and after each update.
 
 The packaged app is the app and its plugins' host, nothing else: capabilities are installed from a registry at runtime,
 so a release does not have to carry them. It still needs `llama-server` (or a remote endpoint) for inference.
+
+**One copy runs at a time.** Starting Wasteland Next while it is already running raises the window you have instead of
+opening a second one. That is about video memory rather than tidiness: a second instance loads its own llama-server
+with its own copy of the weights, and a card that holds one model comfortably holds two of them not at all — what you
+would see is the first window's model failing to answer, or the second refusing to load with a VRAM error naming a
+shortage nothing on screen explains.
 
 ## First run
 
@@ -450,18 +486,26 @@ src/
 ## Testing
 
 ```bash
-npm test       # 552 unit tests, no Electron, no network
+npm test       # 611 unit tests, no Electron, no network
 npm run smoke  # boots the real window offscreen and checks the UI and layout
 ```
 
 `npm test` covers the pure logic: action extraction and its JSON repair, the `choices` fence, `<think>` splitting and
 stripping, markdown parsing, chat storage and id validation, path vetting, HuggingFace URL building and quantisation
 choice, prompt assembly, plugin manifest validation and host activation, the scene document and what a game may offer,
-registry entries and version comparison, Range parsing and custom-scheme URLs, GGUF header parsing and the context/GPU
-arithmetic, the compaction threshold and the window backstop, folder collection and its budget, download speed and
-resume, notices, dictation, and crash-log summarising.
+registry entries and version comparison, the shipped index list as a set of publishers, per-plugin auto-update and the
+decisions it must not move, Range parsing and custom-scheme URLs, GGUF header parsing and the context/GPU arithmetic,
+the compaction threshold and the window backstop, folder collection and its budget, download speed and resume, notices,
+dictation, and crash-log summarising.
 
-`npm run smoke` boots the real window offscreen — 285 checks — and covers what unit tests cannot: a renderer that throws
+Three of them are there because two passing tests can sit either side of missing wiring. `game-prompt.test.mjs` builds
+a real agent over a real scene and reads the prompt's size before and after a game registers, because a rule the prompt
+keeps and a fact the service reports are both true while nothing asks. `deleted-chat.test.mjs` is the same shape one
+layer down: storage refusing to append to a conversation that was deleted proves nothing if the turn above it opens
+that conversation by creating a new one. `load-guard.test.mjs` covers the two halves of one load — a second click
+inside the window before `starting` is set, and an UNLOAD pressed while there is still no process to stop.
+
+`npm run smoke` boots the real window offscreen — 312 checks — and covers what unit tests cannot: a renderer that throws
 on boot, a preload that failed to expose its bridge, an IPC channel renamed on one side only, a layout that breaks at
 one screen shape, or a control that stops resetting what it should. It clicks NEW CHAT, presses Enter, attaches a
 folder and detaches one of two, switches a plugin off and checks the main process agrees, allows a plugin that brings
@@ -469,8 +513,10 @@ code and watches it start, installs a theme and asserts the window actually repa
 the English back, plays a real audio file through the media scheme, presses a button a reply offered and checks the
 words went out as an ordinary message, plays a turn of a game — hotkeys, the sheet, the map, a chooser — and checks a
 digit typed into the composer stays a digit, deletes a conversation from the picker without opening it, opens the About
-box and checks every link in it would leave the window, resizes through seven screen shapes, and checks that a reply
-containing `<img onerror=…>` is drawn as text rather than run.
+box and checks every link in it would leave the window, ticks AUTO-UPDATE and reads the answer back from the main
+process, folds the registry list away and measures that a closed section really is only its heading, counts the waiting
+updates on the GET PLUGINS heading and watches the number go away when a plugin is set to fetch its own, resizes
+through seven screen shapes, and checks that a reply containing `<img onerror=…>` is drawn as text rather than run.
 
 A check the running screen cannot answer is reported as `skip` with the reason, never quietly relaxed until it fits. A
 hosted runner's display is 1024×768: every layout shape goes unasked there, and the map is checked against the rule

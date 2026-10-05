@@ -314,7 +314,19 @@ export class Agent extends EventEmitter {
     this.#plugins.beginTurn();
 
     try {
-      let chat = chats.read(chatId) ?? chats.create(chats.titleFromPrompt(prompt));
+      // An empty `chatId` is a new conversation; a non-empty one that no longer
+      // resolves is a chat deleted since the composer last saw the id, and
+      // creating one for it is the same resurrection `chats.append` refuses —
+      // the same rule, one level up, where the id still arrives from outside.
+      // Without this the refusals below could never fire: every one of them is
+      // handed an id this line had just made.
+      //
+      // Refused ahead of `turn:start`, so nothing is persisted and the renderer
+      // hands the words back to the composer instead of losing them to a
+      // conversation nobody can open.
+      const existing = chats.read(chatId);
+      if (!existing && chatId) throw new Error('that conversation no longer exists');
+      let chat = existing ?? chats.create(chats.titleFromPrompt(prompt));
 
       // Attachments go in ahead of the message they came with, as an ordinary
       // transcript entry: they are then compacted, budgeted and dropped by
@@ -328,14 +340,25 @@ export class Agent extends EventEmitter {
       // first, which is why this costs nothing to ask on all of them.
       const attached = this.attachments.take(chat.id, Math.floor(promptBudget(this.#window()) / 2));
       if (attached) {
-        chat = chats.append(chat.id, { role: 'tool', content: attached });
+        const withFiles = chats.append(chat.id, { role: 'tool', content: attached });
+        // Refused before the event, not after: `attach:consumed` is what records
+        // that this folder has now been seen by this conversation, and spending
+        // it against a chat that is not there loses the attachment for a turn
+        // that never happened.
+        if (!withFiles) throw new Error('that conversation no longer exists');
+        chat = withFiles;
         // Carries the list, because the chips do not go away any more: what
         // changed is that they now belong to this conversation, and the row has
         // to say so.
         this.#say('attach:consumed', { items: this.attachments.list() });
       }
 
-      chat = chats.append(chat.id, { role: 'user', content: prompt });
+      // Nothing can have deleted the chat between the check above and here —
+      // there is no await in the stretch — so this is the guard that keeps that
+      // true if one is ever added, not one that fires today.
+      const opened = chats.append(chat.id, { role: 'user', content: prompt });
+      if (!opened) throw new Error('that conversation no longer exists');
+      chat = opened;
       // Captured before the turn runs: afterwards the chat holds a reply too,
       // and the model only gets to name a conversation once. Counted in *user*
       // messages rather than all of them, because an attachment goes in first
@@ -345,7 +368,9 @@ export class Agent extends EventEmitter {
 
       await this.#runTurn(chat.id, 0);
 
-      if (isFirstTurn) await this.#retitle(chat.id);
+      // Not after a stop: the signal is still the aborted one, so the request
+      // could only fail, and the title taken from the prompt is already there.
+      if (isFirstTurn && !this.#abort.signal.aborted) await this.#retitle(chat.id);
       return chat.id;
     } finally {
       this.#busy = false;
@@ -372,7 +397,16 @@ export class Agent extends EventEmitter {
     // message from the user.
     await this.#maybeCompact(chatId, { context });
 
+    // Compaction is a model call of its own and Stop can land inside it. There
+    // is no reply on screen yet, so there is nothing owed — and going on would
+    // put a cursor in the transcript for a request that is already cancelled.
+    if (this.#abort?.signal.aborted) return;
+
+    // Read back after `#maybeCompact`, which awaits — so the conversation can
+    // have gone in the meantime. `#buildMessages` would meet a null and throw a
+    // TypeError about a property; this says the thing that actually happened.
     const chat = chats.read(chatId);
+    if (!chat) throw new Error('that conversation no longer exists');
     const built = this.#buildMessages(chat, context, chatId);
 
     // Compaction is the graceful shrink and normally the only one that runs.
@@ -411,8 +445,16 @@ export class Agent extends EventEmitter {
       throw err;
     }
 
-    chats.append(chatId, { role: 'assistant', content: text });
+    // The conversation can be deleted while its turn is still running. There is
+    // nowhere to put these words now, and `append` says so rather than making
+    // somewhere — so the turn stops here. `reply:start` is still owed a
+    // `reply:end` on this path as on every other, and it is paid first.
+    const saved = chats.append(chatId, { role: 'assistant', content: text });
     this.#say('reply:end', { text, rendered: stripBlocks(text), aborted });
+    if (!saved) {
+      this.#say('log', { text: 'conversation was deleted — nothing was written' });
+      return;
+    }
 
     if (aborted) return;
 
@@ -428,10 +470,22 @@ export class Agent extends EventEmitter {
       if (this.#abort?.signal.aborted) return;
       const result = await this.#dispatch(action);
       if (result?.feedback) {
-        chats.append(chatId, { role: 'tool', content: result.feedback });
+        // Same rule as the reply above: a chat deleted mid-turn is not a reason
+        // to write the result into a new one.
+        if (!chats.append(chatId, { role: 'tool', content: result.feedback })) {
+          this.#say('log', { text: 'conversation was deleted — nothing was written' });
+          return;
+        }
         fedBack = true;
       }
     }
+
+    // The loop asks before each action; this asks after the last one. A stop
+    // pressed while an action ran — or used to answer its approval dialog —
+    // would otherwise send the result into another model call on a signal that
+    // is already aborted. The result itself is kept: it is in the transcript,
+    // and the model reads it with whatever the user says next.
+    if (this.#abort?.signal.aborted) return;
 
     // A result the model has not seen yet is only useful if it gets another
     // turn to react to it. Bounded, or a stubborn model loops forever.
@@ -576,7 +630,8 @@ export class Agent extends EventEmitter {
         .filter((segment) => segment.kind === 'text')
         .map((segment) => segment.content)
         .join(' ');
-      const updated = chats.rename(chatId, prose || text);
+      // The title, not the reply: a model asked for one line often writes two.
+      const updated = chats.rename(chatId, chats.titleFromReply(prose || text));
       if (updated) this.#say('chat:renamed', { chatId, title: updated.title });
     } catch {
       /* the prompt-derived title is already good enough */
@@ -619,7 +674,12 @@ export class Agent extends EventEmitter {
         ],
         promptBudget(usage.max),
       );
-      const { text } = await this.#complete(ask, { silent: true });
+      const { text, aborted } = await this.#complete(ask, { silent: true });
+      // A stopped request hands back whatever had streamed, because for a
+      // reply the partial text is worth keeping. Here it is the opposite: this
+      // text *replaces* everything it summarises, and half a sentence stored in
+      // place of the conversation is the conversation lost.
+      if (aborted) return false;
       const summary = text.trim();
       if (!summary) return false;
 

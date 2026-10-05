@@ -17,12 +17,26 @@
  * single sound does not inherit a next button it cannot honour.
  */
 import { EventEmitter } from 'node:events';
-import { basename, extname } from 'node:path';
 import * as config from './config.mjs';
 import { mediaUrl } from '../shared/schemes.mjs';
 
 /** Buttons the bar can offer. Which of them appear is the transport's to say. */
 export const TRANSPORT_BUTTONS = ['previous', 'next', 'stop'];
+
+/**
+ * A file's own name, without its directory or its extension.
+ *
+ * Split by hand on either separator rather than through `path.basename`, which
+ * only knows the separator of the platform it is running on: a Windows path is
+ * one long filename to it anywhere else, and the label came out as the whole
+ * path. That is exactly what the test for this does on the Linux runner — the
+ * track in it is `C:\Music\…` — and it is the first thing that failed there.
+ */
+function nameOf(file) {
+  const name = String(file).split(/[\\/]/).pop() ?? '';
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(0, dot) : name;
+}
 
 export class AudioOut extends EventEmitter {
   /** `{path, label, sublabel, position}` — everything the bar draws. */
@@ -105,7 +119,7 @@ export class AudioOut extends EventEmitter {
 
     this.#source = {
       path: file,
-      label: String(label) || basename(file, extname(file)),
+      label: String(label) || nameOf(file),
       sublabel: String(sublabel),
     };
     this.#error = '';

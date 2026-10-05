@@ -70,11 +70,48 @@ function finish() {
   app.exit(failures.length === 0 ? 0 : 1);
 }
 
-// A hung renderer must fail the run, not hang the caller forever.
+/**
+ * A hung renderer must fail the run, not hang the caller forever.
+ *
+ * Generous on purpose. This is a deadline for a renderer that has stopped
+ * answering, not a performance budget for the suite: the run takes about
+ * three-quarters of a minute on the machine it was written on, and a hosted
+ * runner is slower. Set close to the real duration it stops being a watchdog
+ * and becomes a coin flip — which is what 45s had quietly become, failing on
+ * the 312th check of 312 while nothing was wrong.
+ *
+ * If this ever needs raising again, look first at what is sleeping. A check
+ * that waits a fixed interval for something it could poll for is where the time
+ * goes; `waitFor` is the way to stop paying it.
+ */
 const watchdog = setTimeout(() => {
-  check('completed within 45s', false, 'timed out');
+  check('completed within 90s', false, 'timed out');
   finish();
-}, 45_000);
+}, 90_000);
+
+/**
+ * Wait until an expression in the renderer is true, instead of sleeping.
+ *
+ * The same reasoning as the layout checks polling `window.innerWidth` rather
+ * than sleeping after a resize: a fixed interval is either longer than it needs
+ * to be on every run, or too short on the one run that mattered. Returns
+ * whether the condition arrived, so a caller can assert on it rather than
+ * discover it three checks later.
+ */
+async function waitFor(window, expression, { timeoutMs = 4000, every = 100 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let ok = false;
+    try {
+      ok = Boolean(await window.webContents.executeJavaScript(`Boolean(${expression})`));
+    } catch {
+      /* mid-navigation or mid-repaint; try again */
+    }
+    if (ok) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, every));
+  }
+}
 
 /**
  * Shapes the layout has to survive.
@@ -101,22 +138,58 @@ async function checkLayouts(window) {
   // keeping the previous size. Shapes that cannot fit are reported as skipped
   // rather than measured against a viewport that never changed.
   const { screen } = await import('electron');
-  const workArea = screen.getPrimaryDisplay().workAreaSize;
+  const workArea = { ...screen.getPrimaryDisplay().workAreaSize };
+  // A way to be the hosted runner without owning one: its display is 768 tall,
+  // and what happens on a short screen should be checkable on a tall one.
+  if (Number(process.env.SMOKE_DISPLAY_HEIGHT) > 0) workArea.height = Number(process.env.SMOKE_DISPLAY_HEIGHT);
 
   for (const shape of SHAPES) {
-    if (shape.height > workArea.height - 60) {
-      skip(shape.name, `taller than this display's work area (${workArea.height}px)`);
-      continue;
-    }
+    /**
+     * A shape the display cannot hold is emulated, not skipped.
+     *
+     * Skipping was honest and it was also the whole check gone: on a 768-pixel
+     * runner every one of the seven shapes is too tall, so "the layout survives
+     * these screens" was reported as seven skips and nothing was ever measured
+     * there — including a rail whose sections had all been squashed. Device
+     * emulation gives the page a viewport of the size asked for whatever the
+     * window is, which is the only thing a layout reads: the media queries,
+     * the viewport units and `innerWidth` all answer from it.
+     */
+    const emulated = shape.height > workArea.height - 60;
+    const name = emulated ? `${shape.name}, emulated` : shape.name;
 
-    // A hidden window applies a resize on its own schedule, so the viewport is
-    // polled rather than assumed after a fixed sleep.
-    window.setContentSize(shape.width, shape.height);
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      await new Promise((r) => setTimeout(r, 100));
-      const width = await window.webContents.executeJavaScript('window.innerWidth');
-      if (Math.abs(width - shape.width) <= 4) break;
-      if (attempt === 9) window.setContentSize(shape.width, shape.height);
+    if (emulated) {
+      const size = { width: shape.width, height: shape.height };
+      window.webContents.enableDeviceEmulation({
+        screenPosition: 'desktop',
+        screenSize: size,
+        viewPosition: { x: 0, y: 0 },
+        deviceScaleFactor: 0,
+        viewSize: size,
+        scale: 1,
+      });
+      const took = await waitFor(
+        window,
+        `Math.abs(window.innerWidth - ${shape.width}) <= 4 && Math.abs(window.innerHeight - ${shape.height}) <= 4`,
+      );
+      if (!took) {
+        // Said out loud rather than measured anyway: numbers read off a
+        // viewport that never changed are the previous shape's numbers.
+        window.webContents.disableDeviceEmulation();
+        skip(shape.name, `taller than this display's work area (${workArea.height}px), and it would not be emulated`);
+        continue;
+      }
+    } else {
+      window.webContents.disableDeviceEmulation();
+      // A hidden window applies a resize on its own schedule, so the viewport is
+      // polled rather than assumed after a fixed sleep.
+      window.setContentSize(shape.width, shape.height);
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((r) => setTimeout(r, 100));
+        const width = await window.webContents.executeJavaScript('window.innerWidth');
+        if (Math.abs(width - shape.width) <= 4) break;
+        if (attempt === 9) window.setContentSize(shape.width, shape.height);
+      }
     }
 
     const layout = await window.webContents.executeJavaScript(`(() => {
@@ -132,10 +205,18 @@ async function checkLayouts(window) {
         logHeight: Math.round(log.height),
         activityShown: getComputedStyle(activity).display !== 'none',
         columns: getComputedStyle(document.getElementById('workspace')).gridTemplateColumns.split(' ').length,
+        // Sections of the rail drawn shorter than what is in them. The rail is
+        // a flex column that scrolls, and a section that is allowed to shrink
+        // gives up its own height before the rail ever starts to: headings cut
+        // in half, a vault list with its last row sliced off.
+        squashed: [...document.querySelectorAll('#panel-left > .section')]
+          .filter((section) => section.scrollHeight - section.clientHeight > 1)
+          .map((section) => (section.querySelector('summary')?.textContent ?? '?').trim()),
       };
     })()`);
 
     const problems = [];
+    if (layout.squashed.length) problems.push(`rail sections squashed: ${layout.squashed.join(', ')}`);
     if (layout.overflow > 1) problems.push(`h-overflow ${layout.overflow}px`);
     if (layout.chatWidth < 320) problems.push(`chat only ${layout.chatWidth}px`);
     if (layout.logHeight < 200) problems.push(`log only ${layout.logHeight}px`);
@@ -151,11 +232,14 @@ async function checkLayouts(window) {
     }
 
     check(
-      `${shape.name} — ${layout.columns} col, chat ${layout.chatWidth}px, log ${layout.logHeight}px`,
+      `${name} — ${layout.columns} col, chat ${layout.chatWidth}px, log ${layout.logHeight}px`,
       problems.length === 0,
       problems.join('; '),
     );
   }
+
+  // Everything after this measures the real window again.
+  window.webContents.disableDeviceEmulation();
 }
 
 /**
@@ -789,6 +873,10 @@ async function checkPlugins(window) {
   await checkApproval(window);
   await checkChoices(window);
 
+  await checkAutoUpdate(window);
+  await checkRestart(window);
+  await checkUpdateBadge(window);
+
   await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
   await new Promise((r) => setTimeout(r, 1500));
   const asked = await window.webContents.executeJavaScript(`(() => ({
@@ -799,6 +887,213 @@ async function checkPlugins(window) {
   check('and lists nothing rather than something stale', asked.rows === 0, `${asked.rows} row(s)`);
 
   await checkRegistries(window);
+}
+
+/**
+ * Keeping a plugin current, without being asked each time.
+ *
+ * The box is drawn from the list the main process answers with, so the two
+ * halves that can drift are whether it is offered at all — a built-in has no
+ * registry entry that could replace it, and a box promising updates that can
+ * never arrive is worse than none — and whether ticking it actually reaches
+ * config. The second is read back through the API rather than off the DOM: a
+ * row that painted itself optimistically would pass everything else here.
+ */
+async function checkAutoUpdate(window) {
+  say('');
+  say('Plugin auto-update');
+
+  const read = () =>
+    window.webContents.executeJavaScript(`(() => {
+      const box = (id) => {
+        const row = document.querySelector('#plugin-list .plugin-item[data-plugin="' + id + '"]');
+        const control = row?.querySelector('.plugin-auto input[type=checkbox]');
+        return control
+          ? { there: true, checked: control.checked, shown: getComputedStyle(control).display !== 'none' }
+          : { there: false, checked: false, shown: false };
+      };
+      const builtin = [...document.querySelectorAll('#plugin-list .plugin-item')]
+        .find((row) => (row.querySelector('.plugin-meta')?.textContent ?? '').includes('BUILT-IN'));
+      return {
+        installed: box('smoke-code'),
+        theme: box('smoke-theme'),
+        builtin: Boolean(builtin?.querySelector('.plugin-auto')),
+      };
+    })()`);
+
+  const start = await read();
+  check('an installed plugin is offered auto-update', start.installed.there && start.installed.shown, JSON.stringify(start.installed));
+  check('so is a theme pack, which updates the same way', start.theme.there, JSON.stringify(start.theme));
+  // Off unless somebody ticks it: an update is code arriving from outside the
+  // app, and the approval on the row was given for the version that was there.
+  check('and it is off until it is asked for', start.installed.checked === false, JSON.stringify(start.installed));
+  check('a built-in is not offered a box that cannot work', start.builtin === false, String(start.builtin));
+
+  await window.webContents.executeJavaScript(`(() => {
+    const row = document.querySelector('#plugin-list .plugin-item[data-plugin="smoke-code"]');
+    const box = row.querySelector('.plugin-auto input[type=checkbox]');
+    box.checked = true;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor(window, `document.querySelector('#plugin-list .plugin-item[data-plugin="smoke-code"] .plugin-auto input').checked`);
+
+  // From the main process, not from the box that was just clicked.
+  const stored = await window.webContents.executeJavaScript(
+    `window.wasteland.plugins.list().then((list) => list.find((p) => p.id === 'smoke-code'))`,
+  );
+  check('ticking it is recorded where the decision lives', stored.autoUpdate === true, JSON.stringify(stored.autoUpdate));
+  // And it changed nothing else: this is a separate decision from approval and
+  // from the switch, and a control that quietly moves either is the bug.
+  check('and it approves nothing and switches nothing on', stored.approved === true && stored.enabled === true, JSON.stringify(stored));
+
+  const repainted = await read();
+  check('the row comes back showing it', repainted.installed.checked === true, JSON.stringify(repainted.installed));
+
+  await window.webContents.executeJavaScript(`window.wasteland.plugins.setAutoUpdate('smoke-code', false)`);
+  await waitFor(window, `!document.querySelector('#plugin-list .plugin-item[data-plugin="smoke-code"] .plugin-auto input').checked`);
+}
+
+/**
+ * The count of updates waiting, on the GET PLUGINS heading.
+ *
+ * The UPDATE buttons have been on the rows all along; what was missing was any
+ * reason to go and look, because the section is closed and the boot fetch is
+ * silent. So the number is asserted while the section is *shut* — a badge only
+ * visible once the list is open answers a question nobody had by then.
+ *
+ * The other half is that it goes down again. A plugin set to AUTO-UPDATE needs
+ * no attention, so it must not be counted, or the badge becomes a number that
+ * cannot be cleared by doing everything it is asking for.
+ */
+async function checkUpdateBadge(window) {
+  say('');
+  say('Updates waiting');
+
+  const { server, port } = await startRegistry([
+    {
+      id: 'smoke-code',
+      name: 'Smoke code',
+      version: '2.0.0',
+      description: 'A newer build than the one installed.',
+      apiVersion: 4,
+      kind: 'code',
+      url: 'https://example.test/smoke-code-2.0.0.zip',
+      sha256: 'b'.repeat(64),
+      size: 1024,
+    },
+  ]);
+
+  const read = () =>
+    window.webContents.executeJavaScript(`(() => {
+      const badge = document.getElementById('store-badge');
+      return {
+        there: Boolean(badge),
+        text: badge ? badge.textContent : '',
+        display: badge ? getComputedStyle(badge).display : 'missing',
+        title: badge ? badge.title : '',
+        sectionOpen: document.getElementById('section-store').open,
+      };
+    })()`);
+
+  try {
+    const quiet = await read();
+    check('the badge exists', quiet.there, 'no #store-badge');
+    // Nothing published is newer than what is installed, so there is nothing to
+    // say. A badge that is always there is a number nobody reads.
+    check(`nothing waiting means no number — ${quiet.display}`, quiet.display === 'none', JSON.stringify(quiet));
+
+    await window.webContents.executeJavaScript(
+      `window.wasteland.plugins.addRegistry('http://127.0.0.1:${port}/index.json')`,
+    );
+    await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
+    await waitFor(window, `document.getElementById('store-badge').textContent === '1'`);
+
+    const waiting = await read();
+    check(`one update published shows a 1 — "${waiting.text}"`, waiting.text === '1', JSON.stringify(waiting));
+    // The point of putting it on the heading: it has to be readable without
+    // opening the section, because the section being shut is the problem.
+    check('and it is readable with the section shut', waiting.display !== 'none' && waiting.sectionOpen === false, JSON.stringify(waiting));
+    check(`a bare number says what of — "${waiting.title}"`, /Smoke code/.test(waiting.title), waiting.title);
+
+    // Set to look after itself, so it is no longer asking for anything.
+    await window.webContents.executeJavaScript(`window.wasteland.plugins.setAutoUpdate('smoke-code', true)`);
+    await waitFor(window, `document.getElementById('store-badge').hidden`);
+    const handled = await read();
+    check(`a plugin that updates itself is not counted — ${handled.display}`, handled.display === 'none', JSON.stringify(handled));
+
+    await window.webContents.executeJavaScript(`window.wasteland.plugins.setAutoUpdate('smoke-code', false)`);
+    await waitFor(window, `!document.getElementById('store-badge').hidden`);
+    const back = await read();
+    check(`unticking it puts the number back — "${back.text}"`, back.text === '1', JSON.stringify(back));
+
+    await window.webContents.executeJavaScript(
+      `window.wasteland.plugins.removeRegistry('http://127.0.0.1:${port}/index.json')`,
+    );
+    await window.webContents.executeJavaScript(`document.getElementById('btn-store-refresh').click()`);
+    await waitFor(window, `document.getElementById('store-badge').hidden`);
+    const gone = await read();
+    check(`and it clears when nothing publishes one — ${gone.display}`, gone.display === 'none', JSON.stringify(gone));
+  } finally {
+    server.close();
+  }
+}
+
+/**
+ * The one control that finishes a plugin update.
+ *
+ * Node caches modules by URL for the life of the process, so an updated plugin
+ * goes on running the code it was first imported with — and the row saying so
+ * was not enough, because the row lives in a collapsed section inside a panel a
+ * narrow window closes entirely. The button is asserted on its *computed*
+ * display rather than on `hidden`: `.topbar .restart` gives it a `display`, and
+ * any author-level `display` outranks the UA rule behind the attribute, which
+ * is exactly how the drop veil shipped visible.
+ *
+ * Driven over the real event channel, because `stale` is a fact only a process
+ * that has imported a plugin twice can produce.
+ */
+async function checkRestart(window) {
+  say('');
+  say('Restart');
+
+  const read = () =>
+    window.webContents.executeJavaScript(`(() => {
+      const button = document.getElementById('btn-restart');
+      const rowButtons = [...document.querySelectorAll('#plugin-list .plugin-item[data-plugin="smoke-code"] .plugin-buttons button')];
+      return {
+        there: Boolean(button),
+        display: button ? getComputedStyle(button).display : 'missing',
+        title: button ? button.title : '',
+        onRow: rowButtons.some((node) => node.textContent.includes('RESTART')),
+      };
+    })()`);
+
+  const quiet = await read();
+  check('the restart button exists', quiet.there, 'no #btn-restart');
+  // Nothing is stale, so nothing is offered. A permanently visible RESTART is a
+  // control that means nothing by the second time it is read.
+  check(`nothing to finish means nothing on screen — ${quiet.display}`, quiet.display === 'none', quiet.display);
+  check('and no restart button on the row either', quiet.onRow === false, String(quiet.onRow));
+
+  const list = await window.webContents.executeJavaScript(`window.wasteland.plugins.list()`);
+  const stale = list.map((plugin) => (plugin.id === 'smoke-code' ? { ...plugin, stale: true } : plugin));
+  window.webContents.send('event', { event: 'plugins:changed', plugins: stale, themes: [], locales: [] });
+  await waitFor(window, `getComputedStyle(document.getElementById('btn-restart')).display !== 'none'`);
+
+  const showing = await read();
+  check(`a plugin newer on disk puts RESTART in the topbar — ${showing.display}`, showing.display !== 'none', showing.display);
+  // Named, or "restart to finish an update" is a request the user cannot check.
+  check(`and the button says what it is for — "${showing.title}"`, /Smoke code/.test(showing.title), showing.title);
+  check('the row that explains it carries one too', showing.onRow === true, String(showing.onRow));
+
+  // Put the real list back: a synthetic one left in place would make every
+  // later check read a plugin state the main process does not have. Done
+  // through a real call, because what repaints from the truth is the `changed`
+  // event the host emits on its way out of one.
+  await window.webContents.executeJavaScript(`window.wasteland.plugins.setAutoUpdate('smoke-code', false)`);
+  await waitFor(window, `getComputedStyle(document.getElementById('btn-restart')).display === 'none'`);
+  const restored = await read();
+  check(`and it goes away again — ${restored.display}`, restored.display === 'none', restored.display);
 }
 
 /**
@@ -868,7 +1163,7 @@ async function checkStoreApproval(window) {
       // The two halves of the failure that was reported: the row claimed to be
       // installed and said nothing about needing permission, and there was no
       // control here to give it.
-      check(`an installed plugin that is not running says so — "${row.note}"`, /needs your permission/.test(row.note), row.note);
+      check(`an installed plugin that is not running says so — "${row.note}"`, /not running.*app-level file access/.test(row.note), row.note);
       check('and the control that starts it is on that row', row.buttons.some((text) => text.includes('ALLOW AND RUN')), JSON.stringify(row.buttons));
     }
 
@@ -902,6 +1197,54 @@ async function checkRegistries(window) {
       })),
       status: document.getElementById('store-status').textContent,
     }))()`);
+
+  /**
+   * Folded away until it is asked for.
+   *
+   * Nine times out of ten this is a list of the app's own indexes, and it grows
+   * a row with every plugin that ships — left open it pushed the thing the
+   * section is actually for, the plugins, off the bottom of the panel. Asserted
+   * on whether the rows have a box rather than on the attribute: a `<details>`
+   * marked closed whose contents are still drawn is the same class of failure
+   * as `hidden` losing to an author `display`.
+   */
+  const folded = await window.webContents.executeJavaScript(`(() => {
+    const section = document.getElementById('section-registries');
+    return {
+      there: Boolean(section),
+      tag: section ? section.tagName : '',
+      open: section ? section.open : true,
+      summary: section?.querySelector('summary')?.textContent?.trim() ?? '',
+      // Measured, not read off the attribute. A details element marked closed
+      // whose contents are still laid out is the same class of failure as the
+      // hidden attribute losing to an author-level display, and only the height
+      // can tell them apart: a closed one is its summary and nothing else.
+      // (No backticks in here — this whole string is a template literal, and a
+      // backtick inside one ends it. That has taken the entire run down before.)
+      height: section ? section.getBoundingClientRect().height : 0,
+      summaryHeight: section?.querySelector('summary')?.getBoundingClientRect().height ?? 0,
+    };
+  })()`);
+  check('the registries fold away into a section of their own', folded.there && folded.tag === 'DETAILS', JSON.stringify(folded));
+  check(`and it says what is inside it — "${folded.summary}"`, /REGISTRIES/i.test(folded.summary), folded.summary);
+  check('closed to begin with, so the plugins are what the section shows', folded.open === false, String(folded.open));
+  check(
+    `and closed means it takes only its heading — ${Math.round(folded.height)}px`,
+    folded.summaryHeight > 0 && folded.height <= folded.summaryHeight + 2,
+    JSON.stringify({ height: folded.height, summary: folded.summaryHeight }),
+  );
+
+  const opened = await window.webContents.executeJavaScript(`(() => {
+    document.getElementById('section-registries').open = true;
+    const section = document.getElementById('section-registries');
+    const row = document.querySelector('#registry-list .registry-item');
+    return { height: section.getBoundingClientRect().height, row: row ? row.getBoundingClientRect().height : 0 };
+  })()`);
+  check(
+    `opening it brings the rows back — ${Math.round(opened.height)}px`,
+    opened.height > folded.height + 10 && opened.row > 0,
+    JSON.stringify(opened),
+  );
 
   const start = await read();
   check(`the registry being asked is on screen — ${start.rows.length}`, start.rows.length === 1, JSON.stringify(start.rows));
@@ -1189,7 +1532,7 @@ async function checkApproval(window) {
   check('it is not running before it is allowed', before.checked === false && before.off === true, JSON.stringify(before));
   // The checkbox cannot start it, so it must not look as though it could.
   check('and its checkbox does not pretend to be the control', before.boxDisabled === true, JSON.stringify(before));
-  check(`the row says what allowing it means — "${before.note}"`, /runs code from outside the app/.test(before.note), before.note);
+  check(`the row says what allowing it means — "${before.note}"`, /not loaded yet.*app-level file access/.test(before.note), before.note);
   check('there is a control that can actually start it', before.allow === true, JSON.stringify(before));
 
   await window.webContents.executeJavaScript(`(() => {
@@ -2161,6 +2504,71 @@ async function checkChooser(window) {
 
   scene.clear();
   await new Promise((r) => setTimeout(r, 200));
+
+  await checkTwoPanels(window, chatId);
+}
+
+/**
+ * Two plugins, each with a panel, and one window that has to pick.
+ *
+ * The report: a playlist conversation, a search in the browser, and a Space
+ * Trader panel where the page should have been. Browser control and the game
+ * both draw here, and the service held one document for the two of them.
+ * `scene.test.mjs` proves each plugin now has a panel of its own and that a
+ * press is routed to its owner; what it cannot see is whether the window draws
+ * the right one — the main process sends every panel and the pick is made here,
+ * from the one fact only the window has, which conversation is open.
+ */
+async function checkTwoPanels(window, chatId) {
+  const answered = [];
+  // As the host hands it to a plugin: its id already filled in.
+  const page = scene.forPlugin('smoke-browser');
+  const game = scene.forPlugin('smoke-game');
+  page.present({ pluginName: 'Smoke browser', act: (id) => { answered.push('browser:' + id); return { status: 'pressed a card' }; } });
+  game.present({ pluginName: 'Smoke game', act: (id) => { answered.push('game:' + id); return { status: 'made a move' }; } });
+
+  const WORLD = { title: 'Somewhere else', actions: [{ id: 'market', label: 'Market' }] };
+  // The game is being played in another conversation entirely…
+  scene.setTurn('a-conversation-that-is-not-open');
+  game.show(WORLD);
+  // …the browser is driven in this one…
+  scene.setTurn(chatId);
+  page.show({ title: 'A page', actions: [{ id: 'card-1', label: 'A result' }] });
+  scene.setTurn('');
+  // …and then the game repaints outside any turn. This is the step that put it
+  // on screen: with one shared panel it inherited the conversation the browser
+  // had just claimed, and it was also the last thing drawn.
+  game.show(WORLD);
+
+  await waitFor(window, `document.getElementById('scene-title').textContent === 'A page'`);
+  const shown = await window.webContents.executeJavaScript(`(() => ({
+    panel: getComputedStyle(document.getElementById('scene')).display,
+    title: document.getElementById('scene-title').textContent,
+    moves: [...document.querySelectorAll('#scene-actions .scene-action-label')].map((node) => node.textContent),
+  }))()`);
+  check(`the panel drawn is the one that acted in this conversation — ${shown.title}`,
+    shown.panel !== 'none' && shown.title === 'A page', JSON.stringify(shown));
+  check(`with its own moves and nobody else's — ${shown.moves.join(', ')}`,
+    shown.moves.length === 1 && shown.moves[0] === 'A result', JSON.stringify(shown));
+
+  await window.webContents.executeJavaScript(`document.querySelector('#scene-actions .scene-action')?.click()`);
+  await waitFor(window, `document.getElementById('status-line').textContent === 'pressed a card'`);
+  check(`a press goes to the plugin whose panel it was on — ${answered.join(', ') || 'nobody'}`,
+    answered.length === 1 && answered[0] === 'browser:card-1', JSON.stringify(answered));
+
+  // The browser going away leaves this conversation with no panel at all: the
+  // game's is still claimed by the other one, and must not slide in to fill it.
+  scene.releasePlugin('smoke-browser');
+  await waitFor(window, `getComputedStyle(document.getElementById('scene')).display === 'none'`);
+  const after = await window.webContents.executeJavaScript(`(() => ({
+    panel: getComputedStyle(document.getElementById('scene')).display,
+    moves: getComputedStyle(document.getElementById('scene-actions')).display,
+  }))()`);
+  check(`and a panel belonging to another conversation does not fill the gap — panel: ${after.panel}`,
+    after.panel === 'none' && after.moves === 'none', JSON.stringify(after));
+
+  scene.releasePlugin('smoke-game');
+  await new Promise((r) => setTimeout(r, 200));
 }
 
 async function checkThemes(window) {
@@ -2510,7 +2918,11 @@ app.whenReady().then(async () => {
       bridge: typeof window.wasteland === 'object',
       results: document.querySelectorAll('#search-results .repo-item').length,
       vault: document.getElementById('vault-list').textContent.trim().length,
-      sections: document.querySelectorAll('.section').length,
+      // Direct children of the rail only. A section can hold sections of its
+      // own now — GET PLUGINS folds its list of registries away into one — and
+      // counting every section on the page turns "is the rail complete" into a
+      // number that moves whenever anything inside a section is rearranged.
+      sections: document.querySelectorAll('#panel-left > .section').length,
       status: document.getElementById('status-line').textContent,
       statusShown: getComputedStyle(document.getElementById('status-line')).display,
       browserChip: Boolean(document.getElementById('stat-browser')),

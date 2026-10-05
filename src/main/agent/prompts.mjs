@@ -19,7 +19,11 @@ Rules:
   code, lists for lists, links, occasional emphasis. Do not decorate a one-line
   answer with headings. Never deliberate about formatting — just write.
 - Be concise. Say the answer, not a preamble about how you will say it.
-- Reply in the language the user wrote in.
+- Reply in the language of the message you are answering — not the language of
+  the conversation so far, and not a language named anywhere else in this
+  prompt. A question typed in English is answered in English even when every
+  turn before it was in another language, and even when a plugin's own
+  instructions say to write in one. Only the user asking changes this.
 - You run locally. Say so plainly if asked; do not claim capabilities you lack.`;
 
 /**

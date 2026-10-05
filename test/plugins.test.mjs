@@ -14,7 +14,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setDataRoot } from '../src/main/paths.mjs';
@@ -129,6 +129,85 @@ test('a panel heading is cut to something a narrow column can hold', () => {
   assert.equal(long.manifest.panel.length, 24);
   // Newlines would otherwise push the whole panel down the page.
   assert.equal(parseManifest({ ...GOOD, settings, panel: 'TWO\nWORDS' }).manifest.panel, 'TWO WORDS');
+});
+
+/* ============================ buttons in the panel ============================ */
+
+/**
+ * A control that does something, drawn where the settings are.
+ *
+ * Every other setting type is a question whose answer the app stores. A game
+ * needs NEW GAME and LOAD GAME beside its language — things that happen when
+ * they are pressed — and the plugin's row and its panel section are built from
+ * the settings list, so there was nowhere else to put them.
+ */
+test('a button is a setting that stores nothing', () => {
+  const settings = [{ key: 'newGame', type: 'button', label: 'NEW GAME', hint: 'a fresh commander' }];
+  const parsed = parseManifest({ ...GOOD, settings, panel: 'GAME' });
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.manifest.settings[0].type, 'button');
+  assert.equal(parsed.manifest.settings[0].hint, 'a fresh commander');
+  // A button counts as something to put in a panel section: it is a control.
+  assert.equal(parsed.manifest.panel, 'GAME');
+});
+
+test('a hint is cut to a tooltip, and absent by default', () => {
+  const long = parseManifest({ ...GOOD, settings: [{ key: 'k', type: 'button', label: 'GO', hint: 'x'.repeat(400) }] });
+  assert.equal(long.manifest.settings[0].hint.length, 200);
+  const none = parseManifest({ ...GOOD, settings: [{ key: 'k', type: 'text', label: 'K' }] });
+  assert.equal(none.manifest.settings[0].hint, '');
+});
+
+test('nothing can be stored against a button', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-button-'));
+  install(root, 'game', {
+    manifest: { settings: [{ key: 'newGame', type: 'button', label: 'NEW GAME' }], panel: 'GAME' },
+    source: 'export function activate() {}',
+  });
+  const host = await installedHost(root, { game: { enabled: true, approved: true } });
+
+  // A value written against a button would come back out of store.get() as
+  // though somebody had chosen it, and the plugin has no code for that.
+  await assert.rejects(() => host.setSetting('game', 'newGame', 'yes'), /button/);
+});
+
+test('a button press reaches the plugin, and answers as a move does', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-press-'));
+  install(root, 'game', {
+    manifest: { settings: [{ key: 'load', type: 'button', label: 'LOAD GAME' }], panel: 'GAME' },
+    source: `export function activate(ctx) { ctx.onButton((key) => ({ status: "pressed " + key, sheet: true })); }`,
+  });
+  const host = await installedHost(root, { game: { enabled: true, approved: true } });
+
+  const answer = await host.pressButton('game', 'load');
+  assert.equal(answer.status, 'pressed load');
+  assert.equal(answer.sheet, true);
+});
+
+test('a button nobody declared, and a button nobody answers', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-press-bad-'));
+  install(root, 'game', {
+    manifest: { settings: [{ key: 'load', type: 'button', label: 'LOAD' }, { key: 'lang', type: 'text', label: 'Language' }] },
+    source: 'export function activate() {}',
+  });
+  const host = await installedHost(root, { game: { enabled: true, approved: true } });
+
+  await assert.rejects(() => host.pressButton('game', 'nope'), /no button/);
+  // A text field is not a button, however it is pressed.
+  await assert.rejects(() => host.pressButton('game', 'lang'), /no button/);
+  // Declared and unanswered is the failure worth a sentence: a control drawn on
+  // somebody's panel that silently does nothing looks like a broken app.
+  await assert.rejects(() => host.pressButton('game', 'load'), /answers nothing/);
+});
+
+test('a switched-off plugin has no working buttons', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-press-off-'));
+  install(root, 'game', {
+    manifest: { settings: [{ key: 'load', type: 'button', label: 'LOAD' }] },
+    source: 'export function activate(ctx) { ctx.onButton(() => ({})); }',
+  });
+  const host = await installedHost(root, { game: { enabled: false, approved: true } });
+  await assert.rejects(() => host.pressButton('game', 'load'), /switched off/);
 });
 
 test('a section with nothing to put in it is refused, not drawn empty', () => {
@@ -518,6 +597,82 @@ test('switching an installed plugin on from the list is the consent', async () =
   assert.ok(host.action('ping'));
 });
 
+/* ============================ auto-update ============================ */
+
+test('auto-update is off until it is asked for, and is stored beside approval', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-autoupdate-'));
+  install(root, 'keeper', {
+    manifest: { actions: ['ping'] },
+    source: `export function activate(ctx) { ctx.action({ type: 'ping', run: async () => ({ ok: true }) }); }`,
+  });
+
+  const host = await installedHost(root, { keeper: { enabled: true, approved: true } });
+  // Nobody has ticked it, so nothing may replace this plugin behind the user's
+  // back. An installed plugin defaulting to auto-update would make the approval
+  // on its row a decision about one version and a blank cheque for every later
+  // one.
+  assert.equal(host.list().find((plugin) => plugin.id === 'keeper').autoUpdate, false);
+
+  await host.setAutoUpdate('keeper', true);
+  assert.equal(host.list().find((plugin) => plugin.id === 'keeper').autoUpdate, true);
+  assert.equal(config.get('plugins').keeper.autoUpdate, true);
+  // The two decisions are separate and neither may move the other: switching
+  // updates on must not approve anything, and it must not switch anything on.
+  assert.equal(config.get('plugins').keeper.approved, true);
+  assert.equal(config.get('plugins').keeper.enabled, true);
+
+  await host.setAutoUpdate('keeper', false);
+  assert.equal(config.get('plugins').keeper.autoUpdate, false);
+});
+
+test('auto-update does not approve, and does not survive as approval', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-autoupdate-wary-'));
+  install(root, 'wary', {
+    manifest: { actions: ['ping'] },
+    source: `export function activate(ctx) { ctx.action({ type: 'ping', run: async () => ({ ok: true }) }); }`,
+  });
+
+  const host = await installedHost(root, { wary: { enabled: true, approved: false } });
+  await host.setAutoUpdate('wary', true);
+
+  // Newer bytes on disk are not permission to run them. A plugin waiting for
+  // approval that auto-updates is still waiting for approval.
+  assert.equal(config.get('plugins').wary.approved, false);
+  assert.equal(host.list().find((plugin) => plugin.id === 'wary').active, false);
+  assert.equal(host.action('ping'), null);
+});
+
+test('a built-in is refused rather than given a box that cannot work', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-autoupdate-builtin-'));
+  const host = await installedHost(root);
+
+  const builtin = host.list().find((plugin) => plugin.builtin);
+  assert.ok(builtin, 'the built-ins are what this is about');
+  // There is no registry entry that could replace a built-in — it is part of
+  // the build and arrives with the app's own update — so a ticked box would
+  // promise something that can never happen.
+  assert.equal(builtin.autoUpdate, false);
+  await assert.rejects(() => host.setAutoUpdate(builtin.id, true), /ships with the app/);
+  await assert.rejects(() => host.setAutoUpdate('nothing-called-this', true), /no plugin called/);
+});
+
+test('rediscovery keeps the auto-update choice, like every other decision', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-autoupdate-reload-'));
+  install(root, 'remembered', {
+    manifest: { actions: ['ping'] },
+    source: `export function activate(ctx) { ctx.action({ type: 'ping', run: async () => ({ ok: true }) }); }`,
+  });
+
+  const host = await installedHost(root, { remembered: { enabled: true, approved: true } });
+  await host.setAutoUpdate('remembered', true);
+
+  // `mergeEnablement` spreads the stored record rather than rebuilding it, and
+  // this is the field that would be quietly dropped if it ever stopped doing
+  // so — with the symptom being a box that unticks itself every launch.
+  await host.refresh();
+  assert.equal(host.list().find((plugin) => plugin.id === 'remembered').autoUpdate, true);
+});
+
 test('a plugin that throws on activation is contained and explains itself', async () => {
   const root = mkdtempSync(join(tmpdir(), 'wl-throwing-'));
   install(root, 'thrower', { source: `export function activate() { throw new Error('no'); }` });
@@ -536,6 +691,61 @@ test('a plugin that throws on activation is contained and explains itself', asyn
   assert.match(broken.error, /no/);
   // The whole point of containing it.
   assert.ok(host.action('fine'), 'one bad plugin must not take the others down');
+});
+
+test('a failed activation releases its timer and claimed services', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-failed-start-'));
+  globalThis.__failedStart = { started: 0, stopped: 0 };
+  install(root, 'failed-start', {
+    manifest: { services: ['audio'] },
+    source: `export function activate() {
+      globalThis.__failedStart.started++;
+      throw new Error('start failed');
+    }
+    export function deactivate() { globalThis.__failedStart.stopped++; }`,
+  });
+  const released = [];
+  config.update({ plugins: {
+    'read-file': { enabled: false, approved: true },
+    'system-shell': { enabled: false, approved: true },
+    'failed-start': { enabled: true, approved: true },
+  } });
+  const host = new PluginHost({ userDir: root, services: { audio: { releasePlugin: (id) => released.push(id) } } });
+  await host.load();
+
+  assert.deepEqual(globalThis.__failedStart, { started: 1, stopped: 1 });
+  assert.deepEqual(released, ['failed-start']);
+  assert.equal(host.dirFor('failed-start'), null, 'a failed module must not expose its files');
+});
+
+test('a plugin only exposes assets after it is switched on and starts', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-asset-start-'));
+  const dir = install(root, 'assets', { source: 'export function activate() {}' });
+  const host = await installedHost(root, { assets: { enabled: false, approved: false } });
+  assert.equal(host.dirFor('assets'), null);
+  await host.setEnabled('assets', true);
+  assert.equal(host.dirFor('assets'), dir);
+  await host.setEnabled('assets', false);
+  assert.equal(host.dirFor('assets'), null);
+});
+
+test('a turn waiting on ready sees the module started by a toggle', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-start-gate-'));
+  install(root, 'slow-start', {
+    manifest: { actions: ['ping'] },
+    source: `export async function activate(ctx) {
+      await globalThis.__startGate;
+      ctx.action({ type: 'ping', run: async () => ({ ok: true }) });
+    }`,
+  });
+  const host = await installedHost(root, { 'slow-start': { enabled: false, approved: false } });
+  globalThis.__startGate = new Promise((resolve) => { globalThis.__releaseStart = resolve; });
+  const switching = host.setEnabled('slow-start', true);
+  const visibleAfterReady = host.ready.then(() => host.action('ping'));
+  await Promise.resolve();
+  globalThis.__releaseStart();
+  assert.ok(await visibleAfterReady, 'ready resolved before the newly enabled module activated');
+  await switching;
 });
 
 test('a plugin registering half of itself before throwing registers none of it', async () => {
@@ -610,6 +820,275 @@ test('switching a plugin off and on again is not an update', async () => {
   const second = await host.action('count').run('', { status() {}, log() {} });
   assert.equal(second.summary, first.summary, 'an unchanged plugin was imported twice');
   assert.equal(host.list().find((plugin) => plugin.id === 'counted').stale, false);
+});
+
+test('rediscovery stops what was running before it starts it again', async () => {
+  // `refresh` runs after every install, update and removal. It rebuilt the
+  // entry list from disk first, so the entries that knew a plugin was running
+  // were gone before anything could be told to stop: every active plugin had
+  // `activate` called a second time with no `deactivate` between, and nothing
+  // it held through a service was ever released.
+  const root = mkdtempSync(join(tmpdir(), 'wl-rediscover-'));
+  install(root, 'lamp', {
+    manifest: { actions: ['shine'], services: ['audio'] },
+    source: `const seen = (globalThis.__lamp ??= { on: 0, off: 0 });
+    export function activate(ctx) {
+      seen.on += 1;
+      ctx.service('audio');
+      ctx.action({ type: 'shine', run: async () => ({ ok: true }) });
+    }
+    export function deactivate() {
+      seen.off += 1;
+    }`,
+  });
+
+  const plugins = {};
+  for (const id of ALL_BUILTINS) plugins[id] = { enabled: false, approved: true };
+  config.update({ plugins: { ...plugins, lamp: { enabled: true, approved: true } } });
+
+  const released = [];
+  const host = new PluginHost({ userDir: root, services: { audio: { releasePlugin: (id) => released.push(id) } } });
+  await host.load();
+  assert.deepEqual(globalThis.__lamp, { on: 1, off: 0 });
+
+  await host.refresh();
+  assert.deepEqual(globalThis.__lamp, { on: 2, off: 1 }, 'started twice without being stopped in between');
+  assert.deepEqual(released, ['lamp'], 'and what it held through a service was never let go');
+  assert.ok(host.action('shine'), 'it is still running afterwards');
+});
+
+test('a plugin removed from disk is stopped, not merely forgotten', async () => {
+  // The uninstall path deletes the directory and rediscovers. The plugin is no
+  // longer among the entries by then, so nothing — not rediscovery, and not
+  // `shutdown` on the way out of the app — ever reached its `deactivate`: a
+  // reminder ticker went on firing for a plugin that was gone, and a browser
+  // it had opened outlived the app.
+  const root = mkdtempSync(join(tmpdir(), 'wl-removed-'));
+  const dir = install(root, 'ghost', {
+    manifest: { actions: ['haunt'], services: ['audio'] },
+    source: `const seen = (globalThis.__ghost ??= { on: 0, off: 0 });
+    export function activate(ctx) {
+      seen.on += 1;
+      ctx.action({ type: 'haunt', run: async () => ({ ok: true }) });
+    }
+    export function deactivate() {
+      seen.off += 1;
+    }`,
+  });
+
+  const plugins = {};
+  for (const id of ALL_BUILTINS) plugins[id] = { enabled: false, approved: true };
+  config.update({ plugins: { ...plugins, ghost: { enabled: true, approved: true } } });
+
+  const released = [];
+  const host = new PluginHost({ userDir: root, services: { audio: { releasePlugin: (id) => released.push(id) } } });
+  await host.load();
+  assert.ok(host.action('haunt'));
+
+  rmSync(dir, { recursive: true, force: true });
+  await host.refresh();
+
+  assert.equal(host.list().some((plugin) => plugin.id === 'ghost'), false);
+  assert.equal(host.action('haunt'), null);
+  assert.deepEqual(globalThis.__ghost, { on: 1, off: 1 }, 'an uninstalled plugin was left running');
+  assert.deepEqual(released, ['ghost']);
+});
+
+test('a plugin is stopped before it is removed, and what it saves on the way out goes too', async () => {
+  // Removal used to delete the directory and the plugin's document first and
+  // rediscover afterwards. Stopping it only then would run `deactivate` against
+  // files that were already gone — and a plugin that saves its state on the way
+  // out, which is the ordinary thing to do there, would write its document back
+  // a moment after the uninstall had deleted it.
+  const { pluginStateDir } = await import('../src/main/paths.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'wl-uninstall-'));
+  const dir = install(root, 'saver', {
+    manifest: { actions: ['save'] },
+    source: `import { existsSync } from 'node:fs';
+    let kept = null;
+    export function activate(ctx) {
+      kept = ctx;
+      ctx.action({ type: 'save', run: async () => ({ ok: true }) });
+    }
+    export function deactivate() {
+      globalThis.__saver = { hadFiles: existsSync(new URL('./plugin.json', import.meta.url)) };
+      kept.state.set({ savedOnExit: true });
+    }`,
+  });
+  const host = await installedHost(root, { saver: { enabled: true, approved: true } });
+  assert.ok(host.action('save'));
+
+  const list = await host.uninstall('saver', async () => rmSync(dir, { recursive: true, force: true }));
+
+  assert.equal(globalThis.__saver?.hadFiles, true, 'it was stopped after its files had been deleted, or not at all');
+  assert.equal(existsSync(join(pluginStateDir(), 'saver.json')), false, 'its document came back after the uninstall');
+  assert.equal(list.some((plugin) => plugin.id === 'saver'), false);
+  assert.equal(host.action('save'), null);
+});
+
+test('a removal that fails leaves the plugin running rather than half stopped', async () => {
+  // On Windows a directory with an open handle in it will not delete. The
+  // plugin is still installed then, so it has to still be the plugin it was.
+  const root = mkdtempSync(join(tmpdir(), 'wl-uninstall-fails-'));
+  install(root, 'stayer', {
+    manifest: { actions: ['stay'] },
+    source: `export function activate(ctx) {
+      ctx.action({ type: 'stay', run: async () => ({ ok: true }) });
+    }`,
+  });
+  const host = await installedHost(root, { stayer: { enabled: true, approved: true } });
+
+  await assert.rejects(
+    host.uninstall('stayer', async () => {
+      throw new Error('EBUSY: resource busy or locked');
+    }),
+    /EBUSY/,
+  );
+
+  const row = host.list().find((plugin) => plugin.id === 'stayer');
+  assert.equal(row?.active, true, 'still on disk, so still running');
+  assert.ok(host.action('stay'));
+});
+
+test('two changes at once do not activate a plugin on top of itself', async () => {
+  // Activation awaits — an import, a plugin's own async `activate` — and two
+  // rebuilds interleaving there each cleared the maps the other was filling.
+  // The second one then found its own plugin's action already claimed and
+  // reported "already provided by slow" against a plugin that was running.
+  const root = mkdtempSync(join(tmpdir(), 'wl-racing-'));
+  for (const id of ['slow', 'other']) {
+    install(root, id, {
+      manifest: { actions: [`${id}_act`] },
+      source: `export async function activate(ctx) {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        ctx.action({ type: '${id}_act', run: async () => ({ ok: true }) });
+      }`,
+    });
+  }
+
+  const host = await installedHost(root, {
+    slow: { enabled: true, approved: true },
+    other: { enabled: false, approved: true },
+  });
+
+  await Promise.all([host.setEnabled('other', true), host.refresh()]);
+
+  for (const id of ['slow', 'other']) {
+    const row = host.list().find((plugin) => plugin.id === id);
+    assert.equal(row.error, '', `${id}: ${row.error}`);
+    assert.equal(row.active, true);
+    assert.equal(host.action(`${id}_act`)?.pluginId, id);
+  }
+});
+
+test('two plugins that draw a panel stay out of each other’s conversation', async () => {
+  // The report, as it happened: a playlist conversation, "find me a fridge in
+  // the browser", and a Space Trader panel where the page should have been —
+  // with a row of moves that answered "that move is no longer on the row".
+  //
+  // Browser control and the game both declare `scene`. The service held one
+  // document and one presenter, the last to register: the game, since the
+  // browser asks to be first in the prompt. So the browser's page was drawn
+  // under the game's name, its cards were answered by the game, and the game —
+  // repainting itself to answer a card it had never offered — inherited the
+  // conversation the browser had just claimed.
+  const { Scene } = await import('../src/main/scene.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'wl-two-panels-'));
+  globalThis.__pressed = [];
+
+  install(root, 'pager', {
+    manifest: { actions: ['browse'], services: ['scene'], order: 10 },
+    source: `export function activate(ctx) {
+      const scene = ctx.service('scene');
+      ctx.action({
+        type: 'browse',
+        run: async () => {
+          scene.show({ title: 'Samsung', actions: [{ id: 'card-1', label: 'Side-by-Side' }] });
+          return { ok: true };
+        },
+      });
+      scene.present({
+        pluginId: ctx.id,
+        pluginName: 'Browser',
+        act: async (id) => {
+          globalThis.__pressed.push('pager:' + id);
+          return { status: 'Pressed.' };
+        },
+      });
+    }`,
+  });
+  install(root, 'trader', {
+    manifest: { actions: ['trade'], services: ['scene'], order: 70 },
+    source: `const HOME = { title: 'Thalassa', actions: [{ id: 'market', label: 'MARKET' }] };
+    export function activate(ctx) {
+      const scene = ctx.service('scene');
+      ctx.action({
+        type: 'trade',
+        run: async () => {
+          scene.show(HOME);
+          return { ok: true };
+        },
+      });
+      scene.present({
+        pluginId: ctx.id,
+        pluginName: 'Space Trader',
+        act: async (id) => {
+          globalThis.__pressed.push('trader:' + id);
+          // What the real one does with an id it never offered.
+          scene.show(HOME);
+          return { status: 'That move is no longer on the row.' };
+        },
+      });
+    }`,
+  });
+
+  const plugins = {};
+  for (const id of ALL_BUILTINS) plugins[id] = { enabled: false, approved: true };
+  config.update({
+    plugins: { ...plugins, pager: { enabled: true, approved: true }, trader: { enabled: true, approved: true } },
+  });
+
+  const scene = new Scene();
+  const host = new PluginHost({ userDir: root, services: { scene } });
+  await host.load();
+  const turn = { status() {}, log() {} };
+
+  /** One turn in which one plugin acts, as `agent.mjs` and `ipc.mjs` run it. */
+  const act = async (chatId, type) => {
+    scene.setTurn(chatId);
+    const handler = host.action(type);
+    await handler.run('', turn);
+    scene.claimTurn(handler.pluginId);
+    scene.setTurn('');
+  };
+  /** What the window would draw in a conversation: the newest panel claimed by it. */
+  const drawnIn = (chatId) => {
+    const status = scene.status();
+    return (status.panels ?? [status]).filter((panel) => panel.scene && panel.chatId === chatId).at(-1) ?? null;
+  };
+
+  // Yesterday's game, in the conversation it is played in.
+  await act('chat-game', 'trade');
+  // Today, somewhere else entirely.
+  await act('chat-playlist', 'browse');
+
+  const here = drawnIn('chat-playlist');
+  assert.equal(here?.pluginId, 'pager', 'the page was drawn under another plugin’s name');
+  assert.equal(here.scene.title, 'Samsung');
+
+  // A card on the page is the browser's to answer.
+  await scene.act('card-1', '', here.pluginId);
+  assert.deepEqual(globalThis.__pressed, ['pager:card-1']);
+  assert.equal(drawnIn('chat-playlist').scene.title, 'Samsung', 'pressing a card put the game on screen');
+
+  // And the game is still where it was being played.
+  const there = drawnIn('chat-game');
+  assert.equal(there?.pluginId, 'trader');
+  assert.equal(there.scene.title, 'Thalassa');
+
+  // Switching the browser off takes its panel and leaves the game its own.
+  await host.setEnabled('pager', false);
+  assert.equal(drawnIn('chat-playlist'), null);
 });
 
 test('a plugin cannot claim an action type a built-in already provides', async () => {
@@ -773,99 +1252,12 @@ test('a setting the manifest never declared is refused', async () => {
   await assert.rejects(() => host.setSetting('plain', 'anything', 'x'), /no setting called/);
 });
 
-/* ============================ the audio service ============================ */
-
-const { AudioOut } = await import('../src/main/audio.mjs');
-
-test('the bar shows nothing until a plugin loads something', () => {
-  const out = new AudioOut();
-  assert.equal(out.status().source, null);
-  assert.deepEqual(out.status().buttons, []);
-});
-
-test('a loaded track is described in the plugin′s own words', () => {
-  const out = new AudioOut();
-  const status = out.load({ path: 'C:\\Music\\a.mp3', label: 'Pink Moon', sublabel: '3 of 47' });
-  assert.equal(status.source.label, 'Pink Moon');
-  assert.equal(status.source.sublabel, '3 of 47');
-  assert.match(status.source.src, /^wasteland-media:\/\/track\//);
-  assert.equal(status.playing, true);
-});
-
-test('a track with no label falls back to its file name', () => {
-  const out = new AudioOut();
-  assert.equal(out.load({ path: '/music/Pink Moon.flac' }).source.label, 'Pink Moon');
-});
-
-test('only the loaded file may be read, and only while it is loaded', () => {
-  // The scheme reaches anywhere on disk, so the queue is not the allowlist —
-  // the one thing put in front of the user is.
-  const out = new AudioOut();
-  out.load({ path: '/music/a.mp3' });
-  assert.equal(out.allows('/music/a.mp3'), true);
-  assert.equal(out.allows('/music/b.mp3'), false);
-  assert.equal(out.allows('C:\\Users\\me\\.ssh\\id_rsa'), false);
-  out.clear();
-  assert.equal(out.allows('/music/a.mp3'), false);
-});
-
-test('only declared buttons are offered', () => {
-  const out = new AudioOut();
-  out.setTransport({ pluginId: 'p', buttons: ['next', 'rewind'], handle() {} });
-  // `rewind` is not a button the bar has; silently drawing one would be a
-  // control nothing is listening to.
-  assert.deepEqual(out.status().buttons, ['next']);
-});
-
-test('what next means is asked of the plugin, never decided here', async () => {
-  const out = new AudioOut();
-  const asked = [];
-  out.setTransport({ pluginId: 'p', buttons: ['next', 'previous'], handle: (name) => asked.push(name) });
-  out.load({ path: '/music/a.mp3' });
-
-  await out.command('next');
-  await out.command('ended');
-  // play/pause are true of any source and are answered without the plugin.
-  await out.command('pause');
-  assert.deepEqual(asked, ['next', 'ended']);
-  assert.equal(out.status().playing, false);
-});
-
-test('a transport that throws becomes an error on the bar, not a crash', async () => {
-  const out = new AudioOut();
-  out.setTransport({
-    pluginId: 'p',
-    buttons: ['next'],
-    handle: () => {
-      throw new Error('the library moved');
-    },
-  });
-  out.load({ path: '/music/a.mp3' });
-  const status = await out.command('next');
-  assert.match(status.error, /the library moved/);
-  assert.equal(status.playing, false);
-});
-
-test('switching the driving plugin off takes the bar with it', () => {
-  const out = new AudioOut();
-  out.setTransport({ pluginId: 'music', buttons: ['next'], handle() {} });
-  out.load({ path: '/music/a.mp3' });
-
-  // Somebody else's plugin going away must not stop the music.
-  out.releasePlugin('unrelated');
-  assert.ok(out.status().source);
-
-  out.releasePlugin('music');
-  assert.equal(out.status().source, null);
-  assert.deepEqual(out.status().buttons, []);
-});
-
-test('stop still works when no plugin is driving, or a stale bar cannot be dismissed', async () => {
-  const out = new AudioOut();
-  out.load({ path: '/music/a.mp3' });
-  await out.command('stop');
-  assert.equal(out.status().source, null);
-});
+/*
+ * The audio service itself is tested in `audio.test.mjs`: it is a service the
+ * app owns rather than a plugin. The plugin-facing half — a transport
+ * registered by a real plugin, driving a real bar — is below, against the
+ * published player.
+ */
 
 /* ============================ the published plugins ============================ */
 
@@ -939,10 +1331,10 @@ function stubAudio() {
  * Browser control, from the repository it moved to.
  *
  * The capability this app shipped with until it did not, now a plugin like any
- * other — and the case that proves the boundary holds. It declares no service,
- * because there is no browser here to lend it; it brings its own engine; and it
- * asks for a section in the left panel, which is the newest thing the manifest
- * can say. All three are exactly the parts that would break silently.
+ * other — and the case that proves the boundary holds. It asks for nothing the
+ * app used to lend it a browser with; it brings its own engine; and it asks for
+ * a section in the left panel, which is the newest thing the manifest can say.
+ * All three are exactly the parts that would break silently.
  *
  * Skipped when the checkout is absent. Its `bin/` is staged rather than
  * committed, so a fresh clone has the code and not the engine — which is fine
@@ -953,14 +1345,25 @@ const haveBrowser = existsSync(join(browserCheckout, 'manul-browser', 'plugin.js
 
 test('browser control loads into the real host, without a browser in it', { skip: !haveBrowser }, async () => {
   config.update({ plugins: { 'manul-browser': { enabled: true, approved: true } } });
-  // No services at all, deliberately: if this ever needs one, the app has grown
-  // a browser again and the whole move has come undone.
+  // Handed none of them, deliberately. A service is what the app *lends*, and
+  // this plugin owning its own browser is the whole point of the move: loading
+  // with the tray empty is what proves nothing here is on loan.
   const host = new PluginHost({ userDir: browserCheckout, services: {} });
   await host.load();
 
   const row = host.list().find((plugin) => plugin.id === 'manul-browser');
   assert.equal(row.active, true, row.error);
-  assert.deepEqual(row.services, []);
+  /**
+   * What it asks for, and what it must never ask for again.
+   *
+   * It grew a `scene` since the move — a panel is a panel, and drawing what a
+   * page is doing is not owning a browser. The assertion that matters is the
+   * other one: `browser` and `lookupBrowser` are gone from the app, and a
+   * manifest naming either is a load-time error rather than a plugin quietly
+   * handed something the app no longer has.
+   */
+  for (const name of row.services) assert.ok(KNOWN_SERVICES.has(name), `unknown service "${name}"`);
+  assert.deepEqual(row.services.filter((name) => /browser/i.test(name)), []);
 
   for (const type of ['browser_steps', 'browser_close', 'web_lookup']) {
     assert.ok(host.action(type), `${type} did not register`);
@@ -1533,4 +1936,104 @@ test('voice input drives the button and tells the model nothing', { skip: !haveV
   const models = row.settings.find((setting) => setting.key === 'model');
   assert.equal(models.type, 'select');
   assert.deepEqual(models.options.map((option) => option.value), ['small', 'medium', 'large']);
+});
+
+/* ============================ the space trader plugin ============================ */
+
+/**
+ * A game, against the real host and the real panel.
+ *
+ * The other published plugins here contribute an action and a prompt fragment,
+ * which is most of the API and not the newest part of it. This one uses the
+ * whole of what a plugin may now do to a window: a `button` setting pressed
+ * from the left panel with no turn running, a chooser of cards, a one-line
+ * field answered as `act`'s second argument, meters carrying accents, and a
+ * board. Every one of those is a pairing between a manifest, a plugin's code
+ * and this app's own normaliser — the halves that are each fine alone and only
+ * fail where they meet.
+ *
+ * The scene is the app's own object rather than a stub, so what is asserted is
+ * what a window would actually be handed.
+ */
+const haveTrader = havePlugin('space-trader');
+
+async function traderHost(scene) {
+  config.update({ plugins: { 'space-trader': { enabled: true, approved: true } } });
+  const host = new PluginHost({
+    userDir: checkoutFor('space-trader'),
+    stateDir: mkdtempSync(join(tmpdir(), 'wl-trader-state-')),
+    services: { scene },
+  });
+  await host.load();
+  return host;
+}
+
+test('a game loads into the real host and draws a panel this app can render', { skip: !haveTrader }, async () => {
+  const { Scene } = await import('../src/main/scene.mjs');
+  const scene = new Scene();
+  // A panel is claimed by the conversation a turn runs in, and there is no turn
+  // here — told one directly, so `status()` has something to answer with.
+  scene.setTurn('chat-1');
+  const host = await traderHost(scene);
+
+  const row = host.list().find((plugin) => plugin.id === 'space-trader');
+  assert.equal(row.active, true, row.error);
+  assert.deepEqual(row.services, ['scene']);
+  assert.equal(row.panel, 'SPACE TRADER');
+  assert.ok(host.action('space_trader'));
+  assert.ok(host.action('space_trader_move'));
+
+  /**
+   * NEW GAME, pressed on the left panel with nothing running.
+   *
+   * The moment `button` exists for: there is no row above the composer yet,
+   * because there is no game to put one over.
+   */
+  const pressed = await host.pressButton('space-trader', 'newGame');
+  assert.equal(pressed.cards, true, 'pressing NEW GAME dealt no chooser');
+
+  const asked = scene.status().scene;
+  assert.ok(asked.cards, 'the chooser did not reach the panel');
+  assert.ok(asked.cards.items.length > 1 && asked.cards.items.length <= 8);
+  for (const card of asked.cards.items) assert.ok(card.action, 'a card with nothing to answer');
+
+  // Pressed through `scene.act`, which refuses an id that is not on offer —
+  // so this also proves the ids the plugin sends are the ids it drew.
+  const chosen = await scene.act(asked.cards.items[0].action);
+  assert.equal(chosen.entry, true, 'choosing a background opened no field');
+
+  const asking = scene.status().scene;
+  assert.ok(asking.entry, 'the field did not reach the panel');
+  assert.equal(typeof asking.entry.action, 'string');
+  assert.ok(asking.entry.action.length > 0);
+
+  // The field's answer is `act`'s second argument, and nothing else carries one.
+  const made = await scene.act(asking.entry.action, 'Jameson');
+  assert.ok(made.submit, 'naming the commander sent nothing to the transcript');
+
+  const panel = scene.status().scene;
+  assert.match(panel.title, /Jameson/);
+  assert.ok(panel.title.length <= 80 && panel.subtitle.length <= 80);
+  assert.ok(panel.meters.length > 0, 'a game with no meters');
+  // Accents are a closed vocabulary and the panel is where one arrives from a
+  // plugin; anything unrecognised is dropped rather than passed to a class name.
+  for (const meter of panel.meters) {
+    if (meter.accent) assert.ok(['life', 'mana', 'vigour', 'growth', 'time'].includes(meter.accent));
+  }
+  // The first nine moves get the digits, by position and never by request.
+  assert.ok(panel.actions.length > 0);
+  panel.actions.forEach((action, index) => {
+    assert.equal(action.key, index < 9 ? '123456789'[index] : '', `move ${index} carries "${action.key}"`);
+  });
+  assert.ok(panel.board, 'the star chart did not reach the panel');
+
+  // Looking costs nothing and sends nothing: a move that only redraws is the
+  // whole reason a panel is cheaper than a turn.
+  const looked = await scene.act(panel.actions[0].id);
+  assert.equal(looked.submit, '');
+
+  // A stale id is refused by the app rather than acted on by the plugin.
+  await assert.rejects(() => scene.act('self-destruct'), /no longer on offer/);
+
+  await host.shutdown();
 });

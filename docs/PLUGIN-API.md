@@ -9,7 +9,7 @@ which is the best worked example of a plugin that brings something the app does 
 This document is the whole of it. It is written to be followed straight through by a person or by an agent: the
 [skeleton](#a-plugin-that-works) below is a working plugin, and everything after it is reference.
 
-**Plugin API version 9.** Put the number your plugin actually needs in the manifest — see
+**Plugin API version 12.** Put the number your plugin actually needs in the manifest — see
 [API versions](#api-versions). Declaring a version the user's build does not implement means your plugin is listed
 with "update Wasteland Next" instead of being loaded, which is deliberate and much better than failing halfway through
 `activate` on a function that does not exist yet.
@@ -380,6 +380,9 @@ user, read live through `ctx.store`.
 | `folder` | `[ CHOOSE… ]`, a native directory dialog | absolute path string |
 | `toggle` | A checkbox | boolean |
 | `select` | A dropdown | one of the `options` values |
+| `button` | `[ LABEL ]`, pressed | **none** — see below |
+
+Any of them may carry a `hint`, drawn as the control's tooltip.
 
 A `select` names its options in the manifest so the control can be drawn before any of your code has run — and the app
 **refuses to store a value you never offered**, so you can read one back without checking it.
@@ -387,6 +390,43 @@ A `select` names its options in the manifest so the control can be drawn before 
 `ctx.store.get(key)` reads live rather than at activation, so a value the user changed a moment ago is the one you see.
 `ctx.onSettingsChanged(key, value)` exists for the settings that invalidate work already done — a music folder is the
 case in point, since nothing else would make the library rescan.
+
+### A button is a setting that stores nothing
+
+```json
+{ "key": "newGame", "type": "button", "label": "NEW GAME", "hint": "a fresh commander, and a ship" }
+```
+
+Every other type is a question whose answer the app keeps. A button is a thing that *happens*, and it
+is declared among the settings because of where it has to be drawn: your row and your panel section
+are built from this list, and a game that wants NEW GAME and LOAD GAME beside its language has
+nowhere else to put them.
+
+```js
+ctx.onButton(async (key) => {
+  if (key === 'newGame') { scene.show(chooserFor(backgrounds)); return { cards: true }; }
+  if (key === 'load') { scene.show(menu(await save())); return { sheet: true }; }
+  return { status: 'nothing to do' };
+});
+```
+
+One handler for all of your buttons, and the last one registered wins — the same rule the scene
+presenter follows. It answers with **exactly what a scene move answers with**: `{status, submit,
+sheet, board, cards, entry}`, shaped and cut by the same code, so the window has one way to act on a
+press rather than two. That is the whole reason the type exists; a control that could only change a
+stored value would be a setting, and settings already had four types for that.
+
+- **`store.get` never sees one.** A button holds nothing, and the app refuses to write a value
+  against its key — so it cannot come back out as though somebody had chosen it.
+- **A press with no handler is an error, not silence.** A control drawn on somebody's panel that
+  quietly does nothing is indistinguishable from a broken app, so the press answers with a sentence
+  naming your plugin.
+- **A press can claim the panel.** `act` may only be answered inside a turn, and this is pressed
+  outside one — which is the point, since LOAD GAME exists for the moment when nothing is running.
+  Paint a scene while you handle the press and the panel is claimed for the conversation the window
+  has open. Paint nothing and nothing is claimed: a button that does something invisible cannot put a
+  game panel over a chat that was never playing one.
+- **It is drawn while your plugin is running**, like everything else in the section.
 
 ### A section of your own
 
@@ -524,7 +564,8 @@ const scene = ctx.service('scene');
 scene.present({
   pluginId: ctx.id,
   pluginName: 'Fantasy RPG',
-  act: async (actionId) => {
+  // `value` is what was typed into the field, and is '' for every other control.
+  act: async (actionId, value = '') => {
     if (actionId === 'bag') {
       scene.show(sheetFor(state));            // redraws the panel, costs nothing
       return { status: 'Inventory.' };
@@ -536,7 +577,7 @@ scene.present({
 scene.show({
   title: 'Village of Mara — day 4',
   subtitle: 'the common room',
-  meters: [{ label: 'HP', value: 12, max: 20, tone: 'bad' }, { label: 'GOLD', value: 14 }],
+  meters: [{ label: 'HP', value: 12, max: 20, tone: 'bad', accent: 'life' }, { label: 'GOLD', value: 14 }],
   fields: [{ label: 'QUEST', value: 'find the hunters' }],
   tags:   [{ label: 'BLEEDING', tone: 'bad' }],
   groups: [{ label: 'ITEMS', items: [{ label: 'Notched sword', note: 'a weapon' }], empty: 'nothing on you' }],
@@ -548,12 +589,24 @@ scene.clear();                                 // the game is over; the panel go
 
 Every field is optional and every one has a shape. What does not fit is dropped rather than thrown over: a game that
 stops working because one label was a number is worse than a game with one label missing. Labels are collapsed to one
-line, because they are drawn in a flex row. `tone` is `good`, `warn` or `bad` — anything else becomes plain, and it is
-the only field that reaches a class name.
+line, because they are drawn in a flex row. `tone` is `good`, `warn` or `bad` — anything else becomes plain.
 
-A meter with no `max` is drawn as a bare number, not as a bar filled to an imaginary limit. `groups` appear behind the
-**[ SHEET ]** button and in no other place, so a long inventory never competes with the transcript; `empty` is your
-words for an empty one, since only you know whether the sentence is "nothing on you" or "the journal is blank".
+**Lengths are cut rather than refused, and they are cut hard.** A title or subtitle is 80 characters, a label 48, a
+field's value 32, a note 120, a hint 200, an id 64; `status` is 200 and `submit` is 400. The cut is at exactly that
+character, so a phrase that overruns ends mid-word — trim your own text where a reader would trim it, at a space and
+with an ellipsis, rather than letting the panel do it. Widths that fit in English do not always fit in a translation,
+and that is where this bites.
+
+A meter with no `max` is drawn as a bare number, not as a bar filled to an imaginary limit. `accent` says what the bar
+*stands for* — `life`, `mana`, `vigour`, `growth`, `time` — and is a different question from `tone`, which says how it
+is going. Health, mana and stamina sit side by side in one strip and a player finds the one they want by colour long
+before reading its label, so the vocabulary is closed for the reason tones are: it reaches a class name, and a plugin
+naming its own colour would be a plugin writing the stylesheet. The words are roles rather than colours, so a theme
+stays free to decide what "life" looks like; anything else becomes plain.
+
+`groups` appear behind the **[ SHEET ]** button and in no other place, so a long inventory never competes with the
+transcript; `empty` is your words for an empty one, since only you know whether the sentence is "nothing on you" or
+"the journal is blank".
 
 **A list row can be a control.** Give an item an `action` and it is drawn as a button that calls `act` with that id:
 
@@ -620,6 +673,34 @@ than that is a list, and a list is the sheet.
 **`act` answers `{cards: true}` to open it, and the answer is what closes it.** There is no close button and no Escape:
 this is a question, and a question with a way out leaves your game waiting for an answer that never arrives. Redraw the
 scene without `cards` and the dialog goes — which is what answering does anyway.
+
+**A field is the one thing the player types into.** For a hero's name, an amount, anything a row of buttons cannot ask
+for:
+
+```js
+entry: {
+  action: 'name',                              // where the answer goes; without it there is no field
+  label: 'What are they called?',
+  hint: 'twenty-four characters at most',
+  placeholder: 'Jameson',
+  value: 'Jameson',                            // what it starts out holding, so a question can be re-asked
+  submit: 'LAUNCH',                            // the button beside it; 'OK' if you say nothing
+}
+```
+
+The answer arrives as the **second argument to `act`** — `act(actionId, value)` — with `actionId` set to the field's
+own `action`. It is cut to one line and forty characters before you see it, so you are handed a name and never a
+paragraph however the field is driven. Every other control calls `act` with `''`.
+
+Deliberately one line and nothing more. It is not a form: no second field, no validation vocabulary, no types. A game
+that needs a form is asking something that should be simpler.
+
+It exists because a name typed at the composer is a *message*, a message goes to the model first, and a small model
+asked to pass a word through sometimes answers it instead — reported as a bug, and the question is the game's, so the
+field to answer it belongs to the game.
+
+**`act` may answer `{entry: true}`** to open it, as `{cards: true}` opens the chooser. Redraw the scene without `entry`
+and the field goes.
 
 **`act` may answer `{sheet: true}`** to open the sheet. It is the only way you can: the dialog belongs to the app, so an
 inventory button that merely wrote a line in the status bar would be a control describing the thing it should have
@@ -820,7 +901,18 @@ Put the directory in the app's plugin folder and restart:
 | Linux | `~/.config/Wasteland Next/plugins/<id>/` |
 
 Beside `plugins/` in the same directory you will find `config.json` (where `plugins.<id>` records whether yours is
-enabled and approved), `plugin-state/<id>.json` (your `ctx.state`) and `plugin-data/<id>/` (your `ctx.dataDir()`).
+enabled, approved and set to auto-update), `plugin-state/<id>.json` (your `ctx.state`) and `plugin-data/<id>/` (your
+`ctx.dataDir()`).
+
+If the user has ticked AUTO-UPDATE on your row, the app installs whatever your registry publishes that is newer, a few
+seconds after it starts — the ordinary install path with the click supplied in advance, checksum and all. Nothing about
+the state it finds is changed by that: a plugin that was switched off stays off, and one still waiting for ALLOW AND
+RUN is still waiting. Two things follow for you. Your `ctx.state` document and your `ctx.dataDir()` survive it, because
+both sit outside the installed tree — the tree itself is replaced wholesale, so anything you wrote inside it is gone.
+And the update does not take effect until the app restarts, because Node caches modules by URL for the life of the
+process; the app draws a RESTART button for that, and your plugin goes on running its previous version until it is
+pressed. Write your state migrations so that the *old* code can survive reading a document the new code wrote, or a
+user who does not restart for a week is running last week's code against this week's data.
 Deleting the whole `plugins/<id>` directory and the two entries is a clean uninstall by hand.
 
 The directory name must equal the manifest's `id`. Switch it on in **PLUGINS**; a plugin with code needs
@@ -894,8 +986,10 @@ Declare the **lowest** version that has everything you use. Declaring a higher o
 | 6 | The `scene` service — a drawn panel, a pinned row of moves and their hotkeys |
 | 7 | Pressable list rows (`item.action`) and `act` answering `{sheet: true}` |
 | 8 | `board` — a picture with pressable places, and files served from `ctx.dataDir()` |
-| 10 | `cards` — a chooser of equal cards, each with a picture, a name and a paragraph |
 | 9 | `panel` — your settings as a section of the left panel. The `browser` and `lookupBrowser` services are **removed** |
+| 10 | `cards` — a chooser of equal cards, each with a picture, a name and a paragraph |
+| 11 | `entry` — one line for the player to type into, answered as `act`'s second argument; `accent` on a meter |
+| 12 | `button` settings and `ctx.onButton` — a control that does something, drawn beside your settings; `hint` on any setting |
 
 **Not every addition moves the number.** `category` arrived after 5 and did not: a build that has never heard of the
 field ignores it and loads the plugin exactly as before, so declaring 6 for it would lock your plugin out of every

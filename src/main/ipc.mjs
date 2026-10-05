@@ -6,7 +6,7 @@
  * `{event, ...payload}`. One channel rather than twenty keeps the preload
  * surface small and means a new event type needs no changes here or there.
  */
-import { Notification, dialog, ipcMain } from 'electron';
+import { Notification, app, dialog, ipcMain } from 'electron';
 import { readFileSync } from 'node:fs';
 import * as chats from './chats.mjs';
 import * as config from './config.mjs';
@@ -23,7 +23,7 @@ import * as registry from './plugins/registry.mjs';
 import { audio } from './audio.mjs';
 import { mic } from './mic.mjs';
 import { notify } from './notify.mjs';
-import { scene } from './scene.mjs';
+import { normaliseAnswer, scene } from './scene.mjs';
 import { Agent } from './agent/agent.mjs';
 import { Updater } from './updater.mjs';
 
@@ -44,6 +44,15 @@ const VERSION = (() => {
     return '';
   }
 })();
+
+/**
+ * How long after boot the plugin auto-update runs.
+ *
+ * The same reasoning as the app updater's own delay: a network fetch competing
+ * with the first render is invisible work that makes the window slow to appear,
+ * and nothing about a plugin update is urgent enough to pay for it.
+ */
+const AUTO_UPDATE_DELAY_MS = 6000;
 
 /**
  * Services are handed to the host by name, never imported by the plugins that
@@ -353,6 +362,27 @@ export function registerIpc(windowGetter) {
 
   /* ---------- updates ---------- */
 
+  /**
+   * Close this build and start it again.
+   *
+   * Node caches ES modules by resolved URL for the life of the process, so an
+   * updated plugin goes on running the code it was first imported with — the
+   * row says so, and this is the only thing that finishes the job. Hot-swapping
+   * a module graph would need a loader hook in the main process affecting every
+   * import in the app, to fix something a restart fixes for free.
+   *
+   * `relaunch` spawns a helper that waits for this process to go away and then
+   * starts a new one, so it survives the exit path in `main.mjs` — which
+   * intercepts `before-quit`, tears the children down and calls `app.exit`. The
+   * quit goes through that path rather than around it precisely so an orphaned
+   * llama-server does not hold port 8080 against the instance about to start.
+   */
+  handle('app:restart', () => {
+    app.relaunch();
+    app.quit();
+    return true;
+  });
+
   updater = new Updater({
     onStatus: (status) => send('update:status', status),
     // The installer replaces this build the moment `quitAndInstall` returns, so
@@ -439,7 +469,29 @@ export function registerIpc(windowGetter) {
     return plugins.list();
   });
   handle('plugins:setEnabled', (id, enabled) => plugins.setEnabled(id, enabled));
+  handle('plugins:setAutoUpdate', (id, on) => plugins.setAutoUpdate(id, on));
   handle('plugins:setSetting', (id, key, value) => plugins.setSetting(id, key, value));
+
+  /**
+   * A `button` setting, pressed on the plugin's row or in its panel section.
+   *
+   * Two things happen and the order is the point. The plugin runs first and may
+   * paint a scene while it does — that is what NEW GAME and LOAD GAME are for —
+   * and only then is the panel claimed for the conversation the window has
+   * open. Claiming afterwards means a press that painted nothing claims
+   * nothing, which is the rule that keeps a game panel off a chat that was
+   * never playing one.
+   *
+   * The chat comes from the renderer because the main process has no current
+   * conversation; it is the same reason `submit` is handed back rather than
+   * sent from here. Normalised through the scene's own shaping so a button
+   * answers a window in exactly the words a move does.
+   */
+  handle('plugins:pressButton', async (id, key, chatId) => {
+    const answer = normaliseAnswer(await plugins.pressButton(id, key));
+    scene.claimFor(id, chatId);
+    return answer;
+  });
 
   /**
    * A click on one of the options an action put in the transcript.
@@ -541,19 +593,79 @@ export function registerIpc(windowGetter) {
     );
   });
 
+  /**
+   * Fetch what the registries publish and replace whatever asked to be kept
+   * current.
+   *
+   * Run once, a few seconds after boot, and never again unprompted: the whole
+   * of what it can do is replace a plugin the user already installed with a
+   * newer build of the same id from a registry that is already being asked. It
+   * installs nothing new, it approves nothing, and it switches nothing on —
+   * `mergeEnablement` keeps every recorded decision, so a plugin that was off
+   * stays off and one that was never allowed to run is still not allowed.
+   *
+   * Progress goes on the plugin's own row rather than into the GET PLUGINS
+   * status line, for the reason `ctx.progress` exists: nobody has opened that
+   * section, and a 40 MB download reported into a line nobody is looking at is
+   * a download that appears to be nothing at all.
+   *
+   * Failures are logged and never thrown. One registry being down, or one
+   * archive failing its checksum, must not stop the others — and must not open
+   * the app with an error about work nobody asked for.
+   */
+  const autoUpdatePlugins = async () => {
+    await plugins.ready;
+    const wanted = plugins.list().filter((plugin) => plugin.autoUpdate && !plugin.builtin);
+    if (wanted.length === 0) return;
+
+    const index = await registry.fetchIndex();
+    let updated = 0;
+
+    for (const row of wanted) {
+      const published = index.plugins.find((entry) => entry.id === row.id);
+      if (!published || !published.compatible) continue;
+      if (!registry.isNewer(published.version, row.version)) continue;
+
+      const working = (text, progress = {}) =>
+        send('plugins:working', {
+          id: row.id,
+          text,
+          received: Number(progress.received) || 0,
+          total: Number(progress.total) || 0,
+        });
+      try {
+        working(`updating to ${published.version}`);
+        const done = await registry.install(published, {
+          onProgress: (progress) => working(`updating to ${published.version}`, progress),
+        });
+        updated += 1;
+        send('log', { text: `${done.name} updated itself to ${done.version}` });
+      } catch (err) {
+        send('log', { text: `${row.name} could not be updated — ${err.message}` });
+      } finally {
+        // Empty text takes the line away. In a `finally` because a failed
+        // update leaving a meter on the row reads as one still running.
+        working('');
+      }
+    }
+
+    // Rediscovery is what makes the new version, and the restart note that goes
+    // with it, appear on the rows — `refresh` emits `changed` on its way out.
+    if (updated > 0) await plugins.refresh();
+  };
+
   handle('plugins:uninstall', async (id) => {
     const entry = plugins.list().find((plugin) => plugin.id === id);
     // A built-in has no directory to delete, and offering it would be a button
     // that cannot work.
     if (entry?.builtin) throw new Error(`${entry.name} ships with the app and cannot be removed`);
-    await registry.uninstall(id);
-    // Its document and its data directory go with it. Leaving them behind would
-    // mean reinstalling brought back reminders the user removed along with the
-    // plugin — and would leave a gigabyte of speech model with nothing on screen
-    // to explain what it belongs to.
-    plugins.forgetData(id);
-    await plugins.refresh();
-    return plugins.list();
+    // The host orders it: the plugin is stopped while it still has files to be
+    // stopped with, then deleted, then forgotten. Its document and its data
+    // directory go with it — leaving them behind would mean reinstalling
+    // brought back reminders the user removed along with the plugin, and would
+    // leave a gigabyte of speech model with nothing on screen to explain what
+    // it belongs to.
+    return plugins.uninstall(id, () => registry.uninstall(id));
   });
 
   /* ---------- audio ---------- */
@@ -584,7 +696,10 @@ export function registerIpc(windowGetter) {
    * than a second one that would have to re-learn the busy check, the transcript
    * entry and what to do when a send fails.
    */
-  handle('scene:act', (actionId, value) => scene.act(actionId, value));
+  // The plugin comes with the press because there can be more than one panel,
+  // and which of them is on screen is a fact about the open conversation —
+  // which only the window has.
+  handle('scene:act', (actionId, value, pluginId) => scene.act(actionId, value, pluginId));
 
   /* ---------- dictation ---------- */
 
@@ -606,6 +721,13 @@ export function registerIpc(windowGetter) {
   // window back. Anything that needs the list waits on `plugins.ready`.
   plugins.load();
   restoreModel();
+
+  // Delayed for the same reason the app's own update check is: a fetch racing
+  // the first render is invisible work that makes the app slow to open. Nothing
+  // waits on it and nothing is reported if there is nothing to do.
+  setTimeout(() => {
+    autoUpdatePlugins().catch((err) => send('log', { text: `plugin auto-update failed — ${err.message}` }));
+  }, AUTO_UPDATE_DELAY_MS);
 }
 
 /**

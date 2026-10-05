@@ -42,3 +42,37 @@ test('the guard is released when a load fails, not held for the session', async 
   // loading" and the vault would be dead until a restart.
   await assert.rejects(server.load(OTHER), /model not found/);
 });
+
+/*
+ * Pressing UNLOAD during a load.
+ *
+ * The pre-spawn half of a load is several awaits long — the binary fetch, the
+ * `--version` probe, the port check, the header read — and there is no process
+ * in it yet. An unload arriving there stopped nothing, reported `idle`, and the
+ * load then spawned a server anyway: the user asked for no model and got one.
+ *
+ * Reaching that window without a real llama-server means pointing the binary
+ * setting at something that exists and answers `--version`, which `node` does.
+ * The load is cancelled before the port check, so no server is ever spawned.
+ */
+test('an unload during a load stops it instead of being outlived by it', async () => {
+  const { setDataRoot } = await import('../src/main/paths.mjs');
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const config = await import('../src/main/config.mjs');
+
+  setDataRoot(mkdtempSync(join(tmpdir(), 'wl-unload-')));
+  config.update({ llamaServerPath: process.execPath });
+
+  const model = join(mkdtempSync(join(tmpdir(), 'wl-model-')), 'fake.gguf');
+  writeFileSync(model, 'not really a gguf — the load never gets as far as reading it');
+
+  const server = new LlamaServer();
+  const loading = server.load(model);
+  await server.unload();
+
+  await assert.rejects(loading, /cancelled/);
+  // The point of the whole thing: nothing came up behind the refusal.
+  assert.equal(server.state, 'idle');
+});

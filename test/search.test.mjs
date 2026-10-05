@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   downloadUrlFor,
+  encodeRepoId,
   isShard,
   listGgufFiles,
   parseQuant,
@@ -129,6 +130,19 @@ test('a nested path stays a path', () => {
   assert.equal(
     downloadUrlFor('owner/repo', 'Q4_K_M/model 1.gguf'),
     'https://huggingface.co/owner/repo/resolve/main/Q4_K_M/model%201.gguf',
+  );
+});
+
+test('the repository id is encoded too, not only the filename', () => {
+  // The id is typed into a box by the user. Left raw, a space or a `#` in it
+  // truncates the request at that character — the same failure the filename
+  // above records, one path segment earlier, and the `/` between owner and name
+  // still has to survive it.
+  assert.equal(encodeRepoId('owner/repo'), 'owner/repo');
+  assert.equal(encodeRepoId('owner name/repo#2'), 'owner%20name/repo%232');
+  assert.equal(
+    downloadUrlFor('owner name/repo', 'model.gguf'),
+    'https://huggingface.co/owner%20name/repo/resolve/main/model.gguf',
   );
 });
 

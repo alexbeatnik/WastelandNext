@@ -10,7 +10,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { HOTKEYS, Scene, normaliseScene } from '../src/main/scene.mjs';
+import { HOTKEYS, Scene, normaliseAnswer, normaliseScene } from '../src/main/scene.mjs';
 
 test('a scene keeps what it can draw and drops what it cannot', () => {
   const scene = normaliseScene({
@@ -376,11 +376,17 @@ test('a plugin answering with nothing is answered with nothing', async () => {
 test('a game cannot start a turn on its own', () => {
   // `act` hands the words back rather than sending them, and nothing else here
   // returns a `submit` at all. A move is sent because a person pressed a key.
+  // The two `claim` methods say which conversation the panel belongs to and
+  // send nothing; the list is here so that a method which *could* send has to
+  // be added to it on purpose.
   const scene = new Scene();
   const surface = Object.getOwnPropertyNames(Object.getPrototypeOf(scene));
   assert.deepEqual(
     surface.filter((name) => name !== 'constructor' && !name.startsWith('#')).sort(),
-    ['act', 'claimTurn', 'clear', 'hasPresenter', 'present', 'releasePlugin', 'setTurn', 'show', 'status'],
+    // `forPlugin` was added on purpose: it hands a plugin `present`, `show`,
+    // `clear` and `status` with its own id already filled in, and nothing that
+    // can send or claim.
+    ['act', 'claimFor', 'claimTurn', 'clear', 'forPlugin', 'hasPresenter', 'present', 'releasePlugin', 'setTurn', 'show', 'status'],
   );
 });
 
@@ -514,4 +520,228 @@ test('a claim tells the window, or the panel appears only on the next repaint', 
   seen.length = 0;
   scene.claimTurn('fantasy-rpg');
   assert.deepEqual(seen, []);
+});
+
+test('a button pressed outside a turn claims the conversation the window has open', () => {
+  // The case `claimTurn` cannot answer: a `button` setting in the left panel is
+  // pressed with nothing running, which is the whole point of LOAD GAME. There
+  // is no turn to take the conversation off, so it comes from the window —
+  // which is the only thing that knows which chat is on screen.
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+  scene.show({ title: 'Village of Mara — day 4' });
+  assert.equal(scene.status().chatId, '', 'painted outside a turn, so it belongs to nobody yet');
+
+  scene.claimFor('fantasy-rpg', 'chat-a');
+  assert.equal(scene.status().chatId, 'chat-a');
+});
+
+test('a press that painted nothing claims nothing', () => {
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+
+  // A game that answers a button by doing something invisible must not put a
+  // panel over a conversation the user opened to ask about the weather.
+  scene.claimFor('fantasy-rpg', 'chat-a');
+  assert.equal(scene.status().chatId, '');
+
+  scene.show({ title: 'Village of Mara — day 4' });
+  scene.claimFor('fantasy-rpg', '');
+  assert.equal(scene.status().chatId, '', 'no conversation is not a conversation called nothing');
+
+  scene.claimFor('space-trader', 'chat-a');
+  assert.equal(scene.status().chatId, '', 'only the plugin driving the panel may claim it');
+});
+
+test('claiming for a press announces once, and only on a change', () => {
+  const scene = new Scene();
+  const seen = [];
+  scene.on('state', (status) => seen.push(status.chatId));
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({}) });
+  scene.show({ title: 'Village of Mara — day 4' });
+
+  seen.length = 0;
+  scene.claimFor('fantasy-rpg', 'chat-a');
+  assert.deepEqual(seen, ['chat-a'], 'or the panel appears only on the next repaint');
+
+  seen.length = 0;
+  scene.claimFor('fantasy-rpg', 'chat-a');
+  assert.deepEqual(seen, [], 'a press that changed nothing repaints nothing');
+});
+
+test('a panel button answers in exactly the words a move answers in', async () => {
+  // The two presses are shaped and cut by the same function on purpose, so the
+  // window has one way to act on an answer rather than two. A key added to one
+  // path and not the other is what this catches.
+  const scene = new Scene();
+  scene.present({ pluginId: 'fantasy-rpg', act: () => ({ status: 'you look around', submit: 'I look around' }) });
+  scene.show({ title: 'Village of Mara — day 4', actions: [{ id: 'look', label: 'Look around' }] });
+
+  const move = await scene.act('look');
+  assert.deepEqual(Object.keys(move).sort(), ['board', 'cards', 'entry', 'sheet', 'status', 'submit']);
+  assert.deepEqual(Object.keys(normaliseAnswer({})).sort(), Object.keys(move).sort());
+});
+
+test('what a press may answer with is cut to what the window can use', () => {
+  const answer = normaliseAnswer({
+    status: '  a line\nsplit over two  ',
+    submit: 'x'.repeat(500),
+    sheet: 'yes',
+    board: 1,
+    cards: true,
+    openTheDoor: 'and everything behind it',
+  });
+
+  assert.equal(answer.status, 'a line split over two', 'the status bar is one line, however it was written');
+  assert.equal(answer.submit.length, 400);
+  // A flag is a flag: a truthy value is not `true`, or a plugin returning
+  // `sheet: 'later'` would throw the dialog open over whatever is on screen.
+  assert.equal(answer.sheet, false);
+  assert.equal(answer.board, false);
+  assert.equal(answer.cards, true);
+  assert.equal(answer.entry, false);
+  assert.equal('openTheDoor' in answer, false, 'the window acts on a fixed set of keys, and no others');
+
+  assert.equal(normaliseAnswer({ status: 'y'.repeat(300) }).status.length, 200);
+});
+
+test('a press answered with nothing at all is still an answer', () => {
+  // A plugin that did its work silently returns undefined, and the window has
+  // to be able to act on that without checking for it first.
+  assert.deepEqual(normaliseAnswer(undefined), {
+    status: '',
+    submit: '',
+    sheet: false,
+    board: false,
+    cards: false,
+    entry: false,
+  });
+});
+
+/* ============================ more than one panel ============================ */
+
+/** What the window draws in a conversation: the newest panel claimed by it. */
+const drawnIn = (scene, chatId) =>
+  scene.status().panels.filter((panel) => panel.chatId === chatId).at(-1) ?? null;
+
+test('each plugin has a panel of its own, in the conversation it acted in', () => {
+  // One document and one presenter was true while one plugin drew here. Browser
+  // control draws the page and a game draws its world, and with a single panel
+  // each of them was painting over the other.
+  const scene = new Scene();
+  const browser = scene.forPlugin('manul-browser');
+  const game = scene.forPlugin('space-trader');
+  browser.present({ pluginName: 'Browser', act: () => ({}) });
+  game.present({ pluginName: 'Space Trader', act: () => ({}) });
+
+  scene.setTurn('chat-game');
+  game.show({ title: 'Thalassa' });
+  scene.setTurn('chat-errands');
+  browser.show({ title: 'Samsung' });
+  scene.setTurn('');
+
+  assert.equal(drawnIn(scene, 'chat-game').scene.title, 'Thalassa');
+  assert.equal(drawnIn(scene, 'chat-game').pluginName, 'Space Trader');
+  assert.equal(drawnIn(scene, 'chat-errands').scene.title, 'Samsung');
+  assert.equal(drawnIn(scene, 'chat-errands').pluginName, 'Browser');
+});
+
+test('a repaint outside a turn does not inherit the conversation another plugin claimed', () => {
+  // The step that put the game on screen in the report: the browser claimed the
+  // conversation by painting in a turn, and the game — repainting afterwards,
+  // outside any turn — kept "whichever conversation claimed it last", which was
+  // not a conversation it had ever been played in.
+  const scene = new Scene();
+  const browser = scene.forPlugin('manul-browser');
+  const game = scene.forPlugin('space-trader');
+  browser.present({ act: () => ({}) });
+  game.present({ act: () => ({}) });
+
+  scene.setTurn('chat-errands');
+  browser.show({ title: 'Samsung' });
+  scene.setTurn('');
+  game.show({ title: 'Thalassa' });
+
+  assert.deepEqual(
+    scene.status().panels.filter((panel) => panel.chatId === 'chat-errands').map((panel) => panel.pluginId),
+    ['manul-browser'],
+  );
+  assert.equal(scene.status().panels.find((panel) => panel.pluginId === 'space-trader').chatId, '');
+});
+
+test('a press is answered by the plugin whose panel it was on', async () => {
+  const scene = new Scene();
+  const pressed = [];
+  scene.forPlugin('manul-browser').present({ act: (id) => void pressed.push('browser:' + id) });
+  scene.forPlugin('space-trader').present({ act: (id) => void pressed.push('game:' + id) });
+  scene.forPlugin('manul-browser').show({ actions: [{ id: 'card-1', label: 'A result' }] });
+  scene.forPlugin('space-trader').show({ actions: [{ id: 'market', label: 'Market' }] });
+
+  await scene.act('card-1', '', 'manul-browser');
+  await scene.act('market', '', 'space-trader');
+  assert.deepEqual(pressed, ['browser:card-1', 'game:market']);
+
+  // Offered on one panel is not offered on the other: a card on a web page
+  // must not be pressable into a game that happens to be running.
+  await assert.rejects(() => scene.act('card-1', '', 'space-trader'), /no longer on offer/);
+  await assert.rejects(() => scene.act('market', '', 'manul-browser'), /no longer on offer/);
+  await assert.rejects(() => scene.act('market', '', 'nobody-at-all'), /no game is running/);
+  assert.equal(pressed.length, 2);
+});
+
+test('a plugin cannot draw, or answer, under the name of another', () => {
+  // `present` takes a `pluginId` because that is how it has always been called,
+  // and through the host it is ignored: the name on a panel is the one on the
+  // row of the plugin that drew it, for the reason a notice may not sign itself.
+  const scene = new Scene();
+  scene.forPlugin('space-trader').present({ pluginName: 'Space Trader', act: () => ({}) });
+  scene.forPlugin('space-trader').show({ title: 'Thalassa' });
+
+  const intruder = scene.forPlugin('imposter');
+  intruder.present({ pluginId: 'space-trader', pluginName: 'Space Trader', act: () => ({}) });
+  intruder.show({ title: 'not the game' });
+  intruder.clear();
+
+  const panels = scene.status().panels;
+  assert.deepEqual(panels.map((panel) => panel.pluginId), ['space-trader']);
+  assert.equal(panels[0].scene.title, 'Thalassa', 'a clear from somebody else took the panel of the game');
+});
+
+test('when two panels are in one conversation, the one that acted last is drawn', () => {
+  // The browser driven from inside the chat a game is played in. Both belong
+  // there; the window has one strip, so it is whoever spoke last — and a game
+  // that acts without repainting still has to come back to the front.
+  const scene = new Scene();
+  const seen = [];
+  scene.on('state', () => seen.push(drawnIn(scene, 'chat-game')?.pluginId ?? ''));
+  scene.forPlugin('space-trader').present({ act: () => ({}) });
+  scene.forPlugin('manul-browser').present({ act: () => ({}) });
+
+  scene.setTurn('chat-game');
+  scene.forPlugin('space-trader').show({ title: 'Thalassa' });
+  scene.forPlugin('manul-browser').show({ title: 'A page' });
+  assert.equal(drawnIn(scene, 'chat-game').pluginId, 'manul-browser');
+
+  seen.length = 0;
+  scene.claimTurn('space-trader');
+  assert.equal(drawnIn(scene, 'chat-game').pluginId, 'space-trader');
+  assert.deepEqual(seen, ['space-trader'], 'and the window is told, once');
+
+  seen.length = 0;
+  scene.claimTurn('space-trader');
+  assert.deepEqual(seen, [], 'already in front: nothing to say');
+});
+
+test('a plugin switched off takes its own panel and leaves the others', () => {
+  const scene = new Scene();
+  scene.forPlugin('space-trader').present({ act: () => ({}) });
+  scene.forPlugin('manul-browser').present({ act: () => ({}) });
+  scene.setTurn('chat-game');
+  scene.forPlugin('space-trader').show({ title: 'Thalassa', actions: [{ id: 'market', label: 'Market' }] });
+  scene.forPlugin('manul-browser').show({ title: 'A page' });
+
+  scene.releasePlugin('manul-browser');
+  assert.deepEqual(scene.status().panels.map((panel) => panel.pluginId), ['space-trader']);
+  assert.equal(scene.status().panels[0].scene.actions.length, 1, 'and the game still has its moves');
+  assert.equal(scene.hasPresenter(), true);
 });
