@@ -390,3 +390,43 @@ test('a summary cut short by Stop is not written over the conversation', async (
   assert.equal(named('chat:compacted').length, 0);
   assert.equal(asked.length, 1, 'and the turn stops there rather than asking again');
 });
+
+test('a model that thinks in circles is stopped, and the turn says so', async () => {
+  /**
+   * The wiring for `isRunaway`, which `client.test.mjs` proves on its own. What
+   * that cannot see is what the turn does with a reply that never arrived:
+   * whether the `reply:end` it owes is paid, whether the user is told in words
+   * rather than shown a blank, and whether an action that was only ever named
+   * inside the reasoning gets run anyway.
+   */
+  const round = 'I will output the response.\nI will use the action block.\n' + fence('do_thing', 'now') + '\n\n';
+  const model = fakeModel([`<think>\nThe user wants the thing done.\n${round.repeat(60)}`, 'Done properly this time.']);
+  let ran = 0;
+  const { agent, named } = build({
+    actions: { do_thing: { pluginId: 'p', run: async () => ((ran += 1), { ok: true, feedback: 'done' }) } },
+    owners: { do_thing: { name: 'P' } },
+  });
+
+  let chatId;
+  try {
+    chatId = await agent.send('', 'do the thing');
+    await agent.send(chatId, 'do the thing');
+  } finally {
+    model.restore();
+  }
+
+  const ended = named('reply:end')[0];
+  assert.match(ended.error, /repeating itself/, 'the transcript says nothing about why there is no reply');
+  assert.equal(ran, 0, 'an action the model only thought about was carried out');
+  assert.ok(named('log').some((entry) => /repeating itself/.test(entry.text)));
+
+  // Kept with the conversation, cut down to what was still being thought.
+  const stored = chats.read(chatId).messages.find((message) => message.role === 'assistant');
+  assert.match(stored.content, /The user wants the thing done/);
+  assert.ok(stored.content.length < 2000, `stored ${stored.content.length} characters of a loop`);
+
+  // And the next turn is told a reply was cut off, not handed the loop.
+  const resent = JSON.stringify(model.turns.at(-1).messages);
+  assert.match(resent, /cut off before an answer/);
+  assert.doesNotMatch(resent, /I will output the response/);
+});

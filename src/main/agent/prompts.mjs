@@ -84,12 +84,19 @@ When a request needs something done rather than said, emit a fenced action block
 \`\`\`
 
 Rules for action blocks:
-- Narrate your intent in one short sentence BEFORE the block, and summarise the
-  outcome after it. The user reads both.
+- Say what you are about to do in one short sentence, then the block, and stop
+  there: the block ends the reply. The sentence is a plan, so write it as one —
+  "Looking that up now." — and never as something already done.
+- The result comes back to you as the next message. That is when you tell the
+  user what happened, in a new reply. Never invent a result, and never write
+  the outcome after the block: you do not have it yet.
 - The JSON must be one line, valid, and closed. Escape newlines inside "steps" as \\n.
 - Emit an action only when it is actually needed. Facts you already know
   (a capital city, a definition, arithmetic) are answered directly, without tools.
-- Never invent the result of an action. You are told what happened; wait for it.`;
+- Each action below is described under its own heading. A rule written under
+  one heading is about that action, not about the one after it.
+- Decide once. When an action fits the request, emit it — do not go back over
+  the choice, and do not rehearse the reply before writing it.`;
 
 const NO_TOOLS = `
 You have no tools enabled in this session: answer from what you know, and say so

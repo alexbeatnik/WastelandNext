@@ -17,6 +17,10 @@ import { Attachments } from './attach.mjs';
 
 /** How many times one user message may bounce back through the model. */
 const MAX_FOLLOW_UPS = 3;
+
+/** What the transcript says when a reply was stopped for repeating itself. */
+const RUNAWAY_NOTICE =
+  'The model started repeating itself while thinking and was stopped before it answered. Send the message again, or put it another way.';
 /** Above this share of the context window, compact before the next send. */
 const COMPACT_THRESHOLD = 0.75;
 /** Messages kept verbatim when compacting — the last two exchanges. */
@@ -276,7 +280,7 @@ export class Agent extends EventEmitter {
     const baseUrl = this.#server.baseUrl;
     if (!baseUrl) throw new Error('no model loaded — pick one from the vault');
 
-    const { text, aborted } = await streamChat({
+    const { text, aborted, runaway } = await streamChat({
       baseUrl,
       messages,
       temperature: Number(settings.temperature),
@@ -286,7 +290,7 @@ export class Agent extends EventEmitter {
       // and then vanish when the reply is rendered reads as a glitch.
       streamReasoning: Boolean(settings.thinking),
     });
-    return { text, aborted };
+    return { text, aborted, runaway: Boolean(runaway) };
   }
 
   /**
@@ -438,11 +442,34 @@ export class Agent extends EventEmitter {
     // it a dead endpoint leaves a blinking cursor in the transcript forever.
     let text;
     let aborted;
+    let runaway;
     try {
-      ({ text, aborted } = await this.#complete(messages));
+      ({ text, aborted, runaway } = await this.#complete(messages));
     } catch (err) {
       this.#say('reply:end', { text: '', rendered: '', aborted: false, error: err.message });
       throw err;
+    }
+
+    /**
+     * The model went round in circles and was stopped before it answered.
+     *
+     * Said in the transcript, in words, because every other way this could end
+     * is silent: with thinking hidden there is nothing on screen but
+     * "Thinking…" for as long as the loop runs, and a reply that was only
+     * reasoning is drawn as a dimmed block or as nothing at all. What was still
+     * thought is kept with the conversation — the client has already cut the
+     * repetition off it — and it goes back to the model next turn as "that
+     * reply was cut off", which is the truth.
+     *
+     * Nothing is dispatched. An action named inside reasoning is one the model
+     * was considering, and a reply that never left its own head has not asked
+     * for anything.
+     */
+    if (runaway && !aborted) {
+      const kept = chats.append(chatId, { role: 'assistant', content: text });
+      this.#say('reply:end', { text, rendered: '', aborted: false, error: RUNAWAY_NOTICE });
+      this.#say('log', { text: kept ? 'reasoning began repeating itself — stopped' : 'conversation was deleted — nothing was written' });
+      return;
     }
 
     // The conversation can be deleted while its turn is still running. There is

@@ -651,6 +651,26 @@ third direction: a plugin's fragment is not a place the app can edit, so where t
 text has to be the specific one for once. It is the only rule in `BASE` that claims precedence over a fragment, and it
 should stay the only one — the general case is still that a plugin owns what it contributes.
 
+**An action block ends the reply, and the protocol says so.** It used to ask for the intent before the block "and
+summarise the outcome after it", and two lines further down never to invent a result but to wait for it — two of the
+app's own sentences that cannot both be obeyed in one reply. Reported from a real session: asked for a playlist, a model
+chose `queue_music` in its first ten lines and then spent everything it had on that ("after the action block I will
+summarise the outcome — wait for the result first — since I don't know the result yet…") and on whether a rule under one
+plugin's heading applied to the action under the next. Same shape as the markdown rule, same cure: the rule is now one
+that can be followed — a plan, the block, stop; the outcome is the next reply's — and it says in words that a rule
+belongs to the heading it sits under and to decide once. The example names no capability, for the reason every fragment
+is absent rather than forbidden: it is in the prompt whichever plugins are on.
+
+**Reasoning that goes round in circles is stopped, and only reasoning.** Nothing else bounds it: a turn has no
+`max_tokens`, so a model repeating itself while it thinks runs until the window is full, and with thinking hidden —
+the default — all of it is "Thinking…". `isRunaway` in `client.mjs` looks at the tail of the reasoning for one passage
+repeating with a fixed period, five times and four hundred characters at least, and `streamChat` hangs up on the
+endpoint through a signal of its own so the stop is not reported as the user's. The answer itself is never watched:
+"print it fifty times" is a request, and cutting a reply short would be the app deciding what one may contain. What
+looped is not stored — the client keeps the part before it — and the turn ends with a sentence in the transcript
+(`reply:end` with `error`) rather than a blank, dispatching nothing: an action named inside reasoning is one the model
+was considering. There is deliberately no automatic retry; the next message is the retry, and it is the user's.
+
 **A disabled capability is absent from the system prompt, not forbidden in it.** A model told about a tool reaches for
 it, and the resulting refusal reads to the user as a bug. `buildSystemPrompt` assembles from parts; `prompts.test.mjs`
 guards this.

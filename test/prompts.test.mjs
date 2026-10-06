@@ -147,3 +147,35 @@ test('the fence comes back when no game is drawing its own moves', () => {
   assert.match(buildSystemPrompt({ fragments: ['FANTASY RPG'], choices: true }), /```choices/);
   assert.match(buildSystemPrompt({ fragments: [] }), /```choices/);
 });
+
+test('an action block ends the reply, and the outcome belongs to the next one', () => {
+  /**
+   * Reported from a real session, and the same shape as the markdown rule
+   * above: two of the app's own sentences that cannot both be obeyed. The
+   * protocol said to "summarise the outcome after" the block, and two lines
+   * further down never to invent a result but to wait for it. A model asked for
+   * a playlist chose the right action at once and then spent its whole budget
+   * on that — "after the action block I will summarise the outcome (wait for
+   * the result first). Since I don't know the result yet…" — and on whether a
+   * rule under one plugin's heading applied to the action under the next.
+   *
+   * It also wrote its intent in the past tense, as something already done,
+   * which is what "narrate" invites and what the user would have read.
+   */
+  const prompt = buildSystemPrompt({ fragments: ['ANYTHING'] });
+  assert.doesNotMatch(prompt, /summarise the\s+outcome after it/i);
+  assert.match(prompt, /the block ends the reply/i);
+  assert.match(prompt, /result comes back to you as the next message/i);
+  assert.match(prompt, /never as something already done/i);
+  // The two clauses that answer what the model was actually going round on.
+  assert.match(prompt, /A rule written under\s+one heading is about that action/i);
+  assert.match(prompt, /Decide once/);
+});
+
+test('the protocol names no capability of its own', () => {
+  // Its example is in the prompt whichever plugins are on. One that mentioned
+  // music would be the app describing a tool the session may not have, which
+  // is the thing this file exists to prevent.
+  const prompt = buildSystemPrompt({ fragments: ['ANYTHING'] });
+  assert.doesNotMatch(prompt, /pearl jam|playlist|queue/i);
+});

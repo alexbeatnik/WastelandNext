@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { streamChat } from '../src/main/llm/client.mjs';
+import { isRunaway, streamChat } from '../src/main/llm/client.mjs';
 
 /** Serve a fixed body as a streaming response, in chunks we control. */
 function fakeEndpoint(chunks, { status = 200 } = {}) {
@@ -196,5 +196,116 @@ test('a request that fails for its own reasons is still a failure', async () => 
     );
   } finally {
     globalThis.fetch = original;
+  }
+});
+
+/* ---------- reasoning that goes round in circles ---------- */
+
+/**
+ * The loop from the session that was reported, a turn of it.
+ *
+ * Asked for a playlist, the model chose the right action in its first ten
+ * lines and then wrote this until it was stopped — several hundred times, with
+ * nothing on screen but "Thinking…".
+ */
+const ROUND = [
+  'I will output the response.',
+  'I will not add any other text.',
+  'The user expects a confirmation.',
+  '"Я пограв весь плейліст пісень Перл джем." is the confirmation.',
+  '',
+  'I will output the response.',
+  'I will use the action block.',
+  '',
+].join('\n');
+
+const HEAD = [
+  'The user wants a playlist of songs by Pearl Jam.',
+  'I need to use the `queue_music` tool to create this playlist.',
+  'So I should use {"type":"queue_music","steps":"pearl jam"}.',
+  '',
+].join('\n');
+
+const reason = (t) => `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: t } }] })}\n`;
+
+test('a passage coming round again and again is a loop', () => {
+  assert.equal(isRunaway(HEAD + ROUND.repeat(8)), true);
+  // Whichever point of the cycle the stream happens to be at.
+  assert.equal(isRunaway(HEAD + ROUND.repeat(8) + 'I will output the resp'), true);
+  // One blank line or two between turns of it is the same loop.
+  assert.equal(isRunaway(HEAD + `${ROUND}\n`.repeat(4) + ROUND.repeat(4)), true);
+  // A single word, which is how the smallest models do it.
+  assert.equal(isRunaway(`Let me think. ${'the '.repeat(200)}`), true);
+});
+
+test('thinking that is merely long, or says a thing twice, is not', () => {
+  assert.equal(isRunaway(''), false);
+  assert.equal(isRunaway(HEAD), false);
+  // Coming back to a point is what deliberating is. Twice is not a loop, and
+  // neither is three times.
+  assert.equal(isRunaway(HEAD + ROUND.repeat(3)), false);
+  // A long list whose lines differ, however alike they look.
+  const steps = Array.from({ length: 200 }, (_, at) => `Step ${at + 1}: check item ${at * 7} against the list.`).join('\n');
+  assert.equal(isRunaway(steps), false);
+  // A loop that was left: the tail is new, so it is going somewhere again.
+  assert.equal(isRunaway(ROUND.repeat(8) + 'On reflection the request is simple, so the plan stands and the action goes out as written above.'), false);
+});
+
+test('reasoning that loops is stopped, and what looped is not kept', async () => {
+  const turns = Array.from({ length: 400 }, () => reason(ROUND));
+  const restore = fakeEndpoint([reason(HEAD), ...turns, delta('never reached')]);
+  try {
+    const seen = [];
+    const result = await streamChat({ baseUrl: 'http://x', messages: [], onToken: (t) => seen.push(t) });
+    assert.equal(result.runaway, true);
+    // Nobody pressed Stop, so it is not reported as one.
+    assert.equal(result.aborted, false);
+    // Stopped within a handful of turns of the loop, not at the end of it.
+    assert.ok(seen.length < 20, `listened to ${seen.length} chunks of it`);
+    // The part that was still thought survives; several hundred copies do not.
+    assert.match(result.text, /^<think>\nThe user wants a playlist/);
+    assert.ok(result.text.length < 2000, `kept ${result.text.length} characters of a loop`);
+    assert.doesNotMatch(result.text, /never reached/);
+  } finally {
+    restore();
+  }
+});
+
+test('a loop inside an inline <think> is stopped the same way', async () => {
+  // An endpoint that does not parse reasoning out leaves it in the content.
+  const restore = fakeEndpoint([delta(`<think>\n${HEAD}`), ...Array.from({ length: 200 }, () => delta(ROUND))]);
+  try {
+    const result = await streamChat({ baseUrl: 'http://x', messages: [] });
+    assert.equal(result.runaway, true);
+    assert.ok(result.text.length < 2000);
+    // Closed, so the rest of the app reads it as reasoning and not as an answer.
+    assert.match(result.text, /<\/think>\n$/);
+  } finally {
+    restore();
+  }
+});
+
+test('an answer may repeat itself as much as it was asked to', async () => {
+  // Only reasoning is watched. "Print it fifty times" is a request, and an
+  // answer cut short would be the app deciding what a reply may contain.
+  const line = 'All work and no play makes Jack a dull boy.\n';
+  const restore = fakeEndpoint(Array.from({ length: 120 }, () => delta(line)));
+  try {
+    const result = await streamChat({ baseUrl: 'http://x', messages: [] });
+    assert.equal(result.runaway, false);
+    assert.equal(result.text, line.repeat(120));
+  } finally {
+    restore();
+  }
+});
+
+test('a loop that ended inside its own </think> is not held against the answer', async () => {
+  const restore = fakeEndpoint([delta(`<think>\n${HEAD}${ROUND.repeat(2)}</think>\n`), ...Array.from({ length: 60 }, () => delta('la la la la\n'))]);
+  try {
+    const result = await streamChat({ baseUrl: 'http://x', messages: [] });
+    assert.equal(result.runaway, false);
+    assert.match(result.text, /la la la la\n$/);
+  } finally {
+    restore();
   }
 });
